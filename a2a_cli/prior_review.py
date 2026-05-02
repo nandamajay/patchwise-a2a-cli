@@ -205,8 +205,9 @@ def augment_findings_with_prior_comments(findings: list[dict], prior_comments: l
             continue
 
         linked = index.get(comment_id, [])
-        closed = any(str(item.get("status", "")).lower() == "closed" for item in linked)
-        if closed:
+        if linked:
+            # Reviewer already emitted a mapped finding for this prior comment.
+            # Do not duplicate it with an additional synthetic entry.
             continue
 
         subject = str(comment.get("subject") or "prior review comment").strip()

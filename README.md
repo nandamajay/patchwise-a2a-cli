@@ -191,6 +191,11 @@ Built-in runnable agents are available at:
 - `scripts/agents/builder_agent.py`
 - `scripts/agents/reviewer_aryabhatta.py`
 
+These scripts are revision-agnostic:
+
+- they do not rely on hardcoded `v1/v2/v3` filenames
+- they detect relevant patches using diff content signatures
+
 Example with real patch folder:
 
 ```bash
