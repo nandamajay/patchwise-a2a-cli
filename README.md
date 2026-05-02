@@ -183,3 +183,21 @@ When `--watch-path` points to patch files:
 - This is scaffold-only for now. The full orchestration loop from `DESIGN.md`
   will be implemented next.
 - `a2a status` inspects `.a2a` and reports active session metadata if present.
+
+## Real Agent Scripts
+
+Built-in runnable agents are available at:
+
+- `scripts/agents/builder_agent.py`
+- `scripts/agents/reviewer_aryabhatta.py`
+
+Example with real patch folder:
+
+```bash
+python -m a2a_cli.main loop \
+  --task "real-xo-sd-v3-validation" \
+  --max-rounds 3 \
+  --builder-cmd "python /local/mnt/workspace/A2A_CLI/scripts/agents/builder_agent.py" \
+  --reviewer-cmd "python /local/mnt/workspace/A2A_CLI/scripts/agents/reviewer_aryabhatta.py" \
+  --watch-path /local/mnt/workspace/upstream_patches/xo_sd_LPI/linux-next/patches/xo_sd_v3
+```
