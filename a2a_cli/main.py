@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -553,6 +554,202 @@ def _write_builder_change_artifacts(
     diff_path.write_text("".join(diff_chunks), encoding="utf-8")
 
 
+def _collect_watch_patch_files(watch_path: Path) -> list[Path]:
+    if watch_path.is_file() and watch_path.suffix == ".patch":
+        return [watch_path]
+    if watch_path.is_dir():
+        return sorted(p for p in watch_path.rglob("*.patch") if p.is_file())
+    return []
+
+
+def _round_changed_files_path(root: Path, session_id: str, round_no: int, reviewer_name: str) -> Path:
+    files = _round_files(root, session_id, round_no, reviewer_name)
+    return files["report_dir"] / f"{_round_basename(round_no, 'changed_files')}.txt"
+
+
+def _load_round_changed_paths(root: Path, session_id: str, round_no: int, reviewer_name: str) -> list[str]:
+    path = _round_changed_files_path(root, session_id, round_no, reviewer_name)
+    if not path.exists():
+        return []
+    return [ln.strip() for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def _resolve_gate_patch_targets(watch_path: Path, changed_rel_paths: list[str], round_no: int) -> list[Path]:
+    all_patches = _collect_watch_patch_files(watch_path)
+    if not all_patches:
+        return []
+
+    if watch_path.is_file():
+        return all_patches
+
+    selected: list[Path] = []
+    for rel in changed_rel_paths:
+        if not rel.endswith(".patch"):
+            continue
+        candidate = watch_path / rel
+        if candidate.exists() and candidate.is_file():
+            selected.append(candidate)
+
+    if selected:
+        seen: set[Path] = set()
+        out: list[Path] = []
+        for patch in selected:
+            if patch in seen:
+                continue
+            out.append(patch)
+            seen.add(patch)
+        return out
+
+    if int(round_no) == 1:
+        return all_patches
+    return []
+
+
+def _detect_kernel_repo_root(path: Path) -> Path | None:
+    start = path if path.is_dir() else path.parent
+    for candidate in [start, *start.parents]:
+        checkpatch = candidate / "scripts" / "checkpatch.pl"
+        if checkpatch.is_file():
+            return candidate
+    return None
+
+
+def _gate_artifacts(root: Path, session_id: str, round_no: int, reviewer_name: str) -> dict[str, Path]:
+    files = _round_files(root, session_id, round_no, reviewer_name)
+    logs_dir = root / A2A_DIRNAME / "logs" / session_id
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        "json": files["report_dir"] / f"{_round_basename(round_no, 'gate')}.json",
+        "log": logs_dir / f"{_round_basename(round_no, 'gate')}.log",
+    }
+
+
+def _run_validation_gate(root: Path, session: dict, round_no: int) -> tuple[bool, bool]:
+    cfg = _load_config(root)
+    enabled = bool(cfg.get("validation_gate_enabled", True))
+    strict = bool(cfg.get("validation_gate_strict", False))
+    run_checkpatch = bool(cfg.get("validation_gate_checkpatch", True))
+    timeout_sec = int(cfg.get("validation_gate_timeout_sec", 300))
+    custom_cmd = str(cfg.get("validation_gate_command") or "").strip()
+
+    reviewer_name = str(session.get("reviewer_name", "aryabhatta"))
+    artifacts = _gate_artifacts(root, str(session["id"]), round_no, reviewer_name)
+
+    payload: dict = {
+        "enabled": enabled,
+        "strict": strict,
+        "ran": False,
+        "passed": True,
+        "commands": [],
+        "failures": 0,
+        "generated_at": _now_utc(),
+    }
+
+    if not enabled:
+        dump_json(artifacts["json"], payload)
+        artifacts["log"].write_text("validation gate disabled by config\n", encoding="utf-8")
+        return True, False
+
+    watch_raw = str(session.get("watch_path") or "").strip()
+    if not watch_raw:
+        payload["passed"] = True
+        dump_json(artifacts["json"], payload)
+        artifacts["log"].write_text("validation gate skipped: no watch_path\n", encoding="utf-8")
+        return True, False
+
+    watch_path = Path(watch_raw)
+    commands: list[dict] = []
+    watch_cwd = watch_path if watch_path.is_dir() else watch_path.parent
+
+    if custom_cmd:
+        commands.append(
+            {
+                "name": "custom",
+                "command": custom_cmd,
+                "cwd": str(watch_cwd),
+            }
+        )
+
+    if run_checkpatch:
+        kernel_root = _detect_kernel_repo_root(watch_path)
+        if kernel_root is not None:
+            changed_rel = _load_round_changed_paths(root, str(session["id"]), round_no, reviewer_name)
+            patch_targets = _resolve_gate_patch_targets(watch_path, changed_rel, round_no)
+            if patch_targets:
+                max_files = int(cfg.get("validation_gate_max_checkpatch_files", 50))
+                patch_targets = patch_targets[:max_files]
+                checkpatch = kernel_root / "scripts" / "checkpatch.pl"
+                target_args = " ".join(shlex.quote(str(p)) for p in patch_targets)
+                cmd = f"{shlex.quote(str(checkpatch))} --no-tree --strict {target_args}"
+                commands.append(
+                    {
+                        "name": "checkpatch",
+                        "command": cmd,
+                        "cwd": str(kernel_root),
+                        "targets": [str(p) for p in patch_targets],
+                    }
+                )
+
+    payload["ran"] = bool(commands)
+    log_lines = [
+        f"session={session['id']}",
+        f"round={round_no}",
+        f"enabled={enabled}",
+        f"strict={strict}",
+        f"watch_path={watch_raw}",
+        f"commands_total={len(commands)}",
+        "",
+    ]
+
+    if not commands:
+        payload["passed"] = True
+        dump_json(artifacts["json"], payload)
+        artifacts["log"].write_text("\n".join(log_lines) + "no validation commands selected\n", encoding="utf-8")
+        return True, False
+
+    gate_passed = True
+    for index, cmd_info in enumerate(commands, start=1):
+        command = str(cmd_info["command"])
+        cwd = Path(str(cmd_info["cwd"]))
+        wrapped = f"timeout {timeout_sec} {command}" if timeout_sec > 0 else command
+        result = run_shell_command(wrapped, cwd=cwd, env=dict(os.environ))
+        rc = int(result["returncode"])
+        cmd_record = dict(cmd_info)
+        cmd_record["returncode"] = rc
+        cmd_record["ok"] = rc == 0
+        payload["commands"].append(cmd_record)
+        if rc != 0:
+            gate_passed = False
+            payload["failures"] = int(payload["failures"]) + 1
+
+        log_lines.extend(
+            [
+                f"## command {index}: {cmd_info['name']}",
+                f"cwd={cwd}",
+                f"command={wrapped}",
+                f"returncode={rc}",
+                "",
+                "stdout:",
+                result.get("stdout") or "",
+                "",
+                "stderr:",
+                result.get("stderr") or "",
+                "",
+            ]
+        )
+
+    payload["passed"] = gate_passed
+    dump_json(artifacts["json"], payload)
+    artifacts["log"].write_text("\n".join(log_lines), encoding="utf-8")
+
+    status = "passed" if gate_passed else "failed"
+    print(f"validation gate {status}. Log: {artifacts['log']}")
+    if not gate_passed and strict:
+        print("validation gate strict mode: stopping session due to failed checks.")
+        return False, True
+    return True, True
+
+
 def _load_findings_from_file(path: Path) -> list[dict]:
     try:
         return _load_findings_payload(path)
@@ -982,6 +1179,17 @@ def _session_report_payload(root: Path, session_id: str) -> dict:
             findings = _extract_effective_round_findings(session, row)
             row["reviewer_confidence"] = _compute_reviewer_confidence(findings)
 
+        gate_json = _gate_artifacts(root, session_id, round_no, reviewer_name)["json"]
+        if gate_json.exists():
+            gate_payload = load_json(gate_json)
+            if isinstance(gate_payload, dict):
+                row["gate_ran"] = bool(gate_payload.get("ran", False))
+                row["gate_passed"] = bool(gate_payload.get("passed", True))
+                row["gate_failures"] = int(gate_payload.get("failures", 0))
+        row.setdefault("gate_ran", False)
+        row.setdefault("gate_passed", None)
+        row.setdefault("gate_failures", 0)
+
         previous_open = findings_open
         rounds.append(row)
 
@@ -1009,9 +1217,16 @@ def _session_report_payload(root: Path, session_id: str) -> dict:
         "rounds_validated": len(rounds),
         "findings_total": 0,
         "findings_open_last": session.get("open_findings"),
+        "gate_failures_total": 0,
+        "gate_failed_rounds": 0,
     }
     for record in rounds:
         totals["findings_total"] += int(record.get("findings_total", 0))
+        failures = int(record.get("gate_failures", 0))
+        totals["gate_failures_total"] += failures
+        gate_passed = record.get("gate_passed")
+        if gate_passed is False:
+            totals["gate_failed_rounds"] += 1
 
     payload = {
         "session": {
@@ -1106,6 +1321,8 @@ def _render_markdown_report(payload: dict) -> str:
         f"- rounds_validated: {totals.get('rounds_validated')}",
         f"- findings_total: {totals.get('findings_total')}",
         f"- findings_open_last: {totals.get('findings_open_last')}",
+        f"- gate_failures_total: {totals.get('gate_failures_total')}",
+        f"- gate_failed_rounds: {totals.get('gate_failed_rounds')}",
     ]
     if isinstance(prior, dict):
         lines.append(f"- prior_comments_total: {prior.get('comments_total')}")
@@ -1124,13 +1341,16 @@ def _render_markdown_report(payload: dict) -> str:
         for r in rounds:
             lines.append(
                 "- round {round}: findings_total={total}, findings_open={open}, "
-                "builder_patch_gauge={gauge}, builder_confidence={bconf}, reviewer_confidence={rconf}, validated_at={ts}".format(
+                "builder_patch_gauge={gauge}, builder_confidence={bconf}, reviewer_confidence={rconf}, "
+                "gate_passed={gate_passed}, gate_failures={gate_failures}, validated_at={ts}".format(
                     round=r.get("round"),
                     total=r.get("findings_total"),
                     open=r.get("findings_open"),
                     gauge=r.get("builder_patch_gauge"),
                     bconf=r.get("builder_confidence"),
                     rconf=r.get("reviewer_confidence"),
+                    gate_passed=r.get("gate_passed"),
+                    gate_failures=r.get("gate_failures"),
                     ts=r.get("validated_at"),
                 )
             )
@@ -1660,6 +1880,10 @@ def cmd_loop(args: argparse.Namespace) -> int:
             rc = _run_agent_step(root, session, "builder", builder_cmd, round_no)
             if rc != 0:
                 return rc
+
+            gate_ok, _gate_ran = _run_validation_gate(root, session, round_no)
+            if not gate_ok:
+                return 1
 
             rc = _run_agent_step(root, session, "reviewer", reviewer_cmd, round_no)
             if rc != 0:

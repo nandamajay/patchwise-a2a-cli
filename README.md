@@ -133,6 +133,12 @@ Common keys:
 - `llm_native_default` (default true; auto-uses LLM-native builder/reviewer wrappers)
 - `llm_native_strict` (default true; fail if LLM run fails)
 - `llm_native_fallback` (default false; allow deterministic fallback on LLM failure)
+- `validation_gate_enabled` (default true; run validation gate in autonomous loop)
+- `validation_gate_strict` (default false; stop loop on gate failures when true)
+- `validation_gate_checkpatch` (default true; run kernel `checkpatch.pl` when available)
+- `validation_gate_timeout_sec` (default 300; per-gate command timeout)
+- `validation_gate_max_checkpatch_files` (default 50)
+- `validation_gate_command` (optional custom shell command for additional validation)
 - `prior_review_gate` (auto-open findings for unresolved historical comments)
 - `prior_review_search` (search lore by author/subject if vN>1 and no link found)
 - `prior_review_max_comments`
@@ -149,6 +155,12 @@ Common keys:
   - `builder_confidence`
   - `reviewer_confidence`
   - confidence values are heuristic operational signals (range 1-95), not calibrated probabilities
+- includes per-round validation gate outcomes:
+  - `gate_passed`
+  - `gate_failures`
+- includes session-level gate totals:
+  - `gate_failures_total`
+  - `gate_failed_rounds`
 - includes prior-comment closure summary table:
   - initial vs current status per `source_comment_id`
   - whether it was fixed during A2A rounds (`fixed_by_a2a`)
@@ -211,6 +223,10 @@ When `--watch-path` points to patch files:
 - This is scaffold-only for now. The full orchestration loop from `DESIGN.md`
   will be implemented next.
 - `a2a status` inspects `.a2a` and reports active session metadata if present.
+- During `a2a loop`, a validation gate runs before reviewer step (configurable):
+  - built-in kernel patch checks via `scripts/checkpatch.pl` when detectable
+  - optional custom command via `validation_gate_command`
+  - strict mode can stop the loop on failed validations
 
 ## LLM Native Default
 
