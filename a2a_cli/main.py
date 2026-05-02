@@ -379,6 +379,10 @@ def _run_agent_step(root: Path, session: dict, role: str, command: str, round_no
         f.write(result["stdout"] or "")
         f.write("\n\nstderr:\n")
         f.write(result["stderr"] or "")
+        f.write("\n\nartifacts:\n")
+        f.write(f"builder_file={files['builder']}\n")
+        f.write(f"reviewer_file={files['reviewer']}\n")
+        f.write(f"findings_file={files['findings']}\n")
 
     if result["returncode"] != 0:
         print(f"{role} command failed (rc={result['returncode']}). See log: {log_path}")
@@ -393,6 +397,11 @@ def _run_agent_step(root: Path, session: dict, role: str, command: str, round_no
         _write_builder_change_artifacts(root, session, round_no, watch_before, watch_after)
 
     print(f"{role} command completed. Log: {log_path}")
+    if role == "builder":
+        print(f"{role} report: {files['builder']}")
+    else:
+        print(f"{role} report: {files['reviewer']}")
+        print(f"{role} findings: {files['findings']}")
     return 0
 
 

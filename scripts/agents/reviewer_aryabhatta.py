@@ -161,6 +161,8 @@ def check_va_runtime_fix(docs: list[PatchDoc]) -> tuple[bool, list[str], str]:
         ev.append(f"Found autosuspend put path at line {l_auto}.")
     if l_put_sync:
         ev.append(f"Found probe unwind sync put at line {l_put_sync}.")
+    else:
+        ev.append("Missing probe unwind sync put path (pm_runtime_put_sync).")
 
     ok = True
     if l_noidle:
@@ -357,6 +359,12 @@ def main() -> int:
 
     save_json(findings_file, {"findings": findings})
     write_review_markdown(review_file, findings)
+
+    open_count = sum(1 for finding in findings if str(finding.get("status", "")).lower() != "closed")
+    closed_count = len(findings) - open_count
+    print(f"[aryabhatta] findings_total={len(findings)} closed={closed_count} open={open_count}")
+    print(f"[aryabhatta] review_file={review_file}")
+    print(f"[aryabhatta] findings_file={findings_file}")
     return 0
 
 

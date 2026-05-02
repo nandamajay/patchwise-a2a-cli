@@ -141,11 +141,21 @@ def main() -> int:
                 "pm_runtime_put_noidle(va->dev);",
                 "pm_runtime_put_autosuspend(va->dev);",
             )
+            changed_sync = replace_once(
+                va_patch.path,
+                "pm_runtime_put_noidle(dev);",
+                "pm_runtime_put_sync(dev);",
+            )
             if changed_now:
                 changed.append(str(va_patch.path))
                 actions.append("Replaced pm_runtime_put_noidle() with pm_runtime_put_autosuspend() in VA patch.")
+            if changed_sync:
+                if str(va_patch.path) not in changed:
+                    changed.append(str(va_patch.path))
+                actions.append("Replaced pm_runtime_put_noidle(dev) with pm_runtime_put_sync(dev) in VA patch.")
             else:
-                actions.append("No noidle->autosuspend replacement required in VA patch.")
+                if not changed_now:
+                    actions.append("No runtime PM noidle->sync/autosuspend replacement required in VA patch.")
 
         elif "077cec8c-f6a3-4ee8-8ccf-7bc2e540bc61" in cid or "29c02913-25a7-4269-9fa6-6f44c94ccefa" in cid:
             risks.append(
@@ -156,6 +166,17 @@ def main() -> int:
             actions.append("Mark-last-busy concern is handled via autosuspend semantics evidence.")
 
     write_builder_markdown(builder_file, changed, actions, risks)
+    print(f"[builder] changed_files={len(changed)} open_prev_findings={len(open_prev)}")
+    if changed:
+        for item in changed:
+            print(f"[builder] changed: {item}")
+    if actions:
+        for item in actions:
+            print(f"[builder] action: {item}")
+    if risks:
+        for item in risks:
+            print(f"[builder] risk: {item}")
+    print(f"[builder] builder_file={builder_file}")
     return 0
 
 
