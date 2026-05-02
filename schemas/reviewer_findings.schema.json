@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "A2A Reviewer Findings",
+  "type": "object",
+  "required": ["findings"],
+  "additionalProperties": false,
+  "properties": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "title",
+          "location",
+          "evidence",
+          "required_action",
+          "status",
+          "source_comment_id"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low"]
+          },
+          "title": {"type": "string", "minLength": 1},
+          "location": {
+            "type": "string",
+            "pattern": ".+:[0-9]+$"
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "required_action": {"type": "string", "minLength": 1},
+          "status": {"type": "string", "enum": ["open", "closed"]},
+          "source_comment_id": {"type": "string"}
+        }
+      }
+    }
+  }
+}

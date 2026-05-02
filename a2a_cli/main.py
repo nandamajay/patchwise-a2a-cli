@@ -2,6 +2,7 @@ import argparse
 import difflib
 import json
 import os
+import re
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -16,6 +17,10 @@ from .prior_review import (
     render_prior_comment_matrix,
 )
 from .types import StatusView
+
+
+_REV_TRAILING_RE = re.compile(r"^(?P<prefix>.*?)(?P<sep>[_-])v(?P<num>\d+)$", re.IGNORECASE)
+_REV_PREFIX_RE = re.compile(r"^v(?P<num>\d+)-(?P<rest>.+)$", re.IGNORECASE)
 
 
 def _repo_root_from_module() -> Path:
@@ -123,6 +128,21 @@ def _config_path(root: Path) -> Path:
     return root / A2A_DIRNAME / "config.json"
 
 
+def _load_config(root: Path) -> dict:
+    cfg_path = _config_path(root)
+    cfg = load_json(cfg_path)
+    defaults = default_config()
+    changed = False
+    for key, value in defaults.items():
+        if key in cfg:
+            continue
+        cfg[key] = value
+        changed = True
+    if changed:
+        dump_json(cfg_path, cfg)
+    return cfg
+
+
 def _state_path(root: Path) -> Path:
     return root / A2A_DIRNAME / "state.json"
 
@@ -138,6 +158,64 @@ def _report_dir(root: Path, session_id: str) -> Path:
 def _next_session_id() -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
     return f"sess-{stamp}"
+
+
+def _increment_revision_stem(stem: str) -> str:
+    prefix_match = _REV_PREFIX_RE.match(stem)
+    if prefix_match:
+        num = int(prefix_match.group("num"))
+        return f"v{num + 1}-{prefix_match.group('rest')}"
+
+    trailing_match = _REV_TRAILING_RE.match(stem)
+    if trailing_match:
+        num = int(trailing_match.group("num"))
+        return (
+            f"{trailing_match.group('prefix')}"
+            f"{trailing_match.group('sep')}v{num + 1}"
+        )
+
+    return f"v2-{stem}"
+
+
+def _default_respin_output_path(source: Path) -> Path:
+    if source.is_dir():
+        name_match = _REV_TRAILING_RE.match(source.name)
+        if name_match:
+            num = int(name_match.group("num"))
+            next_name = (
+                f"{name_match.group('prefix')}"
+                f"{name_match.group('sep')}v{num + 1}"
+            )
+        else:
+            next_name = f"{source.name}_v2"
+        return source.parent / next_name
+
+    if source.is_file():
+        next_stem = _increment_revision_stem(source.stem)
+        return source.with_name(f"{next_stem}{source.suffix}")
+
+    raise RuntimeError(f"Source path does not exist: {source}")
+
+
+def _copy_respin_source(source: Path, output: Path, force: bool) -> None:
+    if output.exists():
+        if not force:
+            raise RuntimeError(
+                f"Respin output path already exists: {output} (use --force to overwrite)"
+            )
+        if output.is_dir():
+            shutil.rmtree(output)
+        else:
+            output.unlink()
+
+    if source.is_dir():
+        shutil.copytree(source, output)
+        return
+    if source.is_file():
+        output.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, output)
+        return
+    raise RuntimeError(f"Respin source path does not exist: {source}")
 
 
 def _round_basename(round_no: int, suffix: str) -> str:
@@ -180,7 +258,6 @@ def _write_round_templates(root: Path, session_id: str, round_no: int, reviewer_
         "## Verdict\n- pending | LGTM\n"
     )
     findings_tpl = {
-        "round": round_no,
         "findings": [],
     }
 
@@ -206,7 +283,15 @@ def _load_findings_payload(path: Path) -> list[dict]:
 def _validate_findings(findings: list[dict], strict_evidence: bool) -> tuple[list[str], int]:
     errors: list[str] = []
     open_count = 0
-    required = {"severity", "title", "location", "evidence", "required_action", "status"}
+    required = {
+        "severity",
+        "title",
+        "location",
+        "evidence",
+        "required_action",
+        "status",
+        "source_comment_id",
+    }
 
     for idx, entry in enumerate(findings, start=1):
         if not isinstance(entry, dict):
@@ -256,6 +341,22 @@ def _write_session(root: Path, session: dict) -> None:
 def _agent_env(session: dict, round_no: int, files: dict[str, Path], role: str) -> dict[str, str]:
     env = dict(os.environ)
     watch_path = session.get("watch_path")
+    llm_native = session.get("llm_native")
+    llm_strict = True
+    llm_fallback = False
+    if isinstance(llm_native, dict):
+        llm_strict = bool(llm_native.get("strict", True))
+        llm_fallback = bool(llm_native.get("fallback", False))
+    llm_timeout_sec = 900
+    if isinstance(llm_native, dict):
+        try:
+            llm_timeout_sec = int(llm_native.get("timeout_sec", 900))
+        except (TypeError, ValueError):
+            llm_timeout_sec = 900
+
+    repo_root = _repo_root_from_module()
+    fallback_builder_cmd = f"python {repo_root / 'scripts' / 'agents' / 'builder_agent.py'}"
+    fallback_reviewer_cmd = f"python {repo_root / 'scripts' / 'agents' / 'reviewer_aryabhatta.py'}"
     env.update(
         {
             "A2A_SESSION_ID": str(session["id"]),
@@ -272,6 +373,11 @@ def _agent_env(session: dict, round_no: int, files: dict[str, Path], role: str) 
             "A2A_PRIOR_COMMENTS_FILE": "",
             "A2A_PRIOR_MATRIX_FILE": "",
             "A2A_PRIOR_COMMENTS_TOTAL": "0",
+            "A2A_LLM_STRICT": "1" if llm_strict else "0",
+            "A2A_ALLOW_FALLBACK": "1" if llm_fallback else "0",
+            "A2A_FALLBACK_BUILDER_CMD": fallback_builder_cmd,
+            "A2A_FALLBACK_REVIEWER_CMD": fallback_reviewer_cmd,
+            "A2A_LLM_TIMEOUT_SEC": str(llm_timeout_sec),
         }
     )
     prior = session.get("prior_review")
@@ -289,9 +395,15 @@ def _snapshot_text_files(base: Path) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     if not base.exists():
         return out
-    files = [p for p in sorted(base.rglob("*")) if p.is_file()]
+
+    files: list[Path] = []
+    if base.is_file():
+        files = [base]
+    else:
+        files = [p for p in sorted(base.rglob("*")) if p.is_file()]
+
     for path in files:
-        rel = str(path.relative_to(base))
+        rel = path.name if base.is_file() else str(path.relative_to(base))
         try:
             content = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
@@ -413,6 +525,28 @@ def _resolve_agent_command(cfg: dict, args_value: str | None, key: str) -> str |
         return None
     value = str(value).strip()
     return value or None
+
+
+def _llm_wrapper_command(root: Path, role: str) -> str:
+    scripts_dir = root / "scripts" / "agents"
+    if role == "builder":
+        wrapper = scripts_dir / "builder_llm_native.sh"
+    else:
+        wrapper = scripts_dir / "reviewer_llm_native.sh"
+    return f"bash {wrapper}"
+
+
+def _resolve_default_agent_commands(root: Path, cfg: dict, builder_cmd: str | None, reviewer_cmd: str | None) -> tuple[str | None, str | None]:
+    if builder_cmd and reviewer_cmd:
+        return builder_cmd, reviewer_cmd
+
+    llm_native_default = bool(cfg.get("llm_native_default", True))
+    if llm_native_default:
+        if not builder_cmd:
+            builder_cmd = _llm_wrapper_command(root, "builder")
+        if not reviewer_cmd:
+            reviewer_cmd = _llm_wrapper_command(root, "reviewer")
+    return builder_cmd, reviewer_cmd
 
 
 def _parse_value(raw: str) -> object:
@@ -742,7 +876,7 @@ def _start_session(
     reviewer_command: str | None = None,
     watch_path: str | None = None,
 ) -> dict:
-    cfg = load_json(root / A2A_DIRNAME / "config.json")
+    cfg = _load_config(root)
     prep = load_json(_prepare_path(root))
     state_path = root / A2A_DIRNAME / "state.json"
     state = load_json(state_path)
@@ -768,6 +902,12 @@ def _start_session(
         "builder_command": builder_command,
         "reviewer_command": reviewer_command,
         "watch_path": watch_path,
+        "llm_native": {
+            "default": bool(cfg.get("llm_native_default", True)),
+            "strict": bool(cfg.get("llm_native_strict", True)),
+            "fallback": bool(cfg.get("llm_native_fallback", False)),
+            "timeout_sec": int(cfg.get("llm_native_timeout_sec", 900)),
+        },
     }
 
     prior_gate = bool(cfg.get("prior_review_gate", True))
@@ -823,7 +963,7 @@ def _append_summary_verdict(root: Path, session_id: str, verdict: str) -> None:
 def _validate_round_only(
     root: Path, session_id: str, round_no: int | None = None
 ) -> tuple[dict, int, list[dict], list[str], Path]:
-    cfg = load_json(root / A2A_DIRNAME / "config.json")
+    cfg = _load_config(root)
     strict = bool(cfg.get("strict_evidence", True))
     prior_gate = bool(cfg.get("prior_review_gate", True))
     session = _load_session(root, session_id)
@@ -934,10 +1074,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             print("Missing .a2a/prepare.json. Run: a2a prepare")
             return 1
 
-        cfg = load_json(root / A2A_DIRNAME / "config.json")
+        cfg = _load_config(root)
         max_rounds = args.max_rounds or int(cfg.get("default_max_rounds", 6))
         builder_cmd = _resolve_agent_command(cfg, args.builder_cmd, "builder_command")
         reviewer_cmd = _resolve_agent_command(cfg, args.reviewer_cmd, "reviewer_command")
+        builder_cmd, reviewer_cmd = _resolve_default_agent_commands(root, cfg, builder_cmd, reviewer_cmd)
         watch_path = str(Path(args.watch_path).resolve()) if args.watch_path else None
 
         if args.resume:
@@ -1006,10 +1147,11 @@ def cmd_loop(args: argparse.Namespace) -> int:
             print("Missing .a2a/prepare.json. Run: a2a prepare")
             return 1
 
-        cfg = load_json(_config_path(root))
+        cfg = _load_config(root)
         max_rounds = args.max_rounds or int(cfg.get("default_max_rounds", 6))
         builder_cmd = _resolve_agent_command(cfg, args.builder_cmd, "builder_command")
         reviewer_cmd = _resolve_agent_command(cfg, args.reviewer_cmd, "reviewer_command")
+        builder_cmd, reviewer_cmd = _resolve_default_agent_commands(root, cfg, builder_cmd, reviewer_cmd)
         watch_path = str(Path(args.watch_path).resolve()) if args.watch_path else None
 
         if args.session and args.task:
@@ -1097,12 +1239,47 @@ def cmd_loop(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_respin(args: argparse.Namespace) -> int:
+    try:
+        _must_find_root()
+        source = Path(args.input_path).resolve()
+        if not source.exists():
+            print(f"Respin input path not found: {source}")
+            return 1
+
+        output = Path(args.out_path).resolve() if args.out_path else _default_respin_output_path(source)
+        if output == source:
+            print("Respin output path must differ from input path. Use --out-path to choose a new location.")
+            return 1
+
+        _copy_respin_source(source, output, force=bool(args.force))
+        print(f"Created respin path: {output}")
+
+        loop_args = argparse.Namespace(
+            session=None,
+            task=args.task or f"respin-{output.name}",
+            max_rounds=args.max_rounds,
+            timeout_min=args.timeout_min,
+            builder_cmd=args.builder_cmd,
+            reviewer_cmd=args.reviewer_cmd,
+            watch_path=str(output),
+            max_iterations=args.max_iterations,
+        )
+        rc = cmd_loop(loop_args)
+        print(f"Respin watch path: {output}")
+        return rc
+    except RuntimeError as exc:
+        print(str(exc))
+        return 1
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     try:
         root = _must_find_root()
-        cfg = load_json(root / A2A_DIRNAME / "config.json")
+        cfg = _load_config(root)
         state = load_json(root / A2A_DIRNAME / "state.json")
         reviewer_cmd = _resolve_agent_command(cfg, args.reviewer_cmd, "reviewer_command")
+        _builder_default, reviewer_cmd = _resolve_default_agent_commands(root, cfg, None, reviewer_cmd)
 
         session_id = args.session or state.get("active_session_id")
         if not session_id:
@@ -1167,7 +1344,7 @@ def cmd_review(args: argparse.Namespace) -> int:
 def cmd_config_get(args: argparse.Namespace) -> int:
     try:
         root = _must_find_root()
-        cfg = load_json(_config_path(root))
+        cfg = _load_config(root)
         if args.key:
             if args.key not in cfg:
                 print(f"Config key not found: {args.key}")
@@ -1194,7 +1371,7 @@ def cmd_config_set(args: argparse.Namespace) -> int:
     try:
         root = _must_find_root()
         cfg_path = _config_path(root)
-        cfg = load_json(cfg_path)
+        cfg = _load_config(root)
         key = args.key
         value = _parse_value(args.value)
         cfg[key] = value
@@ -1461,6 +1638,53 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional per-invocation cap on autonomous rounds.",
     )
     p_loop.set_defaults(func=cmd_loop)
+
+    p_respin = sub.add_parser(
+        "respin",
+        help="Create a next-revision patch path and run autonomous loop against it.",
+    )
+    p_respin.add_argument(
+        "--input-path",
+        required=True,
+        help="Source patch file or patch-series directory to respin.",
+    )
+    p_respin.add_argument(
+        "--out-path",
+        help="Output path for respin patches. Defaults to auto-incremented vN path.",
+    )
+    p_respin.add_argument(
+        "--task",
+        help="Task label for the autonomous respin session.",
+    )
+    p_respin.add_argument(
+        "--max-rounds",
+        type=int,
+        help="Maximum review/fix rounds for respin session.",
+    )
+    p_respin.add_argument(
+        "--timeout-min",
+        type=int,
+        help="Optional time budget in minutes (metadata only in this version).",
+    )
+    p_respin.add_argument(
+        "--builder-cmd",
+        help="Shell command to execute builder step (overrides config builder_command).",
+    )
+    p_respin.add_argument(
+        "--reviewer-cmd",
+        help="Shell command to execute reviewer step (overrides config reviewer_command).",
+    )
+    p_respin.add_argument(
+        "--max-iterations",
+        type=int,
+        help="Optional per-invocation cap on autonomous rounds.",
+    )
+    p_respin.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite respin output path if it already exists.",
+    )
+    p_respin.set_defaults(func=cmd_respin)
 
     p_review = sub.add_parser(
         "review",

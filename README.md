@@ -27,7 +27,8 @@ From repository root:
 python -m a2a_cli.main init
 python -m a2a_cli.main prepare --repo /path/to/target-repo --branch a2a/my-task
 python -m a2a_cli.main run --task "Describe task"
-python -m a2a_cli.main loop --task "Autonomous task" --builder-cmd "<cmd>" --reviewer-cmd "<cmd>"
+python -m a2a_cli.main loop --task "Autonomous task"
+python -m a2a_cli.main respin --input-path /path/to/patch_or_series --task "Create v2"
 python -m a2a_cli.main review --session <session-id> --advance
 python -m a2a_cli.main config set reviewer_command "./scripts/reviewer.sh"
 python -m a2a_cli.main config get --json
@@ -43,7 +44,8 @@ alias a2a='python -m a2a_cli.main'
 a2a init
 a2a prepare --repo /path/to/target-repo --branch a2a/my-task
 a2a run --task "Describe task"
-a2a loop --task "Autonomous task" --builder-cmd "<cmd>" --reviewer-cmd "<cmd>"
+a2a loop --task "Autonomous task"
+a2a respin --input-path /path/to/patch_or_series --task "Create v2"
 a2a review --session <session-id> --advance
 a2a config get
 a2a report --latest --format json
@@ -108,6 +110,15 @@ a2a status
 - Optional:
   - `--max-iterations` to bound rounds in one invocation
 
+## What `a2a respin` does
+
+- Creates a new patch revision path from an existing file or directory:
+  - directory input default: `<name>_v2` (or increments trailing `_vN`/`-vN`)
+  - file input default: `v2-<filename>` (or increments `vN-`/trailing `_vN`/`-vN`)
+- Runs autonomous builder+reviewer loop on the new path (`--watch-path` is auto-set).
+- Keeps original source patch path unchanged unless you explicitly use `--out-path` that overlaps it.
+- Supports `--force` to overwrite an existing output path.
+
 ## What `a2a config` does
 
 - `a2a config get [--key KEY] [--json]`
@@ -119,6 +130,9 @@ Common keys:
 
 - `reviewer_name`
 - `strict_evidence`
+- `llm_native_default` (default true; auto-uses LLM-native builder/reviewer wrappers)
+- `llm_native_strict` (default true; fail if LLM run fails)
+- `llm_native_fallback` (default false; allow deterministic fallback on LLM failure)
 - `prior_review_gate` (auto-open findings for unresolved historical comments)
 - `prior_review_search` (search lore by author/subject if vN>1 and no link found)
 - `prior_review_max_comments`
@@ -156,6 +170,11 @@ When builder/reviewer commands are executed, these env vars are provided:
 - `A2A_PRIOR_COMMENTS_FILE`
 - `A2A_PRIOR_MATRIX_FILE`
 - `A2A_PRIOR_COMMENTS_TOTAL`
+- `A2A_LLM_STRICT`
+- `A2A_ALLOW_FALLBACK`
+- `A2A_FALLBACK_BUILDER_CMD`
+- `A2A_FALLBACK_REVIEWER_CMD`
+- `A2A_LLM_TIMEOUT_SEC`
 
 ## Builder Change Artifacts
 
@@ -184,19 +203,49 @@ When `--watch-path` points to patch files:
   will be implemented next.
 - `a2a status` inspects `.a2a` and reports active session metadata if present.
 
+## LLM Native Default
+
+`a2a run/loop/review` now use LLM-native agents by default when command flags/config are unset:
+
+- `scripts/agents/builder_llm_native.sh`
+- `scripts/agents/reviewer_llm_native.sh`
+
+These wrappers call `qgenie agent exec` directly.
+You can still override with `--builder-cmd` / `--reviewer-cmd` or config keys.
+
 ## Real Agent Scripts
 
 Built-in runnable agents are available at:
 
 - `scripts/agents/builder_agent.py`
 - `scripts/agents/reviewer_aryabhatta.py`
+- `scripts/agents/builder_llm_native.sh` (default path)
+- `scripts/agents/reviewer_llm_native.sh` (default path)
 
 These scripts are revision-agnostic:
 
 - they do not rely on hardcoded `v1/v2/v3` filenames
 - they detect relevant patches using diff content signatures
 
-Example with real patch folder:
+Example with default LLM-native mode:
+
+```bash
+python -m a2a_cli.main loop \
+  --task "real-xo-sd-v3-validation" \
+  --max-rounds 3 \
+  --watch-path /local/mnt/workspace/upstream_patches/xo_sd_LPI/linux-next/patches/xo_sd_v3
+```
+
+Example creating `v2` from a single posted base patch:
+
+```bash
+python -m a2a_cli.main respin \
+  --input-path /local/mnt/workspace/upstream_patches/wcd_aux/linux-next/0001-ASoC-codecs-wcd937x-enable-AUX-PA-and-add-AUX-relate.patch \
+  --task "wcd937x-aux-v2-respin" \
+  --max-rounds 3
+```
+
+Example forcing deterministic scripts (manual override):
 
 ```bash
 python -m a2a_cli.main loop \
@@ -205,4 +254,47 @@ python -m a2a_cli.main loop \
   --builder-cmd "python /local/mnt/workspace/A2A_CLI/scripts/agents/builder_agent.py" \
   --reviewer-cmd "python /local/mnt/workspace/A2A_CLI/scripts/agents/reviewer_aryabhatta.py" \
   --watch-path /local/mnt/workspace/upstream_patches/xo_sd_LPI/linux-next/patches/xo_sd_v3
+```
+
+## Live `screen` Sessions (Builder + Reviewer + Logs)
+
+You can launch parallel live screens with:
+
+```bash
+scripts/launch_live_screens.sh \
+  --task "xo-sd-live-round" \
+  --watch-path /local/mnt/workspace/upstream_patches/xo_sd_LPI/linux-next/patches/xo_sd_v3 \
+  --max-rounds 3
+```
+
+Or reuse an existing session:
+
+```bash
+scripts/launch_live_screens.sh --session <session-id>
+```
+
+Preview without launching:
+
+```bash
+scripts/launch_live_screens.sh --session <session-id> --dry-run
+```
+
+Then attach:
+
+```bash
+screen -r a2a-builder
+screen -r a2a-reviewer
+screen -r a2a-logs
+```
+
+What each screen shows:
+
+- `a2a-builder`: live builder agent run (`qgenie` output, edits/commands, final builder report write status).
+- `a2a-reviewer`: waits for builder report, then live reviewer run (`qgenie` output, schema-constrained findings summary, review/findings file paths).
+- `a2a-logs`: combined `tail -F` of round builder/reviewer log files under `.a2a/logs/<session-id>/`.
+
+After both agents finish:
+
+```bash
+python -m a2a_cli.main review --session <session-id> --advance
 ```
