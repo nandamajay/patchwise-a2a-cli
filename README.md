@@ -119,6 +119,9 @@ Common keys:
 
 - `reviewer_name`
 - `strict_evidence`
+- `prior_review_gate` (auto-open findings for unresolved historical comments)
+- `prior_review_search` (search lore by author/subject if vN>1 and no link found)
+- `prior_review_max_comments`
 - `default_max_rounds`
 - `builder_command`
 - `reviewer_command`
@@ -150,6 +153,9 @@ When builder/reviewer commands are executed, these env vars are provided:
 - `A2A_REVIEW_FILE`
 - `A2A_FINDINGS_FILE`
 - `A2A_WATCH_PATH`
+- `A2A_PRIOR_COMMENTS_FILE`
+- `A2A_PRIOR_MATRIX_FILE`
+- `A2A_PRIOR_COMMENTS_TOTAL`
 
 ## Builder Change Artifacts
 
@@ -159,6 +165,18 @@ When `--watch-path` is provided to `run` or `loop`, each builder round writes:
 - `round-XX-builder.diff`
 
 under `.a2a/reports/<session-id>/`.
+
+## Prior-Review Ingestion Gate
+
+When `--watch-path` points to patch files:
+
+- A2A scans cover letter/patch messages for prior-version links (`v1: ...`, `Link: ...`, lore URLs).
+- If patch version is `v2+` and links are missing, A2A searches lore by author + subject.
+- A2A ingests reviewer comments into:
+  - `.a2a/reports/<session-id>/prior_comments.json`
+  - `.a2a/reports/<session-id>/prior_comment_matrix.md`
+- During validation, unresolved prior comments are injected as open findings (using `source_comment_id`),
+  so `LGTM` is blocked until they are explicitly closed with evidence.
 
 ## Notes
 

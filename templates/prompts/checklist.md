@@ -11,6 +11,8 @@
 - Findings include `path:line`.
 - Verification commands are reported clearly.
 - Claims are traceable to code or command output.
+- If prior-review context exists, each historical comment has an explicit
+  `source_comment_id` mapping and closure status.
 
 ## Quality
 

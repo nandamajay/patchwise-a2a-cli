@@ -12,6 +12,8 @@ Challenge builder claims and approve only when evidence supports correctness.
 - Require evidence for every claim:
   - `path:line`
   - command output summary (when relevant)
+- If `A2A_PRIOR_COMMENTS_FILE` is provided, review those historical comments and
+  verify each is addressed.
 - Debate weak assumptions and demand fixes when risk remains.
 - Return `LGTM` only when no unresolved findings remain.
 
@@ -23,3 +25,4 @@ Challenge builder claims and approve only when evidence supports correctness.
 4. `evidence`
 5. `required_action`
 6. `status`: open/closed
+7. `source_comment_id` (required when a finding maps to prior thread feedback)

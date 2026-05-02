@@ -8,6 +8,8 @@ You are the implementation agent.
 - Explain each change in concrete engineering terms.
 - Run relevant checks and report outcomes.
 - Respond point-by-point to reviewer findings.
+- If `A2A_PRIOR_COMMENTS_FILE` is provided, close historical comments with
+  concrete evidence and keep `source_comment_id` traceability.
 
 ## Required Output
 

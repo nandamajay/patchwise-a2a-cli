@@ -9,6 +9,12 @@ from pathlib import Path
 
 from .adapters.shell_adapter import run_shell_command
 from .config import A2A_DIRNAME, default_config, default_state, dump_json, load_json
+from .prior_review import (
+    augment_findings_with_prior_comments,
+    ingest_prior_review_context,
+    load_prior_comments,
+    render_prior_comment_matrix,
+)
 from .types import StatusView
 
 
@@ -263,8 +269,19 @@ def _agent_env(session: dict, round_no: int, files: dict[str, Path], role: str) 
             "A2A_REVIEW_FILE": str(files["reviewer"]),
             "A2A_FINDINGS_FILE": str(files["findings"]),
             "A2A_WATCH_PATH": str(watch_path) if watch_path else "",
+            "A2A_PRIOR_COMMENTS_FILE": "",
+            "A2A_PRIOR_MATRIX_FILE": "",
+            "A2A_PRIOR_COMMENTS_TOTAL": "0",
         }
     )
+    prior = session.get("prior_review")
+    if isinstance(prior, dict):
+        comments_file = str(prior.get("comments_file") or "").strip()
+        matrix_file = str(prior.get("matrix_file") or "").strip()
+        comments_total = int(prior.get("comments_total") or 0)
+        env["A2A_PRIOR_COMMENTS_FILE"] = comments_file
+        env["A2A_PRIOR_MATRIX_FILE"] = matrix_file
+        env["A2A_PRIOR_COMMENTS_TOTAL"] = str(comments_total)
     return env
 
 
@@ -456,6 +473,17 @@ def _parse_iso_datetime(raw: str) -> datetime:
 def _session_report_payload(root: Path, session_id: str) -> dict:
     session = _load_session(root, session_id)
     rounds = sorted(session.get("rounds", []), key=lambda r: int(r.get("round", 0)))
+    prior = session.get("prior_review")
+    prior_summary = None
+    if isinstance(prior, dict):
+        prior_summary = {
+            "enabled": bool(prior.get("enabled", False)),
+            "comments_total": int(prior.get("comments_total") or 0),
+            "source_total": int(prior.get("source_total") or 0),
+            "search_used": bool(prior.get("search_used", False)),
+            "detected_version": prior.get("detected_version"),
+            "detected_subject": prior.get("detected_subject"),
+        }
 
     totals = {
         "rounds_validated": len(rounds),
@@ -479,6 +507,7 @@ def _session_report_payload(root: Path, session_id: str) -> dict:
             "branch": session.get("branch"),
             "builder_command": session.get("builder_command"),
             "reviewer_command": session.get("reviewer_command"),
+            "prior_review": prior_summary,
         },
         "totals": totals,
         "rounds": rounds,
@@ -543,6 +572,7 @@ def _render_markdown_report(payload: dict) -> str:
     sess = payload["session"]
     totals = payload["totals"]
     rounds = payload["rounds"]
+    prior = sess.get("prior_review")
     lines = [
         f"# A2A Report: {sess['id']}",
         "",
@@ -554,10 +584,13 @@ def _render_markdown_report(payload: dict) -> str:
         f"- rounds_validated: {totals.get('rounds_validated')}",
         f"- findings_total: {totals.get('findings_total')}",
         f"- findings_open_last: {totals.get('findings_open_last')}",
-        "",
-        "## Rounds",
-        "",
     ]
+    if isinstance(prior, dict):
+        lines.append(f"- prior_comments_total: {prior.get('comments_total')}")
+        lines.append(f"- prior_sources_total: {prior.get('source_total')}")
+        lines.append(f"- prior_search_used: {prior.get('search_used')}")
+
+    lines.extend(["", "## Rounds", ""])
     if not rounds:
         lines.append("- no validated rounds yet")
     else:
@@ -728,6 +761,20 @@ def _start_session(
         "watch_path": watch_path,
     }
 
+    prior_gate = bool(cfg.get("prior_review_gate", True))
+    search_if_missing = bool(cfg.get("prior_review_search", True))
+    max_comments = int(cfg.get("prior_review_max_comments", 120))
+    if prior_gate and watch_path:
+        report_dir = _report_dir(root, session_id)
+        context = ingest_prior_review_context(
+            Path(watch_path),
+            report_dir,
+            search_if_missing=search_if_missing,
+            max_comments=max_comments,
+        )
+        if context:
+            session["prior_review"] = context
+
     dump_json(_session_path(root, session_id), session)
 
     summary = _report_dir(root, session_id) / "summary.md"
@@ -769,6 +816,7 @@ def _validate_round_only(
 ) -> tuple[dict, int, list[dict], list[str], Path]:
     cfg = load_json(root / A2A_DIRNAME / "config.json")
     strict = bool(cfg.get("strict_evidence", True))
+    prior_gate = bool(cfg.get("prior_review_gate", True))
     session = _load_session(root, session_id)
     current_round = int(session.get("current_round", 1))
     target_round = current_round if round_no is None else int(round_no)
@@ -780,6 +828,23 @@ def _validate_round_only(
         raise RuntimeError(f"Missing findings file for round {target_round}: {findings_path}")
 
     findings = _load_findings_payload(findings_path)
+    prior = session.get("prior_review")
+    if prior_gate and isinstance(prior, dict):
+        comments_file_raw = str(prior.get("comments_file") or "").strip()
+        matrix_file_raw = str(prior.get("matrix_file") or "").strip()
+        if comments_file_raw:
+            comments_file = Path(comments_file_raw)
+            if comments_file.exists():
+                prior_comments = load_prior_comments(comments_file)
+                findings = augment_findings_with_prior_comments(findings, prior_comments, comments_file)
+                if matrix_file_raw:
+                    matrix_file = Path(matrix_file_raw)
+                    matrix_file.parent.mkdir(parents=True, exist_ok=True)
+                    matrix_file.write_text(
+                        render_prior_comment_matrix(prior_comments, findings),
+                        encoding="utf-8",
+                    )
+
     errors, open_count = _validate_findings(findings, strict)
     return session, open_count, findings, errors, findings_path
 
