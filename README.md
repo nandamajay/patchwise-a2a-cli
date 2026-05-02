@@ -144,6 +144,14 @@ Common keys:
 
 - renders consolidated session report from stored session metadata
 - defaults to active session (or latest if no active)
+- includes per-round scores:
+  - `builder_patch_gauge` (patch change magnitude signal)
+  - `builder_confidence`
+  - `reviewer_confidence`
+- includes prior-comment closure summary table:
+  - initial vs current status per `source_comment_id`
+  - whether it was fixed during A2A rounds (`fixed_by_a2a`)
+  - first closed round and latest evidence location
 - supports:
   - `--format markdown|json`
   - `--output <path>`

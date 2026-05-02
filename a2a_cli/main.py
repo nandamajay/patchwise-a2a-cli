@@ -457,6 +457,226 @@ def _write_builder_change_artifacts(
     diff_path.write_text("".join(diff_chunks), encoding="utf-8")
 
 
+def _load_findings_from_file(path: Path) -> list[dict]:
+    try:
+        return _load_findings_payload(path)
+    except RuntimeError:
+        return []
+
+
+def _builder_change_stats(root: Path, session_id: str, round_no: int, reviewer_name: str) -> dict[str, int]:
+    files = _round_files(root, session_id, round_no, reviewer_name)
+    changed_path = files["report_dir"] / f"{_round_basename(round_no, 'changed_files')}.txt"
+    diff_path = files["report_dir"] / f"{_round_basename(round_no, 'builder')}.diff"
+
+    changed_files = 0
+    diff_lines = 0
+    diff_hunks = 0
+
+    if changed_path.exists():
+        changed_files = len([ln for ln in changed_path.read_text(encoding="utf-8").splitlines() if ln.strip()])
+
+    if diff_path.exists():
+        for line in diff_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("@@ "):
+                diff_hunks += 1
+            if (line.startswith("+") or line.startswith("-")) and not line.startswith("+++") and not line.startswith("---"):
+                diff_lines += 1
+
+    return {
+        "changed_files": changed_files,
+        "diff_lines": diff_lines,
+        "diff_hunks": diff_hunks,
+    }
+
+
+def _clamp_score(value: int) -> int:
+    return max(1, min(99, int(value)))
+
+
+def _compute_builder_patch_gauge(stats: dict[str, int]) -> int:
+    changed_files = int(stats.get("changed_files", 0))
+    diff_lines = int(stats.get("diff_lines", 0))
+    diff_hunks = int(stats.get("diff_hunks", 0))
+    score = int(changed_files * 18 + min(diff_lines, 240) * 0.30 + diff_hunks * 6)
+    return _clamp_score(score)
+
+
+def _compute_builder_confidence(prev_open: int | None, current_open: int, stats: dict[str, int]) -> int:
+    changed_files = int(stats.get("changed_files", 0))
+    diff_lines = int(stats.get("diff_lines", 0))
+    base = 50
+    if changed_files > 0:
+        base += 12
+    if diff_lines > 0:
+        base += 8
+
+    if prev_open is not None:
+        delta = int(prev_open) - int(current_open)
+        if delta > 0:
+            base += min(24, delta * 10)
+        elif delta < 0:
+            base -= min(16, abs(delta) * 8)
+
+    if current_open == 0:
+        base += 12
+    if changed_files == 0 and (prev_open is None or current_open >= int(prev_open)):
+        base -= 20
+    return _clamp_score(base)
+
+
+def _compute_reviewer_confidence(findings: list[dict]) -> int:
+    if not findings:
+        return 82
+
+    total = len(findings)
+    with_source_id = 0
+    evidence_items_total = 0
+    evidence_missing = 0
+    with_location = 0
+    for finding in findings:
+        source_id = str(finding.get("source_comment_id") or "").strip()
+        if source_id:
+            with_source_id += 1
+        loc = str(finding.get("location") or "")
+        if ":" in loc:
+            with_location += 1
+
+        evidence = finding.get("evidence")
+        if isinstance(evidence, list):
+            if evidence:
+                evidence_items_total += len([x for x in evidence if str(x).strip()])
+            else:
+                evidence_missing += 1
+        elif isinstance(evidence, str):
+            if evidence.strip():
+                evidence_items_total += 1
+            else:
+                evidence_missing += 1
+        else:
+            evidence_missing += 1
+
+    avg_evidence = evidence_items_total / max(total, 1)
+    source_ratio = with_source_id / total
+    location_ratio = with_location / total
+
+    score = 58
+    score += int(source_ratio * 18)
+    score += int(location_ratio * 12)
+    score += int(min(avg_evidence, 4.0) * 4)
+    score -= evidence_missing * 6
+    return _clamp_score(score)
+
+
+def _extract_effective_round_findings(session: dict, round_record: dict) -> list[dict]:
+    findings_file_raw = str(round_record.get("findings_file") or "").strip()
+    if not findings_file_raw:
+        return []
+    findings_path = Path(findings_file_raw)
+    if not findings_path.exists():
+        return []
+    findings = _load_findings_from_file(findings_path)
+
+    prior = session.get("prior_review")
+    if isinstance(prior, dict):
+        comments_file_raw = str(prior.get("comments_file") or "").strip()
+        if comments_file_raw:
+            comments_file = Path(comments_file_raw)
+            if comments_file.exists():
+                prior_comments = load_prior_comments(comments_file)
+                findings = augment_findings_with_prior_comments(findings, prior_comments, comments_file)
+    return findings
+
+
+def _build_prior_comment_summary(session: dict, rounds: list[dict]) -> list[dict]:
+    prior = session.get("prior_review")
+    if not isinstance(prior, dict):
+        return []
+    comments_file_raw = str(prior.get("comments_file") or "").strip()
+    if not comments_file_raw:
+        return []
+
+    comments_file = Path(comments_file_raw)
+    if not comments_file.exists():
+        return []
+
+    prior_comments = load_prior_comments(comments_file)
+    if not prior_comments:
+        return []
+
+    rounds_sorted = sorted(rounds, key=lambda r: int(r.get("round", 0)))
+    history_by_id: dict[str, list[dict]] = {}
+    for round_record in rounds_sorted:
+        round_no = int(round_record.get("round", 0))
+        findings = _extract_effective_round_findings(session, round_record)
+        by_source: dict[str, list[dict]] = {}
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            source_id = str(finding.get("source_comment_id") or "").strip()
+            if not source_id:
+                continue
+            by_source.setdefault(source_id, []).append(finding)
+
+        for comment in prior_comments:
+            source_id = str(comment.get("id") or "").strip()
+            if not source_id:
+                continue
+            linked = by_source.get(source_id, [])
+            closed = [f for f in linked if str(f.get("status", "")).lower() == "closed"]
+            selected = closed[0] if closed else (linked[0] if linked else None)
+            status = "closed" if closed else "open"
+            history_by_id.setdefault(source_id, []).append(
+                {
+                    "round": round_no,
+                    "status": status,
+                    "location": str(selected.get("location") or "") if selected else "",
+                    "evidence": selected.get("evidence") if selected else [],
+                }
+            )
+
+    rows: list[dict] = []
+    for comment in prior_comments:
+        source_id = str(comment.get("id") or "").strip()
+        if not source_id:
+            continue
+        history = history_by_id.get(source_id, [])
+        initial_status = history[0]["status"] if history else "open"
+        current_status = history[-1]["status"] if history else "open"
+
+        closed_round = None
+        latest_location = ""
+        latest_evidence = ""
+        for entry in history:
+            if entry["status"] == "closed" and closed_round is None:
+                closed_round = int(entry["round"])
+        if history:
+            latest_location = str(history[-1].get("location") or "")
+            ev = history[-1].get("evidence")
+            if isinstance(ev, list):
+                latest_evidence = "; ".join(str(x) for x in ev[:2])
+            else:
+                latest_evidence = str(ev or "")
+
+        fixed_by_a2a = bool(initial_status == "open" and current_status == "closed")
+        rows.append(
+            {
+                "source_comment_id": source_id,
+                "from": str(comment.get("from") or ""),
+                "subject": str(comment.get("subject") or ""),
+                "initial_status": initial_status,
+                "current_status": current_status,
+                "closed_round": closed_round,
+                "fixed_by_a2a": fixed_by_a2a,
+                "already_fixed_before_a2a": bool(initial_status == "closed"),
+                "latest_location": latest_location,
+                "latest_evidence": latest_evidence,
+            }
+        )
+
+    return rows
+
+
 def _run_agent_step(root: Path, session: dict, role: str, command: str, round_no: int) -> int:
     reviewer_name = str(session.get("reviewer_name", "aryabhatta"))
     files = _round_files(root, str(session["id"]), round_no, reviewer_name)
@@ -615,7 +835,44 @@ def _parse_iso_datetime(raw: str) -> datetime:
 
 def _session_report_payload(root: Path, session_id: str) -> dict:
     session = _load_session(root, session_id)
-    rounds = sorted(session.get("rounds", []), key=lambda r: int(r.get("round", 0)))
+    raw_rounds = sorted(session.get("rounds", []), key=lambda r: int(r.get("round", 0)))
+    rounds: list[dict] = []
+    previous_open: int | None = None
+    reviewer_name = str(session.get("reviewer_name", "aryabhatta"))
+    for record in raw_rounds:
+        row = dict(record)
+        round_no = int(row.get("round", 0))
+        if "builder_changed_files" not in row or "builder_diff_lines" not in row or "builder_diff_hunks" not in row:
+            stats = _builder_change_stats(root, session_id, round_no, reviewer_name)
+            row.setdefault("builder_changed_files", int(stats.get("changed_files", 0)))
+            row.setdefault("builder_diff_lines", int(stats.get("diff_lines", 0)))
+            row.setdefault("builder_diff_hunks", int(stats.get("diff_hunks", 0)))
+        else:
+            stats = {
+                "changed_files": int(row.get("builder_changed_files", 0)),
+                "diff_lines": int(row.get("builder_diff_lines", 0)),
+                "diff_hunks": int(row.get("builder_diff_hunks", 0)),
+            }
+
+        findings_open = int(row.get("findings_open", 0))
+        if "builder_patch_gauge" not in row:
+            row["builder_patch_gauge"] = _compute_builder_patch_gauge(stats)
+        if "builder_confidence" not in row:
+            row["builder_confidence"] = _compute_builder_confidence(previous_open, findings_open, stats)
+        if "reviewer_confidence" not in row:
+            findings = _extract_effective_round_findings(session, row)
+            row["reviewer_confidence"] = _compute_reviewer_confidence(findings)
+
+        previous_open = findings_open
+        rounds.append(row)
+
+    prior_comment_summary = _build_prior_comment_summary(session, rounds)
+    prior_totals = {
+        "comments_total": len(prior_comment_summary),
+        "comments_closed": len([r for r in prior_comment_summary if r.get("current_status") == "closed"]),
+        "comments_open": len([r for r in prior_comment_summary if r.get("current_status") != "closed"]),
+        "fixed_by_a2a": len([r for r in prior_comment_summary if bool(r.get("fixed_by_a2a"))]),
+    }
     prior = session.get("prior_review")
     prior_summary = None
     if isinstance(prior, dict):
@@ -626,6 +883,7 @@ def _session_report_payload(root: Path, session_id: str) -> dict:
             "search_used": bool(prior.get("search_used", False)),
             "detected_version": prior.get("detected_version"),
             "detected_subject": prior.get("detected_subject"),
+            "comment_status_totals": prior_totals,
         }
 
     totals = {
@@ -654,6 +912,7 @@ def _session_report_payload(root: Path, session_id: str) -> dict:
         },
         "totals": totals,
         "rounds": rounds,
+        "prior_comment_summary": prior_comment_summary,
     }
     return payload
 
@@ -716,6 +975,7 @@ def _render_markdown_report(payload: dict) -> str:
     totals = payload["totals"]
     rounds = payload["rounds"]
     prior = sess.get("prior_review")
+    prior_comment_summary = payload.get("prior_comment_summary", [])
     lines = [
         f"# A2A Report: {sess['id']}",
         "",
@@ -732,6 +992,11 @@ def _render_markdown_report(payload: dict) -> str:
         lines.append(f"- prior_comments_total: {prior.get('comments_total')}")
         lines.append(f"- prior_sources_total: {prior.get('source_total')}")
         lines.append(f"- prior_search_used: {prior.get('search_used')}")
+        status_totals = prior.get("comment_status_totals")
+        if isinstance(status_totals, dict):
+            lines.append(f"- prior_comments_closed: {status_totals.get('comments_closed')}")
+            lines.append(f"- prior_comments_open: {status_totals.get('comments_open')}")
+            lines.append(f"- prior_fixed_by_a2a: {status_totals.get('fixed_by_a2a')}")
 
     lines.extend(["", "## Rounds", ""])
     if not rounds:
@@ -739,11 +1004,38 @@ def _render_markdown_report(payload: dict) -> str:
     else:
         for r in rounds:
             lines.append(
-                "- round {round}: findings_total={total}, findings_open={open}, validated_at={ts}".format(
+                "- round {round}: findings_total={total}, findings_open={open}, "
+                "builder_patch_gauge={gauge}, builder_confidence={bconf}, reviewer_confidence={rconf}, validated_at={ts}".format(
                     round=r.get("round"),
                     total=r.get("findings_total"),
                     open=r.get("findings_open"),
+                    gauge=r.get("builder_patch_gauge"),
+                    bconf=r.get("builder_confidence"),
+                    rconf=r.get("reviewer_confidence"),
                     ts=r.get("validated_at"),
+                )
+            )
+
+    lines.extend(["", "## Prior Comment Summary", ""])
+    if not prior_comment_summary:
+        lines.append("- no prior comments tracked")
+    else:
+        lines.extend(
+            [
+                "| source_comment_id | subject | initial | current | fixed_by_a2a | closed_round | latest_location |",
+                "|---|---|---|---|---|---|---|",
+            ]
+        )
+        for row in prior_comment_summary:
+            lines.append(
+                "| {id} | {subject} | {initial} | {current} | {fixed} | {closed_round} | {loc} |".format(
+                    id=str(row.get("source_comment_id") or "").replace("|", "\\|"),
+                    subject=str(row.get("subject") or "").replace("|", "\\|"),
+                    initial=str(row.get("initial_status") or ""),
+                    current=str(row.get("current_status") or ""),
+                    fixed="yes" if bool(row.get("fixed_by_a2a")) else "no",
+                    closed_round=str(row.get("closed_round") if row.get("closed_round") is not None else "-"),
+                    loc=str(row.get("latest_location") or "").replace("|", "\\|"),
                 )
             )
     lines.append("")
@@ -1015,12 +1307,29 @@ def _advance_session(root: Path, session_id: str) -> int:
             print(f"  - {err}")
         return 1
 
+    prev_open = None
+    for previous_round in session.get("rounds", []):
+        if int(previous_round.get("round", -1)) == round_no - 1:
+            prev_open = int(previous_round.get("findings_open", 0))
+            break
+
+    change_stats = _builder_change_stats(root, session_id, round_no, reviewer_name)
+    builder_patch_gauge = _compute_builder_patch_gauge(change_stats)
+    builder_confidence = _compute_builder_confidence(prev_open, open_count, change_stats)
+    reviewer_confidence = _compute_reviewer_confidence(findings)
+
     round_record = {
         "round": round_no,
         "validated_at": _now_utc(),
         "findings_total": len(findings),
         "findings_open": open_count,
         "findings_file": str(findings_path),
+        "builder_changed_files": int(change_stats.get("changed_files", 0)),
+        "builder_diff_lines": int(change_stats.get("diff_lines", 0)),
+        "builder_diff_hunks": int(change_stats.get("diff_hunks", 0)),
+        "builder_patch_gauge": builder_patch_gauge,
+        "builder_confidence": builder_confidence,
+        "reviewer_confidence": reviewer_confidence,
     }
     rounds = [r for r in session.get("rounds", []) if int(r.get("round", -1)) != round_no]
     rounds.append(round_record)
@@ -1030,6 +1339,12 @@ def _advance_session(root: Path, session_id: str) -> int:
     session["updated_at"] = _now_utc()
 
     _append_summary_round(root, session_id, round_no, len(findings), open_count)
+    print(
+        "Round scores: "
+        f"builder_patch_gauge={builder_patch_gauge}, "
+        f"builder_confidence={builder_confidence}, "
+        f"reviewer_confidence={reviewer_confidence}"
+    )
 
     max_rounds = int(session.get("max_rounds", 1))
     if open_count == 0:
