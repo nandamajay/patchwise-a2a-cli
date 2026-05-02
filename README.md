@@ -148,6 +148,7 @@ Common keys:
   - `builder_patch_gauge` (patch change magnitude signal)
   - `builder_confidence`
   - `reviewer_confidence`
+  - confidence values are heuristic operational signals (range 1-95), not calibrated probabilities
 - includes prior-comment closure summary table:
   - initial vs current status per `source_comment_id`
   - whether it was fixed during A2A rounds (`fixed_by_a2a`)

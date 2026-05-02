@@ -590,6 +590,10 @@ def _clamp_score(value: int) -> int:
     return max(1, min(99, int(value)))
 
 
+def _clamp_confidence(value: int) -> int:
+    return max(1, min(95, int(value)))
+
+
 def _compute_builder_patch_gauge(stats: dict[str, int]) -> int:
     changed_files = int(stats.get("changed_files", 0))
     diff_lines = int(stats.get("diff_lines", 0))
@@ -618,25 +622,37 @@ def _compute_builder_confidence(prev_open: int | None, current_open: int, stats:
         base += 12
     if changed_files == 0 and (prev_open is None or current_open >= int(prev_open)):
         base -= 20
-    return _clamp_score(base)
+    return _clamp_confidence(base)
 
 
 def _compute_reviewer_confidence(findings: list[dict]) -> int:
     if not findings:
-        return 82
+        return 72
 
     total = len(findings)
     with_source_id = 0
     evidence_items_total = 0
     evidence_missing = 0
     with_location = 0
+    volatile_source_ids = 0
+    duplicate_source_ids = 0
+    open_findings = 0
+    seen_source_ids: set[str] = set()
     for finding in findings:
         source_id = str(finding.get("source_comment_id") or "").strip()
         if source_id:
             with_source_id += 1
+            if _VOLATILE_SOURCE_ID_RE.match(source_id):
+                volatile_source_ids += 1
+            if source_id in seen_source_ids:
+                duplicate_source_ids += 1
+            seen_source_ids.add(source_id)
         loc = str(finding.get("location") or "")
         if ":" in loc:
             with_location += 1
+        status = str(finding.get("status") or "").lower()
+        if status != "closed":
+            open_findings += 1
 
         evidence = finding.get("evidence")
         if isinstance(evidence, list):
@@ -655,13 +671,20 @@ def _compute_reviewer_confidence(findings: list[dict]) -> int:
     avg_evidence = evidence_items_total / max(total, 1)
     source_ratio = with_source_id / total
     location_ratio = with_location / total
+    open_ratio = open_findings / total
 
-    score = 58
-    score += int(source_ratio * 18)
-    score += int(location_ratio * 12)
-    score += int(min(avg_evidence, 4.0) * 4)
-    score -= evidence_missing * 6
-    return _clamp_score(score)
+    score = 42
+    score += int(source_ratio * 20)
+    score += int(location_ratio * 14)
+    score += int(min(avg_evidence, 3.0) * 6)
+    score -= evidence_missing * 7
+    score -= volatile_source_ids * 5
+    score -= duplicate_source_ids * 4
+    if 0.0 < open_ratio < 1.0:
+        score += 2
+    if open_ratio == 1.0 and total > 2:
+        score -= 3
+    return _clamp_confidence(score)
 
 
 def _extract_effective_round_findings(session: dict, round_record: dict) -> list[dict]:
