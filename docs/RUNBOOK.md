@@ -44,6 +44,7 @@ a2a config set reviewer_name aryabhatta
 a2a prepare --repo /path/to/repo --branch a2a/<task>
 a2a run --task "<task text>"
 a2a review --session <session-id> --advance
+a2a loop --task "<task text>" --builder-cmd "<cmd>" --reviewer-cmd "<cmd>"
 a2a report --session <session-id> --format markdown
 a2a report --all --format markdown
 a2a report --all --status lgtm --since 2026-05-02T00:00:00+00:00
@@ -131,3 +132,11 @@ a2a review --session <session-id> --run-agent --reviewer-cmd "<cmd>" --advance
 Agent commands receive context through env vars, including:
 `A2A_SESSION_ID`, `A2A_ROUND`, `A2A_ROLE`, `A2A_FINDINGS_FILE`,
 `A2A_BUILDER_FILE`, `A2A_REVIEW_FILE`, and `A2A_REPORT_DIR`.
+
+Full autonomous mode:
+
+```bash
+a2a loop --task "<task text>" --builder-cmd "<builder_cmd>" --reviewer-cmd "<reviewer_cmd>"
+```
+
+This continues automatically until the session reaches `LGTM` or `STOPPED`.

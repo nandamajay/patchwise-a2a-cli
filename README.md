@@ -14,6 +14,7 @@ This repository currently provides:
   - `a2a status`
   - `a2a prepare`
   - `a2a run`
+  - `a2a loop`
   - `a2a review`
   - `a2a config`
   - `a2a report`
@@ -26,6 +27,7 @@ From repository root:
 python -m a2a_cli.main init
 python -m a2a_cli.main prepare --repo /path/to/target-repo --branch a2a/my-task
 python -m a2a_cli.main run --task "Describe task"
+python -m a2a_cli.main loop --task "Autonomous task" --builder-cmd "<cmd>" --reviewer-cmd "<cmd>"
 python -m a2a_cli.main review --session <session-id> --advance
 python -m a2a_cli.main config set reviewer_command "./scripts/reviewer.sh"
 python -m a2a_cli.main config get --json
@@ -41,6 +43,7 @@ alias a2a='python -m a2a_cli.main'
 a2a init
 a2a prepare --repo /path/to/target-repo --branch a2a/my-task
 a2a run --task "Describe task"
+a2a loop --task "Autonomous task" --builder-cmd "<cmd>" --reviewer-cmd "<cmd>"
 a2a review --session <session-id> --advance
 a2a config get
 a2a report --latest --format json
@@ -91,6 +94,19 @@ a2a status
 - optional:
   - `--run-agent --reviewer-cmd "<cmd>"` to execute reviewer step first
   - `--advance` to move session state after successful validation
+
+## What `a2a loop` does
+
+- Fully autonomous orchestration:
+  - runs builder command
+  - runs reviewer command
+  - validates findings and advances rounds
+  - repeats until `LGTM` or `STOPPED`
+- Works with:
+  - `--task` (new session), or
+  - `--session` (resume existing)
+- Optional:
+  - `--max-iterations` to bound rounds in one invocation
 
 ## What `a2a config` does
 

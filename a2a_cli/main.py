@@ -841,6 +841,97 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_loop(args: argparse.Namespace) -> int:
+    try:
+        root = _must_find_root()
+        prep_path = _prepare_path(root)
+        if not prep_path.exists():
+            print("Missing .a2a/prepare.json. Run: a2a prepare")
+            return 1
+
+        cfg = load_json(_config_path(root))
+        max_rounds = args.max_rounds or int(cfg.get("default_max_rounds", 6))
+        builder_cmd = _resolve_agent_command(cfg, args.builder_cmd, "builder_command")
+        reviewer_cmd = _resolve_agent_command(cfg, args.reviewer_cmd, "reviewer_command")
+
+        if args.session and args.task:
+            print("Use either --session or --task, not both.")
+            return 1
+
+        if args.session:
+            session = _load_session(root, args.session)
+            sid = str(session["id"])
+        else:
+            if not args.task:
+                print("Missing --task for new autonomous session.")
+                return 1
+            session = _start_session(
+                root,
+                args.task,
+                max_rounds=max_rounds,
+                timeout_min=args.timeout_min,
+                builder_command=builder_cmd,
+                reviewer_command=reviewer_cmd,
+            )
+            sid = str(session["id"])
+            print(f"Started session: {sid}")
+
+        if not builder_cmd:
+            builder_cmd = str(session.get("builder_command") or "").strip() or None
+        if not reviewer_cmd:
+            reviewer_cmd = str(session.get("reviewer_command") or "").strip() or None
+
+        if not builder_cmd or not reviewer_cmd:
+            print(
+                "Autonomous loop requires both commands. "
+                "Provide --builder-cmd/--reviewer-cmd or set config/session defaults."
+            )
+            return 1
+
+        max_iterations = args.max_iterations if args.max_iterations and args.max_iterations > 0 else None
+        iterations = 0
+
+        while True:
+            session = _load_session(root, sid)
+            status = str(session.get("status", "in_progress"))
+            if status == "lgtm":
+                print(f"Session {sid}: already LGTM.")
+                return 0
+            if status == "stopped":
+                print(f"Session {sid}: already stopped.")
+                return 1
+
+            if max_iterations is not None and iterations >= max_iterations:
+                print(f"Session {sid}: loop paused after max_iterations={max_iterations}.")
+                return 0
+
+            round_no = int(session.get("current_round", 1))
+            print(f"Session {sid}: autonomous round {round_no} start.")
+
+            rc = _run_agent_step(root, session, "builder", builder_cmd, round_no)
+            if rc != 0:
+                return rc
+
+            rc = _run_agent_step(root, session, "reviewer", reviewer_cmd, round_no)
+            if rc != 0:
+                return rc
+
+            rc = _advance_session(root, sid)
+            session = _load_session(root, sid)
+            status = str(session.get("status", "in_progress"))
+            iterations += 1
+
+            if status == "lgtm":
+                return 0
+            if status == "stopped":
+                return 1
+            if rc != 0:
+                return rc
+    except RuntimeError as exc:
+        print(str(exc))
+        return 1
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     try:
         root = _must_find_root()
@@ -1160,6 +1251,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="On new session, run builder and reviewer commands once for round 1.",
     )
     p_run.set_defaults(func=cmd_run)
+
+    p_loop = sub.add_parser(
+        "loop",
+        help="Run fully autonomous builder+reviewer rounds until LGTM/STOPPED.",
+    )
+    p_loop.add_argument(
+        "--session",
+        help="Existing session id to continue autonomously.",
+    )
+    p_loop.add_argument(
+        "--task",
+        help="Task description for a new autonomous session.",
+    )
+    p_loop.add_argument(
+        "--max-rounds",
+        type=int,
+        help="Maximum review/fix rounds for a new session.",
+    )
+    p_loop.add_argument(
+        "--timeout-min",
+        type=int,
+        help="Optional time budget in minutes (metadata only in this version).",
+    )
+    p_loop.add_argument(
+        "--builder-cmd",
+        help="Shell command to execute builder step (overrides config builder_command).",
+    )
+    p_loop.add_argument(
+        "--reviewer-cmd",
+        help="Shell command to execute reviewer step (overrides config reviewer_command).",
+    )
+    p_loop.add_argument(
+        "--max-iterations",
+        type=int,
+        help="Optional per-invocation cap on autonomous rounds.",
+    )
+    p_loop.set_defaults(func=cmd_loop)
 
     p_review = sub.add_parser(
         "review",
