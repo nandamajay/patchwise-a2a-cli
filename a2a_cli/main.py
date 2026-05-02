@@ -1,5 +1,6 @@
 import argparse
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -21,6 +22,7 @@ from .types import StatusView
 
 _REV_TRAILING_RE = re.compile(r"^(?P<prefix>.*?)(?P<sep>[_-])v(?P<num>\d+)$", re.IGNORECASE)
 _REV_PREFIX_RE = re.compile(r"^v(?P<num>\d+)-(?P<rest>.+)$", re.IGNORECASE)
+_VOLATILE_SOURCE_ID_RE = re.compile(r"^(?:new|round\d+-new|issue-temp)[-:]", re.IGNORECASE)
 
 
 def _repo_root_from_module() -> Path:
@@ -278,6 +280,100 @@ def _load_findings_payload(path: Path) -> list[dict]:
         if isinstance(findings, list):
             return findings
     raise RuntimeError(f"Invalid findings payload structure: {path}")
+
+
+def _findings_payload_path(root: Path, session_id: str) -> Path:
+    return _report_dir(root, session_id) / "issue_id_map.json"
+
+
+def _location_path_only(location: str) -> str:
+    text = location.strip()
+    if not text:
+        return ""
+    if ":" not in text:
+        return text
+    left, right = text.rsplit(":", 1)
+    if right.isdigit():
+        return left
+    return text
+
+
+def _finding_fingerprint(finding: dict) -> str:
+    severity = str(finding.get("severity") or "").strip().lower()
+    title = " ".join(str(finding.get("title") or "").strip().lower().split())
+    required_action = " ".join(str(finding.get("required_action") or "").strip().lower().split())
+    location = _location_path_only(str(finding.get("location") or "").strip().lower())
+    base = "||".join([severity, location, title, required_action])
+    return hashlib.sha1(base.encode("utf-8")).hexdigest()
+
+
+def _is_prior_source_id(source_id: str) -> bool:
+    text = source_id.strip().lower()
+    return text.startswith("prior-")
+
+
+def _load_issue_id_map(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    payload = load_json(path)
+    if not isinstance(payload, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, value in payload.items():
+        k = str(key).strip()
+        v = str(value).strip()
+        if not k or not v:
+            continue
+        out[k] = v
+    return out
+
+
+def _save_issue_id_map(path: Path, mapping: dict[str, str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dump_json(path, mapping)
+
+
+def _canonicalize_generated_source_ids(
+    findings: list[dict], issue_id_map: dict[str, str]
+) -> tuple[list[dict], dict[str, str], bool]:
+    out: list[dict] = []
+    changed = False
+    local_map = dict(issue_id_map)
+    used_ids = set(local_map.values())
+
+    for finding in findings:
+        if not isinstance(finding, dict):
+            out.append(finding)
+            continue
+        current = str(finding.get("source_comment_id") or "").strip()
+        if current and _is_prior_source_id(current):
+            out.append(finding)
+            continue
+
+        needs_stable_id = (not current) or bool(_VOLATILE_SOURCE_ID_RE.match(current))
+        if not needs_stable_id:
+            out.append(finding)
+            continue
+
+        fp = _finding_fingerprint(finding)
+        stable_id = local_map.get(fp)
+        if not stable_id:
+            digest = fp[:12]
+            stable_id = f"issue-{digest}"
+            suffix = 1
+            while stable_id in used_ids:
+                suffix += 1
+                stable_id = f"issue-{digest}-{suffix}"
+            local_map[fp] = stable_id
+            used_ids.add(stable_id)
+
+        updated = dict(finding)
+        if current != stable_id:
+            changed = True
+            updated["source_comment_id"] = stable_id
+        out.append(updated)
+
+    return out, local_map, changed
 
 
 def _validate_findings(findings: list[dict], strict_evidence: bool) -> tuple[list[str], int]:
@@ -1269,6 +1365,14 @@ def _validate_round_only(
         raise RuntimeError(f"Missing findings file for round {target_round}: {findings_path}")
 
     findings = _load_findings_payload(findings_path)
+    issue_map_path = _findings_payload_path(root, session_id)
+    issue_id_map = _load_issue_id_map(issue_map_path)
+    findings, issue_id_map_updated, findings_changed = _canonicalize_generated_source_ids(findings, issue_id_map)
+    if findings_changed:
+        findings_path.write_text(_as_json({"findings": findings}), encoding="utf-8")
+    if issue_id_map_updated != issue_id_map:
+        _save_issue_id_map(issue_map_path, issue_id_map_updated)
+
     prior = session.get("prior_review")
     if prior_gate and isinstance(prior, dict):
         comments_file_raw = str(prior.get("comments_file") or "").strip()
