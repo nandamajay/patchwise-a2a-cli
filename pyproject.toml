@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "a2a-cli"
+version = "0.1.0"
+description = "Local scaffold for two-agent builder/reviewer loops"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+a2a = "a2a_cli.main:main"
