@@ -206,6 +206,28 @@ When `--watch-path` is provided to `run` or `loop`, each builder round writes:
 
 under `.a2a/reports/<session-id>/`.
 
+## Validation Suite
+
+Run full local validation:
+
+```bash
+scripts/validation/run_suite.sh
+```
+
+Optional extended checks:
+
+```bash
+scripts/validation/run_suite.sh --with-llm --with-lore
+```
+
+This validates:
+
+- static compile checks
+- unit tests
+- deterministic autonomous smoke (builder/reviewer + validation gate artifacts)
+- optional LLM-native smoke (schema/runtime sanity)
+- optional lore ingestion smoke (network-dependent)
+
 ## Prior-Review Ingestion Gate
 
 When `--watch-path` points to patch files:
