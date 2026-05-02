@@ -140,3 +140,13 @@ a2a loop --task "<task text>" --builder-cmd "<builder_cmd>" --reviewer-cmd "<rev
 ```
 
 This continues automatically until the session reaches `LGTM` or `STOPPED`.
+
+To capture exact builder edits each round:
+
+```bash
+a2a loop --task "<task>" --builder-cmd "<cmd>" --reviewer-cmd "<cmd>" --watch-path /path/to/patches
+```
+
+Artifacts are written at:
+- `.a2a/reports/<session>/round-XX-changed_files.txt`
+- `.a2a/reports/<session>/round-XX-builder.diff`

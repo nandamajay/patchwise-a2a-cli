@@ -149,6 +149,16 @@ When builder/reviewer commands are executed, these env vars are provided:
 - `A2A_BUILDER_FILE`
 - `A2A_REVIEW_FILE`
 - `A2A_FINDINGS_FILE`
+- `A2A_WATCH_PATH`
+
+## Builder Change Artifacts
+
+When `--watch-path` is provided to `run` or `loop`, each builder round writes:
+
+- `round-XX-changed_files.txt`
+- `round-XX-builder.diff`
+
+under `.a2a/reports/<session-id>/`.
 
 ## Notes
 

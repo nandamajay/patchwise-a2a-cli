@@ -1,4 +1,5 @@
 import argparse
+import difflib
 import json
 import os
 import shutil
@@ -248,6 +249,7 @@ def _write_session(root: Path, session: dict) -> None:
 
 def _agent_env(session: dict, round_no: int, files: dict[str, Path], role: str) -> dict[str, str]:
     env = dict(os.environ)
+    watch_path = session.get("watch_path")
     env.update(
         {
             "A2A_SESSION_ID": str(session["id"]),
@@ -260,9 +262,70 @@ def _agent_env(session: dict, round_no: int, files: dict[str, Path], role: str) 
             "A2A_BUILDER_FILE": str(files["builder"]),
             "A2A_REVIEW_FILE": str(files["reviewer"]),
             "A2A_FINDINGS_FILE": str(files["findings"]),
+            "A2A_WATCH_PATH": str(watch_path) if watch_path else "",
         }
     )
     return env
+
+
+def _snapshot_text_files(base: Path) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    if not base.exists():
+        return out
+    files = [p for p in sorted(base.rglob("*")) if p.is_file()]
+    for path in files:
+        rel = str(path.relative_to(base))
+        try:
+            content = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        out[rel] = content.splitlines(keepends=True)
+    return out
+
+
+def _write_builder_change_artifacts(
+    root: Path,
+    session: dict,
+    round_no: int,
+    before: dict[str, list[str]] | None,
+    after: dict[str, list[str]] | None,
+) -> None:
+    if before is None or after is None:
+        return
+
+    reviewer_name = str(session.get("reviewer_name", "aryabhatta"))
+    files = _round_files(root, str(session["id"]), round_no, reviewer_name)
+    changed_path = files["report_dir"] / f"{_round_basename(round_no, 'changed_files')}.txt"
+    diff_path = files["report_dir"] / f"{_round_basename(round_no, 'builder')}.diff"
+    files["report_dir"].mkdir(parents=True, exist_ok=True)
+
+    keys = sorted(set(before.keys()) | set(after.keys()))
+    changed: list[str] = []
+    diff_chunks: list[str] = []
+
+    for rel in keys:
+        before_lines = before.get(rel, [])
+        after_lines = after.get(rel, [])
+        if before_lines == after_lines:
+            continue
+        changed.append(rel)
+        diff_lines = list(
+            difflib.unified_diff(
+                before_lines,
+                after_lines,
+                fromfile=f"a/{rel}",
+                tofile=f"b/{rel}",
+                n=3,
+            )
+        )
+        if diff_lines:
+            diff_chunks.extend(diff_lines)
+            if not diff_lines[-1].endswith("\n"):
+                diff_chunks.append("\n")
+
+    changed_content = "\n".join(changed) + ("\n" if changed else "")
+    changed_path.write_text(changed_content, encoding="utf-8")
+    diff_path.write_text("".join(diff_chunks), encoding="utf-8")
 
 
 def _run_agent_step(root: Path, session: dict, role: str, command: str, round_no: int) -> int:
@@ -277,6 +340,14 @@ def _run_agent_step(root: Path, session: dict, role: str, command: str, round_no
     logs_dir = root / A2A_DIRNAME / "logs" / str(session["id"])
     logs_dir.mkdir(parents=True, exist_ok=True)
     log_path = logs_dir / f"{_round_basename(round_no, role)}.log"
+
+    watch_path = session.get("watch_path")
+    watch_before = None
+    if role == "builder" and watch_path:
+        try:
+            watch_before = _snapshot_text_files(Path(str(watch_path)))
+        except OSError:
+            watch_before = None
 
     env = _agent_env(session, round_no, files, role)
     result = run_shell_command(command, cwd=cwd, env=env)
@@ -295,6 +366,14 @@ def _run_agent_step(root: Path, session: dict, role: str, command: str, round_no
     if result["returncode"] != 0:
         print(f"{role} command failed (rc={result['returncode']}). See log: {log_path}")
         return int(result["returncode"])
+
+    if role == "builder" and watch_path:
+        watch_after = None
+        try:
+            watch_after = _snapshot_text_files(Path(str(watch_path)))
+        except OSError:
+            watch_after = None
+        _write_builder_change_artifacts(root, session, round_no, watch_before, watch_after)
 
     print(f"{role} command completed. Log: {log_path}")
     return 0
@@ -619,6 +698,7 @@ def _start_session(
     timeout_min: int | None,
     builder_command: str | None = None,
     reviewer_command: str | None = None,
+    watch_path: str | None = None,
 ) -> dict:
     cfg = load_json(root / A2A_DIRNAME / "config.json")
     prep = load_json(_prepare_path(root))
@@ -645,6 +725,7 @@ def _start_session(
         "rounds": [],
         "builder_command": builder_command,
         "reviewer_command": reviewer_command,
+        "watch_path": watch_path,
     }
 
     dump_json(_session_path(root, session_id), session)
@@ -783,6 +864,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         max_rounds = args.max_rounds or int(cfg.get("default_max_rounds", 6))
         builder_cmd = _resolve_agent_command(cfg, args.builder_cmd, "builder_command")
         reviewer_cmd = _resolve_agent_command(cfg, args.reviewer_cmd, "reviewer_command")
+        watch_path = str(Path(args.watch_path).resolve()) if args.watch_path else None
 
         if args.resume:
             if args.run_reviewer:
@@ -809,6 +891,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             timeout_min=args.timeout_min,
             builder_command=builder_cmd,
             reviewer_command=reviewer_cmd,
+            watch_path=watch_path,
         )
         sid = session["id"]
         round_no = int(session["current_round"])
@@ -853,6 +936,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
         max_rounds = args.max_rounds or int(cfg.get("default_max_rounds", 6))
         builder_cmd = _resolve_agent_command(cfg, args.builder_cmd, "builder_command")
         reviewer_cmd = _resolve_agent_command(cfg, args.reviewer_cmd, "reviewer_command")
+        watch_path = str(Path(args.watch_path).resolve()) if args.watch_path else None
 
         if args.session and args.task:
             print("Use either --session or --task, not both.")
@@ -872,6 +956,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
                 timeout_min=args.timeout_min,
                 builder_command=builder_cmd,
                 reviewer_command=reviewer_cmd,
+                watch_path=watch_path,
             )
             sid = str(session["id"])
             print(f"Started session: {sid}")
@@ -880,6 +965,12 @@ def cmd_loop(args: argparse.Namespace) -> int:
             builder_cmd = str(session.get("builder_command") or "").strip() or None
         if not reviewer_cmd:
             reviewer_cmd = str(session.get("reviewer_command") or "").strip() or None
+        if watch_path and not session.get("watch_path"):
+            session["watch_path"] = watch_path
+            session["updated_at"] = _now_utc()
+            _write_session(root, session)
+        elif not watch_path:
+            watch_path = str(session.get("watch_path") or "").strip() or None
 
         if not builder_cmd or not reviewer_cmd:
             print(
@@ -1241,6 +1332,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Shell command to execute reviewer step (overrides config reviewer_command).",
     )
     p_run.add_argument(
+        "--watch-path",
+        help="Path to watch for builder file changes; emits round changed_files/diff artifacts.",
+    )
+    p_run.add_argument(
         "--run-reviewer",
         action="store_true",
         help="On --resume, run reviewer command before validating and advancing.",
@@ -1281,6 +1376,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_loop.add_argument(
         "--reviewer-cmd",
         help="Shell command to execute reviewer step (overrides config reviewer_command).",
+    )
+    p_loop.add_argument(
+        "--watch-path",
+        help="Path to watch for builder file changes; emits round changed_files/diff artifacts.",
     )
     p_loop.add_argument(
         "--max-iterations",
