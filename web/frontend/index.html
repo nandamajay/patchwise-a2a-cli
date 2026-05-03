@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PatchWise A2A</title>
+  <link rel="stylesheet" href="/static/xterm/xterm.css">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="topbar">
+    <span class="logo">PatchWise A2A</span>
+    <div id="session-info">
+      <span id="session-id-pill"></span>
+      <span id="live-badge" class="hidden">● LIVE</span>
+      <div id="round-pills"></div>
+    </div>
+    <div id="controls">
+      <button id="btn-new-session">+ New Session</button>
+      <button id="btn-stop" class="hidden">■ Stop</button>
+      <button id="btn-report" class="hidden">📄 Report</button>
+    </div>
+  </div>
+
+  <div id="modal-new-session" class="modal hidden">
+    <div class="modal-content">
+      <h2>Start New Session</h2>
+      <label>Task Name</label>
+      <input id="inp-task" placeholder="xo-sd-v3-autonomous"/>
+      <label>Watch Path</label>
+      <input id="inp-path" placeholder="/path/to/patches/lpi/"/>
+      <label>Max Rounds</label>
+      <input id="inp-rounds" type="number" value="3" min="1" max="5"/>
+      <div class="checkbox-row">
+        <input type="checkbox" id="chk-screen" checked/>
+        <label>Open screen session on server</label>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="chk-terminals" checked/>
+        <label>Stream terminals to browser</label>
+      </div>
+      <button id="btn-start-confirm">🚀 Start Review</button>
+      <button id="btn-cancel">Cancel</button>
+    </div>
+  </div>
+
+  <div id="main-layout">
+    <div id="left-panel">
+      <div class="panel-section">
+        <div class="section-title">📋 Patch Series</div>
+        <div id="patch-series-info"></div>
+      </div>
+      <div class="panel-section">
+        <div class="section-title">🔗 LORE Context</div>
+        <div id="lore-context"></div>
+      </div>
+      <div class="panel-section">
+        <div class="section-title">📜 v1 Thread</div>
+        <div id="v1-thread"></div>
+      </div>
+      <div class="panel-section">
+        <div class="section-title">📁 Patches</div>
+        <div id="patch-files"></div>
+      </div>
+    </div>
+
+    <div id="center-stage">
+      <div class="agent-card chanakya">
+        <div class="agent-header">
+          <span class="agent-name">⚡ CHANAKYA</span>
+          <span class="agent-role">Patch Reviewer & Fixer</span>
+          <span class="agent-status" id="chanakya-status">Waiting...</span>
+        </div>
+        <div id="chanakya-terminal" class="terminal-container"></div>
+      </div>
+
+      <div class="agent-card aryabhata">
+        <div class="agent-header">
+          <span class="agent-name">🔭 ARYABHATA</span>
+          <span class="agent-role">Validator & Overseer</span>
+          <span class="agent-status" id="aryabhata-status">Waiting...</span>
+        </div>
+        <div id="aryabhata-terminal" class="terminal-container"></div>
+      </div>
+
+      <div class="negotiation-section">
+        <div class="section-title">🤝 Negotiation Thread</div>
+        <div id="negotiation-thread"></div>
+      </div>
+
+      <div id="lgtm-banner" class="hidden">
+        <span class="lgtm-icon">✅</span>
+        <span class="lgtm-text">LGTM — All findings resolved</span>
+        <span id="lgtm-output-path"></span>
+        <button id="btn-copy-path">Copy Path</button>
+        <button id="btn-view-diff">View Diff</button>
+      </div>
+
+      <details class="orchestrator-section">
+        <summary>🎛️ Orchestrator Log</summary>
+        <div id="orchestrator-terminal" class="terminal-container small"></div>
+      </details>
+    </div>
+
+    <div id="right-panel">
+      <div class="panel-section">
+        <div class="section-title">📊 Session Stats</div>
+        <div id="session-stats">
+          <div class="stat-row">
+            <span>Total Findings</span>
+            <span id="stat-total">—</span>
+          </div>
+          <div class="stat-row">
+            <span>Open</span>
+            <span id="stat-open" class="stat-open">—</span>
+          </div>
+          <div class="stat-row">
+            <span>Closed</span>
+            <span id="stat-closed" class="stat-closed">—</span>
+          </div>
+          <div class="stat-row">
+            <span>v1 Comments</span>
+            <span id="stat-prior">—</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <div class="section-title">🎯 LGTM Checklist</div>
+        <div id="lgtm-checklist">
+          <div class="check-item" id="chk-functional">
+            <span class="check-icon">⏳</span>
+            <span>Functional correctness</span>
+          </div>
+          <div class="check-item" id="chk-error-paths">
+            <span class="check-icon">⏳</span>
+            <span>Error paths clean</span>
+          </div>
+          <div class="check-item" id="chk-checkpatch">
+            <span class="check-icon">⏳</span>
+            <span>Zero checkpatch ERRORs</span>
+          </div>
+          <div class="check-item" id="chk-commit-msg">
+            <span class="check-icon">⏳</span>
+            <span>Commit message format</span>
+          </div>
+          <div class="check-item" id="chk-v1-comments">
+            <span class="check-icon">⏳</span>
+            <span>v1 comments addressed</span>
+          </div>
+          <div class="check-item" id="chk-fix-strategy">
+            <span class="check-icon">⏳</span>
+            <span>Fix via source tree</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <div class="section-title">💡 Confidence</div>
+        <div id="confidence-scores">
+          <div class="score-row">
+            <span>Builder</span>
+            <div class="score-bar">
+              <div class="score-fill builder" id="score-builder"></div>
+            </div>
+            <span id="score-builder-val">—</span>
+          </div>
+          <div class="score-row">
+            <span>Reviewer</span>
+            <div class="score-bar">
+              <div class="score-fill reviewer" id="score-reviewer"></div>
+            </div>
+            <span id="score-reviewer-val">—</span>
+          </div>
+          <div class="score-row">
+            <span>Patch Gauge</span>
+            <div class="score-bar">
+              <div class="score-fill gauge" id="score-gauge"></div>
+            </div>
+            <span id="score-gauge-val">—</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <div class="section-title">🔄 Rounds</div>
+        <div id="rounds-tracker"></div>
+      </div>
+
+      <div class="panel-section">
+        <div class="section-title">📁 Output</div>
+        <div id="output-section">
+          <span id="output-path-display">Pending LGTM...</span>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <div class="section-title">🖥️ Screen Session</div>
+        <div id="screen-info">
+          <code id="screen-attach-cmd">—</code>
+          <button id="btn-copy-screen">Copy</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/xterm/xterm.js"></script>
+  <script src="/static/xterm/xterm-addon-fit.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
