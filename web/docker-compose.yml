@@ -1,0 +1,20 @@
+version: "3.9"
+
+services:
+  patchwise-web:
+    build: .
+    container_name: patchwise-web
+    ports:
+      - "7788:7788"
+    volumes:
+      - /local/mnt/workspace/A2A_CLI:/workspace/A2A_CLI
+      - /local/mnt/workspace/upstream_patches:/workspace/patches:ro
+      - ${HOME}/.local/bin:/host/bin:ro
+      - ${HOME}/.config/qgenie:/root/.config/qgenie:ro
+    environment:
+      - A2A_ROOT=/workspace/A2A_CLI
+      - PATCHES_ROOT=/workspace/patches
+      - PORT=7788
+      - LOG_LEVEL=info
+    restart: unless-stopped
+    network_mode: host
