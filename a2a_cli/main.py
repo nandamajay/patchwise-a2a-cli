@@ -1,4 +1,5 @@
 import argparse
+import builtins
 import difflib
 import hashlib
 import json
@@ -18,12 +19,36 @@ from .prior_review import (
     load_prior_comments,
     render_prior_comment_matrix,
 )
+from .rich_output import (
+    render_finding_card,
+    render_gate_status,
+    render_lgtm_banner,
+    render_phase_progress,
+    render_prior_comment_status,
+    render_round_table,
+    render_scores,
+    render_session_header,
+)
 from .types import StatusView
+
+try:
+    from rich.console import Console
+except Exception:  # pragma: no cover - rich is optional in host runtime
+    Console = None  # type: ignore[assignment]
 
 
 _REV_TRAILING_RE = re.compile(r"^(?P<prefix>.*?)(?P<sep>[_-])v(?P<num>\d+)$", re.IGNORECASE)
 _REV_PREFIX_RE = re.compile(r"^v(?P<num>\d+)-(?P<rest>.+)$", re.IGNORECASE)
 _VOLATILE_SOURCE_ID_RE = re.compile(r"^(?:new|round\d+-new|issue-temp)[-:]", re.IGNORECASE)
+_CONSOLE = Console() if Console else None
+
+
+def _echo(*args: object, sep: str = " ", end: str = "\n") -> None:
+    text = sep.join(str(arg) for arg in args)
+    if _CONSOLE is not None:
+        _CONSOLE.print(text, end=end)
+        return
+    builtins.print(*args, sep=sep, end=end)
 
 
 def _repo_root_from_module() -> Path:
@@ -98,13 +123,13 @@ def cmd_init(args: argparse.Namespace) -> int:
             dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
             written.append(str(dst.relative_to(root)))
 
-    print(f"Initialized A2A workspace in {a2a_dir}")
+    _echo(f"Initialized A2A workspace in {a2a_dir}")
     if written:
-        print("Created/updated files:")
+        _echo("Created/updated files:")
         for entry in written:
-            print(f"  - {entry}")
+            _echo(f"  - {entry}")
     else:
-        print("No files changed (already initialized).")
+        _echo("No files changed (already initialized).")
     return 0
 
 
@@ -781,9 +806,9 @@ def _run_validation_gate(root: Path, session: dict, round_no: int) -> tuple[bool
     artifacts["log"].write_text("\n".join(log_lines), encoding="utf-8")
 
     status = "passed" if gate_passed else "failed"
-    print(f"validation gate {status}. Log: {artifacts['log']}")
+    _echo(f"validation gate {status}. Log: {artifacts['log']}")
     if not gate_passed and strict:
-        print("validation gate strict mode: stopping session due to failed checks.")
+        _echo("validation gate strict mode: stopping session due to failed checks.")
         return False, True
     return True, True
 
@@ -1303,7 +1328,7 @@ def _run_agent_step(root: Path, session: dict, role: str, command: str, round_no
         f.write(f"findings_file={files['findings']}\n")
 
     if result["returncode"] != 0:
-        print(f"{role_display_name} command failed (rc={result['returncode']}). See log: {log_path}")
+        _echo(f"{role_display_name} command failed (rc={result['returncode']}). See log: {log_path}")
         return int(result["returncode"])
 
     if role == "builder" and watch_path:
@@ -1314,12 +1339,12 @@ def _run_agent_step(root: Path, session: dict, role: str, command: str, round_no
             watch_after = None
         _write_builder_change_artifacts(root, session, round_no, watch_before, watch_after)
 
-    print(f"{role_display_name} command completed. Log: {log_path}")
+    _echo(f"{role_display_name} command completed. Log: {log_path}")
     if role == "builder":
-        print(f"{role_display_name} report: {files['builder']}")
+        _echo(f"{role_display_name} report: {files['builder']}")
     else:
-        print(f"{role_display_name} report: {files['reviewer']}")
-        print(f"{role_display_name} findings: {files['findings']}")
+        _echo(f"{role_display_name} report: {files['reviewer']}")
+        _echo(f"{role_display_name} findings: {files['findings']}")
     return 0
 
 
@@ -1773,14 +1798,14 @@ def cmd_prepare(args: argparse.Namespace) -> int:
             encoding="utf-8",
         )
 
-        print(f"Prepared A2A worktrees for branch '{args.branch}'.")
-        print(f"Repo: {repo}")
-        print(f"Builder worktree: {builder_path}")
-        print(f"Reviewer worktree ({reviewer_name}): {reviewer_path}")
-        print("Next: a2a run --task \"<your task>\"")
+        _echo(f"Prepared A2A worktrees for branch '{args.branch}'.")
+        _echo(f"Repo: {repo}")
+        _echo(f"Builder worktree: {builder_path}")
+        _echo(f"Reviewer worktree ({reviewer_name}): {reviewer_path}")
+        _echo("Next: a2a run --task \"<your task>\"")
         return 0
     except RuntimeError as exc:
-        print(str(exc))
+        _echo(str(exc))
         return 1
 
 
@@ -1942,14 +1967,14 @@ def _advance_session(root: Path, session_id: str) -> int:
     try:
         session, open_count, findings, errors, findings_path = _validate_round_only(root, session_id)
     except RuntimeError as exc:
-        print(str(exc))
+        _echo(str(exc))
         return 1
     round_no = int(session.get("current_round", 1))
     reviewer_name = str(session.get("reviewer_name", "aryabhatta"))
     if errors:
-        print("Findings validation failed:")
+        _echo("Findings validation failed:")
         for err in errors:
-            print(f"  - {err}")
+            _echo(f"  - {err}")
         return 1
 
     prev_open = None
@@ -1997,38 +2022,31 @@ def _advance_session(root: Path, session_id: str) -> int:
     session["updated_at"] = _now_utc()
 
     _append_summary_round(root, session_id, round_no, len(findings), open_count)
-    print(
-        "Round scores: "
-        f"builder_patch_gauge={builder_patch_gauge}, "
-        f"builder_confidence={builder_confidence}, "
-        f"reviewer_confidence={reviewer_confidence}"
-    )
     fsum = round_summary.get("findings", {})
-    psum = round_summary.get("prior_comments", {}).get("totals", {})
-    print(
-        "Round findings: "
-        f"total={fsum.get('total')} open={fsum.get('open')} closed={fsum.get('closed')} "
-        f"new={fsum.get('new_since_prev')} resolved={fsum.get('resolved_since_prev')}"
+    _echo(
+        render_round_table(
+            {
+                "round": round_no,
+                "max_rounds": int(session.get("max_rounds", 0) or 0),
+                "gate_passed": True,
+                "builder_confidence": builder_confidence,
+                "reviewer_confidence": reviewer_confidence,
+                "builder_patch_gauge": builder_patch_gauge,
+                "verdict": "LGTM" if open_count == 0 else "REJECT",
+                "findings": fsum,
+                "prior_comments": round_summary.get("prior_comments", {}),
+            }
+        )
     )
-    print(
-        "Round prior-comments: "
-        f"received={psum.get('received_total')} open={psum.get('open')} "
-        f"closed={psum.get('closed')} fixed_by_a2a={psum.get('fixed_by_a2a')}"
-    )
+    _echo(render_scores(builder_confidence, reviewer_confidence, builder_patch_gauge))
+    _echo(render_prior_comment_status(round_summary.get("prior_comments", {})))
     top_open = fsum.get("open_items", [])
     if isinstance(top_open, list) and top_open:
-        print("Top open findings:")
+        _echo("Top open findings:")
         for item in top_open[:5]:
-            print(
-                "  - [{sev}] {title} ({loc}) id={id}".format(
-                    sev=item.get("severity", "?"),
-                    title=item.get("title", ""),
-                    loc=item.get("location", ""),
-                    id=item.get("id", ""),
-                )
-            )
-    print(f"Round summary json: {summary_files['json']}")
-    print(f"Round summary md: {summary_files['md']}")
+            _echo(render_finding_card(item))
+    _echo(f"Round summary json: {summary_files['json']}")
+    _echo(f"Round summary md: {summary_files['md']}")
 
     max_rounds = int(session.get("max_rounds", 1))
     if open_count == 0:
@@ -2039,7 +2057,7 @@ def _advance_session(root: Path, session_id: str) -> int:
             state["last_updated"] = _now_utc()
             dump_json(state_path, state)
         _write_session(root, session)
-        print(f"Session {session_id}: LGTM (all findings closed).")
+        _echo(render_lgtm_banner(session_id, rounds=round_no, total_findings=len(findings)))
         return 0
 
     if round_no >= max_rounds:
@@ -2050,7 +2068,7 @@ def _advance_session(root: Path, session_id: str) -> int:
             state["last_updated"] = _now_utc()
             dump_json(state_path, state)
         _write_session(root, session)
-        print(f"Session {session_id}: stopped at max rounds ({max_rounds}) with open findings={open_count}.")
+        _echo(f"Session {session_id}: stopped at max rounds ({max_rounds}) with open findings={open_count}.")
         return 1
 
     next_round = round_no + 1
@@ -2064,7 +2082,7 @@ def _advance_session(root: Path, session_id: str) -> int:
         reviewer_name,
         reviewer_display_name=_resolve_reviewer_display_name(session=session, cfg=_load_config(root)),
     )
-    print(
+    _echo(
         f"Session {session_id}: round {round_no} validated with open findings={open_count}. "
         f"Prepared round {next_round} templates."
     )
@@ -2076,7 +2094,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         root = _must_find_root()
         prep_path = _prepare_path(root)
         if not prep_path.exists():
-            print("Missing .a2a/prepare.json. Run: a2a prepare")
+            _echo("Missing .a2a/prepare.json. Run: a2a prepare")
             return 1
 
         cfg = _load_config(root)
@@ -2093,7 +2111,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 if not reviewer_cmd:
                     reviewer_cmd = str(session.get("reviewer_command") or "").strip() or None
                 if not reviewer_cmd:
-                    print("No reviewer command configured. Use --reviewer-cmd or set reviewer_command in config.")
+                    _echo("No reviewer command configured. Use --reviewer-cmd or set reviewer_command in config.")
                     return 1
                 rc = _run_agent_step(root, session, "reviewer", reviewer_cmd, round_no)
                 if rc != 0:
@@ -2101,7 +2119,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             return _advance_session(root, args.resume)
 
         if not args.task:
-            print("Missing --task for new session.")
+            _echo("Missing --task for new session.")
             return 1
 
         session = _start_session(
@@ -2119,7 +2137,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
         if args.auto:
             if not builder_cmd or not reviewer_cmd:
-                print(
+                _echo(
                     "Auto mode requires both commands. Provide --builder-cmd and --reviewer-cmd "
                     "or set builder_command/reviewer_command in config."
                 )
@@ -2132,16 +2150,17 @@ def cmd_run(args: argparse.Namespace) -> int:
                 return rc
             return _advance_session(root, sid)
 
-        print(f"Started session: {sid}")
-        print(f"Agents: {_resolve_builder_display_name(session=session)} (builder), {_resolve_reviewer_display_name(session=session)} (reviewer)")
-        print(f"Round {round_no} files:")
-        print(f"  - {files['builder']}")
-        print(f"  - {files['reviewer']}")
-        print(f"  - {files['findings']}")
-        print(f"After updating findings, continue with: a2a run --resume {sid}")
+        _echo(f"Started session: {sid}")
+        _echo(render_session_header(sid, str(session.get("task", "")), round_no, int(session.get("max_rounds", 0) or 0)))
+        _echo(f"Agents: {_resolve_builder_display_name(session=session)} (builder), {_resolve_reviewer_display_name(session=session)} (reviewer)")
+        _echo(f"Round {round_no} files:")
+        _echo(f"  - {files['builder']}")
+        _echo(f"  - {files['reviewer']}")
+        _echo(f"  - {files['findings']}")
+        _echo(f"After updating findings, continue with: a2a run --resume {sid}")
         return 0
     except RuntimeError as exc:
-        print(str(exc))
+        _echo(str(exc))
         return 1
 
 
@@ -2150,7 +2169,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
         root = _must_find_root()
         prep_path = _prepare_path(root)
         if not prep_path.exists():
-            print("Missing .a2a/prepare.json. Run: a2a prepare")
+            _echo("Missing .a2a/prepare.json. Run: a2a prepare")
             return 1
 
         cfg = _load_config(root)
@@ -2161,7 +2180,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
         watch_path = str(Path(args.watch_path).resolve()) if args.watch_path else None
 
         if args.session and args.task:
-            print("Use either --session or --task, not both.")
+            _echo("Use either --session or --task, not both.")
             return 1
 
         if args.session:
@@ -2169,7 +2188,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
             sid = str(session["id"])
         else:
             if not args.task:
-                print("Missing --task for new autonomous session.")
+                _echo("Missing --task for new autonomous session.")
                 return 1
             session = _start_session(
                 root,
@@ -2181,8 +2200,16 @@ def cmd_loop(args: argparse.Namespace) -> int:
                 watch_path=watch_path,
             )
             sid = str(session["id"])
-            print(f"Started session: {sid}")
-            print(
+            _echo(f"Started session: {sid}")
+            _echo(
+                render_session_header(
+                    sid,
+                    str(session.get("task", "")),
+                    int(session.get("current_round", 1) or 1),
+                    int(session.get("max_rounds", 0) or 0),
+                )
+            )
+            _echo(
                 "Agents: "
                 f"{_resolve_builder_display_name(session=session, cfg=cfg)} (builder), "
                 f"{_resolve_reviewer_display_name(session=session, cfg=cfg)} (reviewer)"
@@ -2200,7 +2227,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
             watch_path = str(session.get("watch_path") or "").strip() or None
 
         if not builder_cmd or not reviewer_cmd:
-            print(
+            _echo(
                 "Autonomous loop requires both commands. "
                 "Provide --builder-cmd/--reviewer-cmd or set config/session defaults."
             )
@@ -2213,29 +2240,31 @@ def cmd_loop(args: argparse.Namespace) -> int:
             session = _load_session(root, sid)
             status = str(session.get("status", "in_progress"))
             if status == "lgtm":
-                print(f"Session {sid}: already LGTM.")
+                _echo(f"Session {sid}: already LGTM.")
                 return 0
             if status == "stopped":
-                print(f"Session {sid}: already stopped.")
+                _echo(f"Session {sid}: already stopped.")
                 return 1
 
             if max_iterations is not None and iterations >= max_iterations:
-                print(f"Session {sid}: loop paused after max_iterations={max_iterations}.")
+                _echo(f"Session {sid}: loop paused after max_iterations={max_iterations}.")
                 return 0
 
             round_no = int(session.get("current_round", 1))
             builder_display_name = _resolve_builder_display_name(session=session, cfg=cfg)
             reviewer_display_name = _resolve_reviewer_display_name(session=session, cfg=cfg)
-            print(
+            _echo(
                 f"Session {sid}: autonomous round {round_no} start "
                 f"({builder_display_name} -> {reviewer_display_name})."
             )
+            _echo(render_phase_progress(round_no, int(session.get("max_rounds", 0) or 0)))
 
             rc = _run_agent_step(root, session, "builder", builder_cmd, round_no)
             if rc != 0:
                 return rc
 
             gate_ok, _gate_ran = _run_validation_gate(root, session, round_no)
+            _echo(render_gate_status(gate_ok))
             if not gate_ok:
                 return 1
 
@@ -2255,7 +2284,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
             if rc != 0:
                 return rc
     except RuntimeError as exc:
-        print(str(exc))
+        _echo(str(exc))
         return 1
 
 
@@ -2264,16 +2293,16 @@ def cmd_respin(args: argparse.Namespace) -> int:
         _must_find_root()
         source = Path(args.input_path).resolve()
         if not source.exists():
-            print(f"Respin input path not found: {source}")
+            _echo(f"Respin input path not found: {source}")
             return 1
 
         output = Path(args.out_path).resolve() if args.out_path else _default_respin_output_path(source)
         if output == source:
-            print("Respin output path must differ from input path. Use --out-path to choose a new location.")
+            _echo("Respin output path must differ from input path. Use --out-path to choose a new location.")
             return 1
 
         _copy_respin_source(source, output, force=bool(args.force))
-        print(f"Created respin path: {output}")
+        _echo(f"Created respin path: {output}")
 
         loop_args = argparse.Namespace(
             session=None,
@@ -2286,10 +2315,10 @@ def cmd_respin(args: argparse.Namespace) -> int:
             max_iterations=args.max_iterations,
         )
         rc = cmd_loop(loop_args)
-        print(f"Respin watch path: {output}")
+        _echo(f"Respin watch path: {output}")
         return rc
     except RuntimeError as exc:
-        print(str(exc))
+        _echo(str(exc))
         return 1
 
 
@@ -2303,7 +2332,7 @@ def cmd_review(args: argparse.Namespace) -> int:
 
         session_id = args.session or state.get("active_session_id")
         if not session_id:
-            print("No session provided and no active session in state. Use --session.")
+            _echo("No session provided and no active session in state. Use --session.")
             return 1
 
         session = _load_session(root, session_id)
@@ -2313,7 +2342,7 @@ def cmd_review(args: argparse.Namespace) -> int:
 
         if args.run_agent:
             if not reviewer_cmd:
-                print("No reviewer command configured. Use --reviewer-cmd or set reviewer_command in config.")
+                _echo("No reviewer command configured. Use --reviewer-cmd or set reviewer_command in config.")
                 return 1
             rc = _run_agent_step(root, session, "reviewer", reviewer_cmd, round_no)
             if rc != 0:
@@ -2324,31 +2353,31 @@ def cmd_review(args: argparse.Namespace) -> int:
                 root, session_id, round_no=round_no
             )
         except RuntimeError as exc:
-            print(str(exc))
+            _echo(str(exc))
             return 1
 
         if errors:
-            print("Findings validation failed:")
+            _echo("Findings validation failed:")
             for err in errors:
-                print(f"  - {err}")
+                _echo(f"  - {err}")
             return 1
 
-        print(f"Session: {session_id}")
-        print(f"Round: {round_no}")
-        print(f"Findings file: {findings_path}")
-        print(f"Findings total: {len(findings)}")
-        print(f"Findings open: {open_count}")
+        _echo(f"Session: {session_id}")
+        _echo(f"Round: {round_no}")
+        _echo(f"Findings file: {findings_path}")
+        _echo(f"Findings total: {len(findings)}")
+        _echo(f"Findings open: {open_count}")
         for idx, finding in enumerate(findings, start=1):
             sev = finding.get("severity", "?")
             title = finding.get("title", "")
             loc = finding.get("location", "")
             status = finding.get("status", "")
-            print(f"  {idx}. [{sev}] {title} ({loc}) status={status}")
+            _echo(f"  {idx}. [{sev}] {title} ({loc}) status={status}")
 
         if args.advance:
             current_round = int(session.get("current_round", 1))
             if round_no != current_round:
-                print(
+                _echo(
                     "Cannot advance non-current round. "
                     f"Current round is {current_round}, requested {round_no}."
                 )
@@ -2357,7 +2386,7 @@ def cmd_review(args: argparse.Namespace) -> int:
 
         return 0
     except RuntimeError as exc:
-        print(str(exc))
+        _echo(str(exc))
         return 1
 
 
@@ -2367,23 +2396,23 @@ def cmd_config_get(args: argparse.Namespace) -> int:
         cfg = _load_config(root)
         if args.key:
             if args.key not in cfg:
-                print(f"Config key not found: {args.key}")
+                _echo(f"Config key not found: {args.key}")
                 return 1
             value = cfg[args.key]
             if args.json_output:
-                print(json.dumps(value, indent=2, sort_keys=True))
+                _echo(json.dumps(value, indent=2, sort_keys=True))
             else:
-                print(value)
+                _echo(value)
             return 0
 
         if args.json_output:
-            print(json.dumps(cfg, indent=2, sort_keys=True))
+            _echo(json.dumps(cfg, indent=2, sort_keys=True))
         else:
             for key in sorted(cfg.keys()):
-                print(f"{key}={cfg[key]}")
+                _echo(f"{key}={cfg[key]}")
         return 0
     except RuntimeError as exc:
-        print(str(exc))
+        _echo(str(exc))
         return 1
 
 
@@ -2396,10 +2425,10 @@ def cmd_config_set(args: argparse.Namespace) -> int:
         value = _parse_value(args.value)
         cfg[key] = value
         dump_json(cfg_path, cfg)
-        print(f"Set {key}={value}")
+        _echo(f"Set {key}={value}")
         return 0
     except RuntimeError as exc:
-        print(str(exc))
+        _echo(str(exc))
         return 1
 
 
@@ -2413,10 +2442,10 @@ def cmd_config_reset(args: argparse.Namespace) -> int:
             if "reviewer_name" in old:
                 cfg["reviewer_name"] = old["reviewer_name"]
         dump_json(cfg_path, cfg)
-        print(f"Config reset to defaults at {cfg_path}")
+        _echo(f"Config reset to defaults at {cfg_path}")
         return 0
     except RuntimeError as exc:
-        print(str(exc))
+        _echo(str(exc))
         return 1
 
 
@@ -2425,10 +2454,10 @@ def cmd_report(args: argparse.Namespace) -> int:
         root = _must_find_root()
         if args.all:
             if args.session:
-                print("--all cannot be used with --session.")
+                _echo("--all cannot be used with --session.")
                 return 1
             if args.latest:
-                print("--all cannot be used with --latest.")
+                _echo("--all cannot be used with --latest.")
                 return 1
             status_filters = None
             if args.status:
@@ -2453,12 +2482,12 @@ def cmd_report(args: argparse.Namespace) -> int:
             out_path = Path(args.output).resolve()
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(out + ("" if out.endswith("\n") else "\n"), encoding="utf-8")
-            print(f"Report written: {out_path}")
+            _echo(f"Report written: {out_path}")
         else:
-            print(out)
+            _echo(out)
         return 0
     except RuntimeError as exc:
-        print(str(exc))
+        _echo(str(exc))
         return 1
 
 
@@ -2514,23 +2543,33 @@ def _load_status_view(root: Path) -> StatusView:
 def cmd_status(_args: argparse.Namespace) -> int:
     root = find_a2a_root()
     if root is None:
-        print("No .a2a directory found in current path or parents.")
-        print("Run: a2a init")
+        _echo("No .a2a directory found in current path or parents.")
+        _echo("Run: a2a init")
         return 1
 
     view = _load_status_view(root)
-    print(f"A2A root: {view.root}")
-    print(f"Builder: {view.builder_name}")
-    print(f"Reviewer: {view.reviewer_name}")
-    print(f"Reviewer internal name: {view.reviewer_internal_name}")
-    print(f"Sessions: {view.session_count}")
-    print(f"Active session: {view.active_session_id or 'none'}")
+    active_round = view.current_round or 0
+    active_max = view.max_rounds or 0
+    _echo(
+        render_session_header(
+            view.active_session_id or "none",
+            "status",
+            active_round,
+            active_max,
+        )
+    )
+    _echo(f"A2A root: {view.root}")
+    _echo(f"Builder: {view.builder_name}")
+    _echo(f"Reviewer: {view.reviewer_name}")
+    _echo(f"Reviewer internal name: {view.reviewer_internal_name}")
+    _echo(f"Sessions: {view.session_count}")
+    _echo(f"Active session: {view.active_session_id or 'none'}")
     if view.active_session_id is not None:
         findings = "unknown" if view.open_findings is None else str(view.open_findings)
-        print(f"Open findings (active): {findings}")
-        print(f"Status (active): {view.active_status or 'unknown'}")
+        _echo(f"Open findings (active): {findings}")
+        _echo(f"Status (active): {view.active_status or 'unknown'}")
         if view.current_round is not None and view.max_rounds is not None:
-            print(f"Round (active): {view.current_round}/{view.max_rounds}")
+            _echo(f"Round (active): {view.current_round}/{view.max_rounds}")
     return 0
 
 

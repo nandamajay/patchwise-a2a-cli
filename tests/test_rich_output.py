@@ -1,0 +1,114 @@
+from a2a_cli.rich_output import (
+    render_finding_card,
+    render_gate_status,
+    render_lgtm_banner,
+    render_round_table,
+    render_scores,
+    render_session_header,
+)
+
+
+def test_render_session_header_no_crash() -> None:
+    out = render_session_header("sess-1", "smoke-task", 1, 3, width=90)
+    assert "sess-1" in out
+    assert "smoke-task" in out
+    assert "1/3" in out
+
+
+def test_render_round_table_all_fields_present() -> None:
+    out = render_round_table(
+        {
+            "round": 2,
+            "max_rounds": 5,
+            "gate_passed": True,
+            "builder_confidence": 80,
+            "reviewer_confidence": 90,
+            "builder_patch_gauge": 30,
+            "verdict": "REJECT",
+            "findings": {
+                "total": 4,
+                "open": 2,
+                "closed": 2,
+                "new_since_prev": 1,
+                "resolved_since_prev": 2,
+            },
+            "prior_comments": {"totals": {"received_total": 6, "open": 1, "closed": 5}},
+        },
+        width=100,
+    )
+    assert "Round 2/5" in out
+    assert "Gate:" in out
+    assert "CHANAKYA" in out
+    assert "ARYABHATTA" in out
+    assert "Findings: total=4 open=2 closed=2 new=1 resolved=2" in out
+    assert "Prior Comments: received=6 open=1 closed=5" in out
+
+
+def test_render_finding_card_severity_colours() -> None:
+    critical = render_finding_card(
+        {
+            "severity": "critical",
+            "title": "Null deref",
+            "location": "foo.c:10",
+            "id": "F-1",
+            "description": "possible null dereference",
+        }
+    )
+    high = render_finding_card({"severity": "high", "title": "x", "location": "a:1", "id": "F-2"})
+    medium = render_finding_card({"severity": "medium", "title": "x", "location": "a:1", "id": "F-3"})
+    low = render_finding_card({"severity": "low", "title": "x", "location": "a:1", "id": "F-4"})
+    assert "🔴 critical" in critical
+    assert "🟠 high" in high
+    assert "🟡 medium" in medium
+    assert "🔵 low" in low
+
+
+def test_render_scores_progress_bars() -> None:
+    out = render_scores(80, 90, 30)
+    assert "Chanakya  confidence" in out
+    assert "Aryabhata confidence" in out
+    assert "Patch gauge" in out
+    assert "80%" in out
+    assert "90%" in out
+    assert "30%" in out
+
+
+def test_render_lgtm_banner_displays_correctly() -> None:
+    out = render_lgtm_banner("sess-123", rounds=3, total_findings=6)
+    assert "LGTM" in out
+    assert "sess-123" in out
+    assert "Rounds: 3" in out
+    assert "Total findings: 6" in out
+
+
+def test_render_gate_passed() -> None:
+    assert "PASSED" in render_gate_status(True)
+
+
+def test_render_gate_failed() -> None:
+    assert "FAILED" in render_gate_status(False)
+
+
+def test_narrow_terminal_80_cols_no_overflow() -> None:
+    out = render_round_table(
+        {
+            "round": 1,
+            "max_rounds": 3,
+            "gate_passed": False,
+            "builder_confidence": None,
+            "reviewer_confidence": None,
+            "builder_patch_gauge": "N/A",
+            "verdict": "REJECT",
+            "findings": {"total": 0, "open": 0, "closed": 0, "new_since_prev": 0, "resolved_since_prev": 0},
+            "prior_comments": {"totals": {"received_total": 0, "open": 0, "closed": 0}},
+        },
+        width=80,
+    )
+    for line in out.splitlines():
+        assert len(line) <= 80
+
+
+def test_ascii_fallback_no_unicode_box_chars() -> None:
+    out = render_lgtm_banner("sess-ascii", ascii_only=True)
+    assert "╔" not in out
+    assert "+" in out
