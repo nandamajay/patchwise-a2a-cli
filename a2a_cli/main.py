@@ -30,6 +30,12 @@ from .rich_output import (
     render_scores,
     render_session_header,
 )
+from .score_engine import (
+    ScoreThresholds,
+    append_score_decision,
+    evaluate_round_scores,
+    mark_findings_low_quality,
+)
 from .types import StatusView
 
 try:
@@ -539,6 +545,7 @@ def _agent_env(session: dict, round_no: int, files: dict[str, Path], role: str) 
             "A2A_FALLBACK_BUILDER_CMD": fallback_builder_cmd,
             "A2A_FALLBACK_REVIEWER_CMD": fallback_reviewer_cmd,
             "A2A_LLM_TIMEOUT_SEC": str(llm_timeout_sec),
+            "A2A_EXTRA_SCRUTINY": "1" if bool(session.get("extra_scrutiny_next_round")) else "0",
         }
     )
     prior = session.get("prior_review")
@@ -1979,15 +1986,37 @@ def _advance_session(root: Path, session_id: str) -> int:
         return 1
 
     prev_open = None
+    prev_builder_confidence = None
+    prev_reviewer_confidence = None
     for previous_round in session.get("rounds", []):
         if int(previous_round.get("round", -1)) == round_no - 1:
             prev_open = int(previous_round.get("findings_open", 0))
+            prev_builder_confidence = int(previous_round.get("builder_confidence", 0))
+            prev_reviewer_confidence = int(previous_round.get("reviewer_confidence", 0))
             break
 
     change_stats = _builder_change_stats(root, session_id, round_no, reviewer_name)
     builder_patch_gauge = _compute_builder_patch_gauge(change_stats)
     builder_confidence = _compute_builder_confidence(prev_open, open_count, change_stats)
     reviewer_confidence = _compute_reviewer_confidence(findings)
+    thresholds = ScoreThresholds.from_config(_load_config_or_defaults(root))
+    score_decision = evaluate_round_scores(
+        round_no=round_no,
+        open_findings=open_count,
+        builder_confidence=builder_confidence,
+        reviewer_confidence=reviewer_confidence,
+        patch_gauge=builder_patch_gauge,
+        previous_builder_confidence=prev_builder_confidence,
+        previous_reviewer_confidence=prev_reviewer_confidence,
+        thresholds=thresholds,
+    )
+    if score_decision.get("low_quality_reviewer"):
+        findings_payload = mark_findings_low_quality({"findings": findings})
+        findings_path.write_text(_as_json(findings_payload), encoding="utf-8")
+    append_score_decision(_report_dir(root, session_id) / "score_decisions.json", score_decision)
+    messages = [str(m) for m in score_decision.get("messages", []) if str(m).strip()]
+    for msg in messages:
+        _echo(f"Score decision: {msg}")
 
     round_record = {
         "round": round_no,
@@ -2001,6 +2030,7 @@ def _advance_session(root: Path, session_id: str) -> int:
         "builder_patch_gauge": builder_patch_gauge,
         "builder_confidence": builder_confidence,
         "reviewer_confidence": reviewer_confidence,
+        "score_decision": score_decision,
     }
 
     round_summary = _build_round_runtime_summary(
@@ -2050,7 +2080,28 @@ def _advance_session(root: Path, session_id: str) -> int:
     _echo(f"Round summary md: {summary_files['md']}")
 
     max_rounds = int(session.get("max_rounds", 1))
-    if open_count == 0:
+    if score_decision.get("abort_session"):
+        session["status"] = "stopped"
+        _append_summary_verdict(
+            root,
+            session_id,
+            f"STOPPED ({score_decision.get('abort_reason') or 'score gate abort'})",
+        )
+        if state.get("active_session_id") == session_id:
+            state["active_session_id"] = None
+            state["last_updated"] = _now_utc()
+            dump_json(state_path, state)
+        _write_session(root, session)
+        _echo(str(score_decision.get("abort_reason") or "Session aborted by score engine."))
+        return 1
+
+    should_lgtm = open_count == 0
+    if score_decision.get("block_lgtm"):
+        should_lgtm = False
+    if score_decision.get("force_extra_round"):
+        should_lgtm = False
+
+    if should_lgtm:
         session["status"] = "lgtm"
         _append_summary_verdict(root, session_id, "LGTM")
         if state.get("active_session_id") == session_id:
@@ -2063,7 +2114,10 @@ def _advance_session(root: Path, session_id: str) -> int:
 
     if round_no >= max_rounds:
         session["status"] = "stopped"
-        _append_summary_verdict(root, session_id, "STOPPED (max rounds reached)")
+        stop_reason = "STOPPED (max rounds reached)"
+        if score_decision.get("block_lgtm") and open_count == 0:
+            stop_reason = "STOPPED (max rounds reached with blocked LGTM due to low reviewer confidence)"
+        _append_summary_verdict(root, session_id, stop_reason)
         if state.get("active_session_id") == session_id:
             state["active_session_id"] = None
             state["last_updated"] = _now_utc()
@@ -2075,6 +2129,7 @@ def _advance_session(root: Path, session_id: str) -> int:
     next_round = round_no + 1
     session["current_round"] = next_round
     session["status"] = "in_progress"
+    session["extra_scrutiny_next_round"] = bool(score_decision.get("extra_scrutiny_next_round"))
     _write_session(root, session)
     _write_round_templates(
         root,

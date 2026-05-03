@@ -27,6 +27,13 @@ def default_config() -> dict:
         "validation_gate_timeout_sec": 300,
         "validation_gate_max_checkpatch_files": 50,
         "validation_gate_command": None,
+        "score_thresholds": {
+            "low_builder_confidence": 40,
+            "low_reviewer_confidence": 60,
+            "high_confidence_lgtm": 90,
+            "volatility_swing": 30,
+            "zero_patch_gauge": 0,
+        },
         "respin": {
             "conflict_strategy": "abort",
             "keep_temp_branch": False,
