@@ -227,6 +227,12 @@ fi
 
 BUILDER_INNER=$(cat <<EOF
 cd "$ROOT"
+if [[ -d "/host/bin" ]]; then
+  export PATH="/host/bin:\$PATH"
+fi
+if [[ -f "$ROOT/.runtime/qgenie-cli/config.toml" ]]; then
+  export QGENIE_CLI_HOME="$ROOT/.runtime/qgenie-cli"
+fi
 export A2A_SESSION_ID="$SESSION_ID"
 export A2A_TASK="${TASK:-manual-live}"
 export A2A_ROUND="$ROUND"
@@ -247,6 +253,12 @@ EOF
 
 REVIEWER_INNER=$(cat <<EOF
 cd "$ROOT"
+if [[ -d "/host/bin" ]]; then
+  export PATH="/host/bin:\$PATH"
+fi
+if [[ -f "$ROOT/.runtime/qgenie-cli/config.toml" ]]; then
+  export QGENIE_CLI_HOME="$ROOT/.runtime/qgenie-cli"
+fi
 export A2A_SESSION_ID="$SESSION_ID"
 export A2A_TASK="${TASK:-manual-live}"
 export A2A_ROUND="$ROUND"
