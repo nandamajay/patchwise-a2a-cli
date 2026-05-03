@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import signal
 import shutil
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +26,7 @@ _LLM_REVIEWER_CMD = "PATH=/host/bin:$PATH bash /workspace/A2A_CLI/scripts/agents
 class RuntimeSession:
     proc: subprocess.Popen
     provisional_id: str
+    started_at_epoch: float
     session_id: str | None = None
     output_thread: threading.Thread | None = None
     discovered: threading.Event = field(default_factory=threading.Event)
@@ -68,6 +71,63 @@ def _append_line(path: Path, line: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(line)
+
+
+def _discover_session_id_from_files(
+    req: SessionStartRequest,
+    *,
+    not_before_epoch: float,
+    max_scan: int = 40,
+) -> str | None:
+    try:
+        req_watch = str(Path(req.watch_path).resolve())
+    except Exception:
+        req_watch = str(req.watch_path)
+
+    candidates = sorted(
+        SETTINGS.sessions_dir.glob("sess-*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )[:max_scan]
+
+    for path in candidates:
+        if path.stat().st_mtime < (not_before_epoch - 5):
+            continue
+
+        try:
+            import json
+
+            with path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception:
+            continue
+
+        created_at = str(payload.get("created_at") or "")
+        if created_at:
+            try:
+                if datetime.fromisoformat(created_at).timestamp() < (not_before_epoch - 5):
+                    continue
+            except ValueError:
+                pass
+
+        payload_task = str(payload.get("task") or "")
+        payload_max_rounds = int(payload.get("max_rounds") or 0)
+        payload_watch_raw = str(payload.get("watch_path") or "")
+        try:
+            payload_watch = str(Path(payload_watch_raw).resolve())
+        except Exception:
+            payload_watch = payload_watch_raw
+
+        if payload_task != req.task:
+            continue
+        if payload_max_rounds != int(req.max_rounds):
+            continue
+        if payload_watch != req_watch:
+            continue
+
+        return str(payload.get("id") or path.stem)
+
+    return None
 
 
 def _drain_process_output(runtime: RuntimeSession) -> None:
@@ -120,6 +180,7 @@ def _spawn_loop(req: SessionStartRequest) -> RuntimeSession:
 
     proc_env = dict(os.environ)
     proc_env["PATH"] = f"/host/bin:{proc_env.get('PATH', '')}"
+    proc_env["PYTHONUNBUFFERED"] = "1"
 
     proc = subprocess.Popen(
         cmd,
@@ -129,9 +190,14 @@ def _spawn_loop(req: SessionStartRequest) -> RuntimeSession:
         text=True,
         bufsize=1,
         env=proc_env,
+        start_new_session=True,
     )
 
-    runtime = RuntimeSession(proc=proc, provisional_id=provisional_id)
+    runtime = RuntimeSession(
+        proc=proc,
+        provisional_id=provisional_id,
+        started_at_epoch=time.time(),
+    )
     thread = threading.Thread(target=_drain_process_output, args=(runtime,), daemon=True)
     runtime.output_thread = thread
     thread.start()
@@ -141,11 +207,19 @@ def _spawn_loop(req: SessionStartRequest) -> RuntimeSession:
 async def start_session(req: SessionStartRequest) -> SessionStatus:
     runtime = _spawn_loop(req)
 
-    found = await asyncio.to_thread(runtime.discovered.wait, 20.0)
-    if not found:
-        raise RuntimeError("Timed out waiting for session creation")
-
-    session_id = str(runtime.session_id or runtime.provisional_id)
+    found = await asyncio.to_thread(runtime.discovered.wait, 45.0)
+    if found:
+        session_id = str(runtime.session_id or runtime.provisional_id)
+    else:
+        discovered_sid = _discover_session_id_from_files(
+            req,
+            not_before_epoch=runtime.started_at_epoch,
+        )
+        if not discovered_sid:
+            raise RuntimeError("Timed out waiting for session creation")
+        session_id = discovered_sid
+        with _RUNTIME_LOCK:
+            _RUNTIME_BY_ID[session_id] = runtime
 
     if req.open_screen:
         screen_log = SETTINGS.logs_dir / session_id / "screen-launch.log"
@@ -209,11 +283,17 @@ async def stop_session(session_id: str) -> None:
         runtime = _RUNTIME_BY_ID.pop(session_id, None)
 
     if runtime is not None and runtime.proc.poll() is None:
-        runtime.proc.terminate()
+        try:
+            os.killpg(runtime.proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
         try:
             runtime.proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            runtime.proc.kill()
+            try:
+                os.killpg(runtime.proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
     await stop_bridges(session_id)
 

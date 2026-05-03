@@ -5,6 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WEB_DIR="$(dirname "$SCRIPT_DIR")"
 
 echo "🚀 Starting PatchWise Web UI..."
+echo "🔐 Syncing QGenie runtime config..."
+"$SCRIPT_DIR/sync_qgenie_config.sh"
 echo "📦 Building Docker image..."
 cd "$WEB_DIR"
 docker compose up -d --build

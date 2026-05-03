@@ -12,10 +12,12 @@ services:
       - /local/mnt/workspace/upstream_patches:/workspace/patches:ro
       - /local/mnt/workspace/upstream_patches:/local/mnt/workspace/upstream_patches:ro
       - ${HOME}/.local/bin:/host/bin:ro
+      - /local/mnt/workspace/A2A_CLI/.runtime/qgenie-cli:/root/.config/qgenie-cli
     environment:
       - A2A_ROOT=/workspace/A2A_CLI
       - PATCHES_ROOT=/workspace/patches
       - PORT=7788
       - LOG_LEVEL=info
+      - QGENIE_CLI_HOME=/root/.config/qgenie-cli
     restart: unless-stopped
     network_mode: host
