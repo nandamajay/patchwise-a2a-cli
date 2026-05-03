@@ -40,6 +40,13 @@ def default_config() -> dict:
             "block_on_no_evidence": True,
             "elixir_base": "https://elixir.bootlin.com/linux/latest",
         },
+        "static_analysis": {
+            "sparse": True,
+            "coccinelle": True,
+            "block_on_sparse": True,
+            "block_on_coccinelle": False,
+            "smatch": False,
+        },
         "respin": {
             "conflict_strategy": "abort",
             "keep_temp_branch": False,

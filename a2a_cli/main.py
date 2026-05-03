@@ -48,6 +48,7 @@ from .score_engine import (
     mark_findings_low_quality,
 )
 from .series_manager import auto_discover_series, run_all_series
+from .static_analysis import run_gate as run_static_analysis_gate
 from .types import StatusView
 from .upstream_evidence import enrich_findings_with_evidence, kernel_tree_exists
 
@@ -856,6 +857,48 @@ def _run_validation_gate(root: Path, session: dict, round_no: int) -> tuple[bool
     return True, True
 
 
+def _static_analysis_artifact(root: Path, session_id: str, round_no: int, reviewer_name: str) -> Path:
+    files = _round_files(root, session_id, round_no, reviewer_name)
+    return files["report_dir"] / f"{_round_basename(round_no, 'static-analysis')}.json"
+
+
+def _run_static_analysis(root: Path, session: dict, round_no: int) -> dict:
+    cfg = _load_config_or_defaults(root)
+    sa_cfg = cfg.get("static_analysis", {}) if isinstance(cfg, dict) else {}
+    reviewer_name = str(session.get("reviewer_name", "aryabhatta"))
+    artifact = _static_analysis_artifact(root, str(session["id"]), round_no, reviewer_name)
+    watch_raw = str(session.get("watch_path") or "").strip()
+    watch_path = Path(watch_raw) if watch_raw else None
+
+    result: dict = {
+        "enabled": bool(sa_cfg),
+        "skipped": True,
+        "reason": "no_watch_path",
+        "gate_passed": True,
+    }
+    if not watch_path or not watch_path.exists():
+        dump_json(artifact, result)
+        return result
+
+    patch_targets = _collect_watch_patch_files(watch_path)
+    if not patch_targets:
+        result["reason"] = "no_patch_files"
+        dump_json(artifact, result)
+        return result
+
+    kernel_root = _detect_kernel_repo_root(watch_path)
+    if kernel_root is None:
+        result["reason"] = "kernel_tree_not_found"
+        dump_json(artifact, result)
+        return result
+
+    static_payload = run_static_analysis_gate(str(patch_targets[0]), str(kernel_root), sa_cfg)
+    static_payload["skipped"] = False
+    static_payload["reason"] = ""
+    dump_json(artifact, static_payload)
+    return static_payload
+
+
 def _load_findings_from_file(path: Path) -> list[dict]:
     try:
         return _load_findings_payload(path)
@@ -1394,6 +1437,21 @@ def _run_agent_step(root: Path, session: dict, role: str, command: str, round_no
         elixir_base = str(evidence_cfg.get("elixir_base") or "https://elixir.bootlin.com/linux/latest")
         payload = load_json(files["findings"]) if files["findings"].exists() else {"findings": []}
         findings_rows = payload.get("findings", []) if isinstance(payload, dict) else []
+        static_path = _static_analysis_artifact(root, str(session["id"]), round_no, reviewer_name)
+        static_payload = load_json(static_path) if static_path.exists() else {}
+        sparse_info = static_payload.get("sparse", {}) if isinstance(static_payload, dict) else {}
+        if isinstance(findings_rows, list) and bool(sparse_info.get("blocking")):
+            findings_rows.append(
+                {
+                    "id": f"static-sparse-round{round_no}",
+                    "severity": "high",
+                    "title": "Sparse new warning introduced",
+                    "location": "static-analysis:sparse",
+                    "evidence": sparse_info.get("new_warnings", []),
+                    "required_action": "Resolve new sparse warnings before LGTM",
+                    "status": "open",
+                }
+            )
         if isinstance(findings_rows, list):
             kb_rows = list_kb_entries(root)
             enriched, violations = enrich_findings_with_evidence(
@@ -2448,6 +2506,12 @@ def cmd_loop(args: argparse.Namespace) -> int:
             _echo(render_gate_status(gate_ok))
             if not gate_ok:
                 return 1
+
+            sa_result = _run_static_analysis(root, session, round_no)
+            if not sa_result.get("gate_passed", True):
+                _echo("Static analysis gate: sparse introduced new warnings (blocking).")
+            elif not sa_result.get("skipped", False):
+                _echo("Static analysis gate: passed.")
 
             rc = _run_agent_step(root, session, "reviewer", reviewer_cmd, round_no)
             if rc != 0:

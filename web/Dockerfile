@@ -6,6 +6,8 @@ RUN apt-get update && apt-get install -y \
     screen \
     curl \
     git \
+    sparse \
+    coccinelle \
     procps \
     && rm -rf /var/lib/apt/lists/*
 
