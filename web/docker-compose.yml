@@ -10,7 +10,6 @@ services:
       - /local/mnt/workspace/A2A_CLI:/workspace/A2A_CLI
       - /local/mnt/workspace/upstream_patches:/workspace/patches:ro
       - ${HOME}/.local/bin:/host/bin:ro
-      - ${HOME}/.config/qgenie:/root/.config/qgenie:ro
     environment:
       - A2A_ROOT=/workspace/A2A_CLI
       - PATCHES_ROOT=/workspace/patches
