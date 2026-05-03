@@ -47,6 +47,14 @@ def default_config() -> dict:
             "block_on_coccinelle": False,
             "smatch": False,
         },
+        "submission": {
+            "dry_run": True,
+            "dry_run_recipient": "nandam@qti.qualcomm.com",
+            "allow_community_send": False,
+            "community_to": [],
+            "community_cc": [],
+            "hitl_timeout_secs": 300,
+        },
         "respin": {
             "conflict_strategy": "abort",
             "keep_temp_branch": False,

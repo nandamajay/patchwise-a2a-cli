@@ -28,6 +28,7 @@ from .knowledge_base import (
     load_kb,
     update_kb_after_lgtm,
 )
+from .hitl_gate import run_hitl_gate
 from .lore_watcher import watch as watch_lore
 from .maintainer_tracker import load_profiles
 from .respin import respin as run_respin
@@ -49,6 +50,7 @@ from .score_engine import (
 )
 from .series_manager import auto_discover_series, run_all_series
 from .static_analysis import run_gate as run_static_analysis_gate
+from .submission_mailer import build_patchset_summary
 from .types import StatusView
 from .upstream_evidence import enrich_findings_with_evidence, kernel_tree_exists
 
@@ -2808,6 +2810,35 @@ def cmd_maintainers(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_submit(args: argparse.Namespace) -> int:
+    try:
+        root = _must_find_root()
+        sid = str(args.session or "").strip()
+        if not sid:
+            _echo("Missing --session for submit.")
+            return 1
+        session = _load_session(root, sid)
+        status = str(session.get("status", "")).lower()
+        if status != "lgtm":
+            _echo(f"Submit blocked: session {sid} is not LGTM (status={status or 'unknown'}).")
+            return 1
+
+        cfg = _load_config_or_defaults(root)
+        patchset_summary = build_patchset_summary(root, sid)
+        result = run_hitl_gate(
+            root,
+            sid,
+            patchset_summary,
+            cfg,
+            resume=bool(args.resume),
+        )
+        _echo(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if str(result.get("status", "")) == "sent" else 1
+    except RuntimeError as exc:
+        _echo(str(exc))
+        return 1
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     try:
         root = _must_find_root()
@@ -3211,6 +3242,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_maint.add_argument("--list", action="store_true", help="List maintainer profiles.")
     p_maint.add_argument("--profile", help="Show specific maintainer profile.")
     p_maint.set_defaults(func=cmd_maintainers)
+
+    p_submit = sub.add_parser("submit", help="Run mandatory HITL approval gate then send dry-run submission email.")
+    p_submit.add_argument("--session", required=True, help="LGTM session id to submit.")
+    p_submit.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume a previously aborted HITL gate session.",
+    )
+    p_submit.set_defaults(func=cmd_submit)
 
     p_report = sub.add_parser("report", help="Render session report (markdown/json).")
     p_report.add_argument("--session", help="Session id. Defaults to active or latest.")
