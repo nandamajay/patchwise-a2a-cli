@@ -993,6 +993,225 @@ def _build_prior_comment_summary(session: dict, rounds: list[dict]) -> list[dict
     return rows
 
 
+def _round_summary_artifacts(root: Path, session_id: str, round_no: int, reviewer_name: str) -> dict[str, Path]:
+    files = _round_files(root, session_id, round_no, reviewer_name)
+    return {
+        "json": files["report_dir"] / f"{_round_basename(round_no, 'summary')}.json",
+        "md": files["report_dir"] / f"{_round_basename(round_no, 'summary')}.md",
+    }
+
+
+def _finding_identity(finding: dict) -> str:
+    sid = str(finding.get("source_comment_id") or "").strip()
+    if sid:
+        return sid
+    return f"anon-{_finding_fingerprint(finding)[:12]}"
+
+
+def _build_round_runtime_summary(
+    root: Path,
+    session: dict,
+    round_no: int,
+    findings: list[dict],
+    open_count: int,
+    change_stats: dict[str, int],
+    builder_patch_gauge: int,
+    builder_confidence: int,
+    reviewer_confidence: int,
+) -> dict:
+    session_id = str(session["id"])
+    reviewer_name = str(session.get("reviewer_name", "aryabhatta"))
+    files = _round_files(root, session_id, round_no, reviewer_name)
+    gate_files = _gate_artifacts(root, session_id, round_no, reviewer_name)
+    gate_payload = load_json(gate_files["json"]) if gate_files["json"].exists() else {}
+    gate_passed = gate_payload.get("passed") if isinstance(gate_payload, dict) else None
+    gate_failures = int(gate_payload.get("failures", 0)) if isinstance(gate_payload, dict) else 0
+
+    closed_count = len(findings) - open_count
+    current_ids = {_finding_identity(f) for f in findings if isinstance(f, dict)}
+    current_open_ids = {
+        _finding_identity(f)
+        for f in findings
+        if isinstance(f, dict) and str(f.get("status", "")).lower() != "closed"
+    }
+
+    previous_round = None
+    for record in session.get("rounds", []):
+        if int(record.get("round", -1)) == round_no - 1:
+            previous_round = record
+            break
+
+    previous_ids: set[str] = set()
+    previous_open_ids: set[str] = set()
+    if previous_round is not None:
+        prev_findings = _extract_effective_round_findings(session, previous_round)
+        previous_ids = {_finding_identity(f) for f in prev_findings if isinstance(f, dict)}
+        previous_open_ids = {
+            _finding_identity(f)
+            for f in prev_findings
+            if isinstance(f, dict) and str(f.get("status", "")).lower() != "closed"
+        }
+
+    new_ids = sorted(current_ids - previous_ids)
+    resolved_ids = sorted(previous_open_ids - current_open_ids)
+
+    open_items: list[dict] = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        if str(finding.get("status", "")).lower() == "closed":
+            continue
+        open_items.append(
+            {
+                "id": _finding_identity(finding),
+                "severity": str(finding.get("severity") or ""),
+                "title": str(finding.get("title") or ""),
+                "location": str(finding.get("location") or ""),
+                "required_action": str(finding.get("required_action") or ""),
+            }
+        )
+
+    rounds_plus_current = list(session.get("rounds", [])) + [
+        {
+            "round": round_no,
+            "findings_file": str(files["findings"]),
+            "findings_open": open_count,
+            "findings_total": len(findings),
+            "validated_at": _now_utc(),
+        }
+    ]
+    prior_rows = _build_prior_comment_summary(session, rounds_plus_current)
+    prior_totals = {
+        "received_total": len(prior_rows),
+        "open": len([r for r in prior_rows if r.get("current_status") != "closed"]),
+        "closed": len([r for r in prior_rows if r.get("current_status") == "closed"]),
+        "fixed_by_a2a": len([r for r in prior_rows if bool(r.get("fixed_by_a2a"))]),
+    }
+
+    return {
+        "session_id": session_id,
+        "task": str(session.get("task") or ""),
+        "round": round_no,
+        "reviewer_name": reviewer_name,
+        "watch_path": str(session.get("watch_path") or ""),
+        "findings": {
+            "total": len(findings),
+            "open": open_count,
+            "closed": closed_count,
+            "new_since_prev": len(new_ids),
+            "resolved_since_prev": len(resolved_ids),
+            "new_ids": new_ids,
+            "resolved_ids": resolved_ids,
+            "open_items": open_items[:8],
+        },
+        "prior_comments": {
+            "totals": prior_totals,
+            "tracked": prior_rows,
+        },
+        "builder": {
+            "changed_files": int(change_stats.get("changed_files", 0)),
+            "diff_lines": int(change_stats.get("diff_lines", 0)),
+            "diff_hunks": int(change_stats.get("diff_hunks", 0)),
+            "patch_gauge": builder_patch_gauge,
+            "confidence": builder_confidence,
+        },
+        "reviewer": {
+            "confidence": reviewer_confidence,
+        },
+        "validation_gate": {
+            "passed": gate_passed,
+            "failures": gate_failures,
+            "artifact_json": str(gate_files["json"]),
+            "artifact_log": str(gate_files["log"]),
+        },
+        "artifacts": {
+            "builder_report": str(files["builder"]),
+            "reviewer_report": str(files["reviewer"]),
+            "findings": str(files["findings"]),
+        },
+        "generated_at": _now_utc(),
+    }
+
+
+def _render_round_runtime_summary_markdown(summary: dict) -> str:
+    findings = summary.get("findings", {})
+    prior = summary.get("prior_comments", {}).get("totals", {})
+    builder = summary.get("builder", {})
+    reviewer = summary.get("reviewer", {})
+    gate = summary.get("validation_gate", {})
+    artifacts = summary.get("artifacts", {})
+
+    lines = [
+        f"# Round {summary.get('round')} Summary",
+        "",
+        f"- session: {summary.get('session_id')}",
+        f"- task: {summary.get('task')}",
+        f"- reviewer: {summary.get('reviewer_name')}",
+        f"- watch_path: {summary.get('watch_path')}",
+        "",
+        "## Reviewer Findings",
+        "",
+        f"- total: {findings.get('total')}",
+        f"- open: {findings.get('open')}",
+        f"- closed: {findings.get('closed')}",
+        f"- new_since_prev: {findings.get('new_since_prev')}",
+        f"- resolved_since_prev: {findings.get('resolved_since_prev')}",
+        "",
+        "## Prior Comments",
+        "",
+        f"- received_total: {prior.get('received_total')}",
+        f"- open: {prior.get('open')}",
+        f"- closed: {prior.get('closed')}",
+        f"- fixed_by_a2a: {prior.get('fixed_by_a2a')}",
+        "",
+        "## Scores",
+        "",
+        f"- builder_patch_gauge: {builder.get('patch_gauge')}",
+        f"- builder_confidence: {builder.get('confidence')}",
+        f"- reviewer_confidence: {reviewer.get('confidence')}",
+        "",
+        "## Validation Gate",
+        "",
+        f"- passed: {gate.get('passed')}",
+        f"- failures: {gate.get('failures')}",
+        f"- gate_json: {gate.get('artifact_json')}",
+        f"- gate_log: {gate.get('artifact_log')}",
+        "",
+        "## Artifacts",
+        "",
+        f"- builder_report: {artifacts.get('builder_report')}",
+        f"- reviewer_report: {artifacts.get('reviewer_report')}",
+        f"- findings: {artifacts.get('findings')}",
+        "",
+        "## Top Open Findings",
+        "",
+    ]
+
+    open_items = findings.get("open_items", [])
+    if not isinstance(open_items, list) or not open_items:
+        lines.append("- none")
+    else:
+        for item in open_items:
+            lines.append(
+                "- [{sev}] {title} ({loc}) id={id}".format(
+                    sev=item.get("severity", "?"),
+                    title=item.get("title", ""),
+                    loc=item.get("location", ""),
+                    id=item.get("id", ""),
+                )
+            )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _write_round_runtime_summary(root: Path, session: dict, round_no: int, summary: dict) -> dict[str, Path]:
+    reviewer_name = str(session.get("reviewer_name", "aryabhatta"))
+    out = _round_summary_artifacts(root, str(session["id"]), round_no, reviewer_name)
+    dump_json(out["json"], summary)
+    out["md"].write_text(_render_round_runtime_summary_markdown(summary), encoding="utf-8")
+    return out
+
+
 def _run_agent_step(root: Path, session: dict, role: str, command: str, round_no: int) -> int:
     reviewer_name = str(session.get("reviewer_name", "aryabhatta"))
     files = _round_files(root, str(session["id"]), round_no, reviewer_name)
@@ -1189,6 +1408,9 @@ def _session_report_payload(root: Path, session_id: str) -> dict:
         row.setdefault("gate_ran", False)
         row.setdefault("gate_passed", None)
         row.setdefault("gate_failures", 0)
+        summary_artifacts = _round_summary_artifacts(root, session_id, round_no, reviewer_name)
+        row["round_summary_json"] = str(summary_artifacts["json"]) if summary_artifacts["json"].exists() else None
+        row["round_summary_md"] = str(summary_artifacts["md"]) if summary_artifacts["md"].exists() else None
 
         previous_open = findings_open
         rounds.append(row)
@@ -1342,7 +1564,8 @@ def _render_markdown_report(payload: dict) -> str:
             lines.append(
                 "- round {round}: findings_total={total}, findings_open={open}, "
                 "builder_patch_gauge={gauge}, builder_confidence={bconf}, reviewer_confidence={rconf}, "
-                "gate_passed={gate_passed}, gate_failures={gate_failures}, validated_at={ts}".format(
+                "gate_passed={gate_passed}, gate_failures={gate_failures}, "
+                "summary_json={summary_json}, validated_at={ts}".format(
                     round=r.get("round"),
                     total=r.get("findings_total"),
                     open=r.get("findings_open"),
@@ -1351,6 +1574,7 @@ def _render_markdown_report(payload: dict) -> str:
                     rconf=r.get("reviewer_confidence"),
                     gate_passed=r.get("gate_passed"),
                     gate_failures=r.get("gate_failures"),
+                    summary_json=r.get("round_summary_json"),
                     ts=r.get("validated_at"),
                 )
             )
@@ -1678,6 +1902,19 @@ def _advance_session(root: Path, session_id: str) -> int:
         "builder_confidence": builder_confidence,
         "reviewer_confidence": reviewer_confidence,
     }
+
+    round_summary = _build_round_runtime_summary(
+        root,
+        session,
+        round_no,
+        findings,
+        open_count,
+        change_stats,
+        builder_patch_gauge,
+        builder_confidence,
+        reviewer_confidence,
+    )
+    summary_files = _write_round_runtime_summary(root, session, round_no, round_summary)
     rounds = [r for r in session.get("rounds", []) if int(r.get("round", -1)) != round_no]
     rounds.append(round_record)
     rounds = sorted(rounds, key=lambda r: int(r["round"]))
@@ -1692,6 +1929,32 @@ def _advance_session(root: Path, session_id: str) -> int:
         f"builder_confidence={builder_confidence}, "
         f"reviewer_confidence={reviewer_confidence}"
     )
+    fsum = round_summary.get("findings", {})
+    psum = round_summary.get("prior_comments", {}).get("totals", {})
+    print(
+        "Round findings: "
+        f"total={fsum.get('total')} open={fsum.get('open')} closed={fsum.get('closed')} "
+        f"new={fsum.get('new_since_prev')} resolved={fsum.get('resolved_since_prev')}"
+    )
+    print(
+        "Round prior-comments: "
+        f"received={psum.get('received_total')} open={psum.get('open')} "
+        f"closed={psum.get('closed')} fixed_by_a2a={psum.get('fixed_by_a2a')}"
+    )
+    top_open = fsum.get("open_items", [])
+    if isinstance(top_open, list) and top_open:
+        print("Top open findings:")
+        for item in top_open[:5]:
+            print(
+                "  - [{sev}] {title} ({loc}) id={id}".format(
+                    sev=item.get("severity", "?"),
+                    title=item.get("title", ""),
+                    loc=item.get("location", ""),
+                    id=item.get("id", ""),
+                )
+            )
+    print(f"Round summary json: {summary_files['json']}")
+    print(f"Round summary md: {summary_files['md']}")
 
     max_rounds = int(session.get("max_rounds", 1))
     if open_count == 0:

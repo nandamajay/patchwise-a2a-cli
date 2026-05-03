@@ -101,6 +101,7 @@ a2a status
 
 - Fully autonomous orchestration:
   - runs builder command
+  - runs validation gate (checkpatch/custom command) before reviewer
   - runs reviewer command
   - validates findings and advances rounds
   - repeats until `LGTM` or `STOPPED`
@@ -109,6 +110,12 @@ a2a status
   - `--session` (resume existing)
 - Optional:
   - `--max-iterations` to bound rounds in one invocation
+- Per round console output now includes:
+  - findings received (total/open/closed)
+  - delta vs previous round (new/resolved findings)
+  - prior-comment totals (received/open/closed/fixed_by_a2a)
+  - top open findings (severity/title/location/id)
+  - summary artifact paths
 
 ## What `a2a respin` does
 
@@ -203,6 +210,8 @@ When `--watch-path` is provided to `run` or `loop`, each builder round writes:
 
 - `round-XX-changed_files.txt`
 - `round-XX-builder.diff`
+- `round-XX-summary.json`
+- `round-XX-summary.md`
 
 under `.a2a/reports/<session-id>/`.
 
