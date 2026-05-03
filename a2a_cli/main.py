@@ -19,6 +19,7 @@ from .prior_review import (
     load_prior_comments,
     render_prior_comment_matrix,
 )
+from .respin import respin as run_respin
 from .rich_output import (
     render_finding_card,
     render_gate_status,
@@ -2290,7 +2291,25 @@ def cmd_loop(args: argparse.Namespace) -> int:
 
 def cmd_respin(args: argparse.Namespace) -> int:
     try:
-        _must_find_root()
+        root = _must_find_root()
+
+        resume_id = str(args.resume or "").strip() or None
+        session_id = str(args.session or resume_id or "").strip() or None
+        if session_id:
+            result = run_respin(
+                root,
+                session_id,
+                dry_run=bool(args.dry_run),
+                conflict_strategy=args.conflict_strategy,
+                resume_id=resume_id,
+            )
+            _echo(json.dumps(result, indent=2, sort_keys=True))
+            return 0
+
+        # Backward-compatible mode retained for legacy automation.
+        if not args.input_path:
+            _echo("Missing --session (preferred) or --input-path (legacy).")
+            return 1
         source = Path(args.input_path).resolve()
         if not source.exists():
             _echo(f"Respin input path not found: {source}")
@@ -2712,9 +2731,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Create a next-revision patch path and run autonomous loop against it.",
     )
     p_respin.add_argument(
+        "--session",
+        help="LGTM session id to respin into next patch version.",
+    )
+    p_respin.add_argument(
+        "--resume",
+        help="Resume respin state by id (defaults to session id).",
+    )
+    p_respin.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print respin plan only; no writes.",
+    )
+    p_respin.add_argument(
+        "--conflict-strategy",
+        choices=["ours", "theirs", "manual", "abort"],
+        help="Conflict resolution strategy for git am/rebase conflicts.",
+    )
+    p_respin.add_argument(
         "--input-path",
-        required=True,
-        help="Source patch file or patch-series directory to respin.",
+        help="(Legacy mode) source patch file or patch-series directory to respin.",
     )
     p_respin.add_argument(
         "--out-path",

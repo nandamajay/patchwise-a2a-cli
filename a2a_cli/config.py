@@ -27,6 +27,11 @@ def default_config() -> dict:
         "validation_gate_timeout_sec": 300,
         "validation_gate_max_checkpatch_files": 50,
         "validation_gate_command": None,
+        "respin": {
+            "conflict_strategy": "abort",
+            "keep_temp_branch": False,
+            "auto_increment_version": True,
+        },
         "prior_review_gate": True,
         "prior_review_search": True,
         "prior_review_max_comments": 120,
