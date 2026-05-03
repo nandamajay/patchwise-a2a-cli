@@ -232,6 +232,7 @@
     renderPriorComments(report.prior_comments || []);
     renderPatchSeries(report);
     renderPatchFilesFromRounds(report.rounds || []);
+    renderNegotiationFromRounds(report.rounds || []);
     updateChecklist(report.lgtm_checklist || {});
 
     const latest = (report.rounds || []).slice(-1)[0];
@@ -244,14 +245,6 @@
       updateScore("reviewer", Number(latest.scores?.reviewer_confidence || 0));
       updateScore("gauge", Number(latest.scores?.builder_patch_gauge || 0));
 
-      (latest.top_open || []).forEach((f) => {
-        addNegotiationEntry(latest.round, "aryabhata", "finding", {
-          severity: f.severity || "low",
-          location: f.location || "",
-          content: f.title || f.description || "",
-          id: f.id || "",
-        });
-      });
     }
 
     if ((report.final_status || "").toLowerCase() === "lgtm") {
@@ -351,6 +344,27 @@
     `;
     container.appendChild(bubble);
     container.scrollTop = container.scrollHeight;
+  }
+
+  function renderNegotiationFromRounds(rounds) {
+    const container = el("negotiation-thread");
+    container.innerHTML = "";
+    rounds.forEach((round) => {
+      const items = round.findings?.items || [];
+      items.forEach((item) => {
+        addNegotiationEntry(round.round, "aryabhata", "finding", {
+          severity: item.severity || "low",
+          location: item.location || "",
+          content: item.description || "",
+          id: item.id || "",
+        });
+      });
+      if ((round.findings?.open || 0) === 0) {
+        addNegotiationEntry(round.round, "chanakya", "verdict", {
+          content: "All findings addressed for this round",
+        });
+      }
+    });
   }
 
   function updateChecklist(checklist) {
