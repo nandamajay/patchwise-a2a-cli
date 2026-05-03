@@ -55,6 +55,10 @@ Task:
 - Prior review context: ${A2A_PRIOR_COMMENTS_FILE:-<none>}.
 - Previous round findings JSON: ${PREV_FINDINGS:-<none>}.
 - Current round: ${ROUND}.
+- Subsystem: ${A2A_KB_SUBSYSTEM:-unknown}.
+- Knowledge base context:
+${A2A_KB_CHANAKYA_CONTEXT:-<none>}
+- Extra scrutiny required: ${A2A_EXTRA_SCRUTINY:-0}
 
 Required behavior:
 1) If previous findings exist, fix all OPEN findings first.

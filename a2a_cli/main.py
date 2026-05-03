@@ -19,6 +19,15 @@ from .prior_review import (
     load_prior_comments,
     render_prior_comment_matrix,
 )
+from .knowledge_base import (
+    build_aryabhata_context,
+    build_chanakya_context,
+    clear_kb,
+    infer_subsystem_from_watch_path,
+    list_kb_entries,
+    load_kb,
+    update_kb_after_lgtm,
+)
 from .respin import respin as run_respin
 from .rich_output import (
     render_finding_card,
@@ -53,7 +62,7 @@ _CONSOLE = Console() if Console else None
 def _echo(*args: object, sep: str = " ", end: str = "\n") -> None:
     text = sep.join(str(arg) for arg in args)
     if _CONSOLE is not None:
-        _CONSOLE.print(text, end=end)
+        _CONSOLE.print(text, end=end, markup=False)
         return
     builtins.print(*args, sep=sep, end=end)
 
@@ -556,6 +565,28 @@ def _agent_env(session: dict, round_no: int, files: dict[str, Path], role: str) 
         env["A2A_PRIOR_COMMENTS_FILE"] = comments_file
         env["A2A_PRIOR_MATRIX_FILE"] = matrix_file
         env["A2A_PRIOR_COMMENTS_TOTAL"] = str(comments_total)
+
+    a2a_root = find_a2a_root(Path(str(session.get("repo_path") or ""))) or _repo_root_from_module()
+    subsystem = infer_subsystem_from_watch_path(str(watch_path or ""))
+    chanakya_context = build_chanakya_context(a2a_root, subsystem)
+    open_findings: list[dict] = []
+    if round_no > 1:
+        prev_path = files["report_dir"] / f"{_round_basename(round_no - 1, 'findings')}.json"
+        if prev_path.exists():
+            try:
+                payload = load_json(prev_path)
+                rows = payload.get("findings", []) if isinstance(payload, dict) else []
+                if isinstance(rows, list):
+                    open_findings = [
+                        row for row in rows if isinstance(row, dict) and str(row.get("status", "open")).lower() != "closed"
+                    ]
+            except Exception:
+                open_findings = []
+    aryabhata_context = build_aryabhata_context(a2a_root, open_findings)
+    env["A2A_KB_SUBSYSTEM"] = subsystem
+    env["A2A_KB_CHANAKYA_CONTEXT"] = chanakya_context
+    env["A2A_KB_ARYABHATTA_CONTEXT"] = aryabhata_context
+    env["A2A_KB_CONTEXT"] = chanakya_context if role == "builder" else aryabhata_context
     return env
 
 
@@ -2104,6 +2135,18 @@ def _advance_session(root: Path, session_id: str) -> int:
     if should_lgtm:
         session["status"] = "lgtm"
         _append_summary_verdict(root, session_id, "LGTM")
+        resolved_findings = [
+            row for row in findings if isinstance(row, dict) and str(row.get("status", "open")).lower() == "closed"
+        ]
+        try:
+            update_kb_after_lgtm(
+                root,
+                session_id=session_id,
+                watch_path=str(session.get("watch_path") or ""),
+                resolved_findings=resolved_findings,
+            )
+        except Exception as exc:
+            _echo(f"Knowledge base update warning: {exc}")
         if state.get("active_session_id") == session_id:
             state["active_session_id"] = None
             state["last_updated"] = _now_utc()
@@ -2523,6 +2566,51 @@ def cmd_config_reset(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_kb(args: argparse.Namespace) -> int:
+    try:
+        root = _must_find_root()
+        if args.clear:
+            prompt = "Type CLEAR to confirm knowledge base wipe: "
+            choice = input(prompt).strip()
+            if choice != "CLEAR":
+                _echo("KB clear cancelled.")
+                return 1
+            clear_kb(root)
+            _echo("Knowledge base cleared.")
+            return 0
+
+        kb = load_kb(root)
+        subsystem = str(args.subsystem or "").strip() or None
+        rows = list_kb_entries(root, subsystem=subsystem)
+        if args.json_output:
+            payload = dict(kb)
+            payload["entries"] = rows
+            _echo(json.dumps(payload, indent=2, sort_keys=True))
+            return 0
+
+        if subsystem:
+            _echo(f"Knowledge base entries for subsystem='{subsystem}': {len(rows)}")
+        else:
+            _echo(f"Knowledge base entries: {len(rows)}")
+        if not rows:
+            _echo("- no entries")
+            return 0
+        for row in rows:
+            _echo(
+                "- [{sev}] {pattern} | seen={seen} | subsystem={sub} | resolution={res}".format(
+                    sev=row.get("severity", "?"),
+                    pattern=row.get("pattern", ""),
+                    seen=row.get("occurrences", 0),
+                    sub=row.get("subsystem", "unknown"),
+                    res=row.get("resolution", ""),
+                )
+            )
+        return 0
+    except RuntimeError as exc:
+        _echo(str(exc))
+        return 1
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     try:
         root = _must_find_root()
@@ -2899,6 +2987,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep existing reviewer_name if present.",
     )
     p_cfg_reset.set_defaults(func=cmd_config_reset)
+
+    p_kb = sub.add_parser("kb", help="Knowledge base operations.")
+    p_kb.add_argument("--list", action="store_true", help="List KB entries (default action).")
+    p_kb.add_argument("--subsystem", help="Filter KB entries by subsystem.")
+    p_kb.add_argument("--clear", action="store_true", help="Clear KB (requires confirmation).")
+    p_kb.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Print KB payload as JSON.",
+    )
+    p_kb.set_defaults(func=cmd_kb)
 
     p_report = sub.add_parser("report", help="Render session report (markdown/json).")
     p_report.add_argument("--session", help="Session id. Defaults to active or latest.")

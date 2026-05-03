@@ -45,6 +45,10 @@ Task:
 - Review patch files under: ${A2A_WATCH_PATH:-<unset>}
 - Use prior review context from: ${A2A_PRIOR_COMMENTS_FILE:-<none>}
 - Round: ${A2A_ROUND:-?}
+- Subsystem: ${A2A_KB_SUBSYSTEM:-unknown}
+- Knowledge base evidence context:
+${A2A_KB_ARYABHATTA_CONTEXT:-<none>}
+- Extra scrutiny required: ${A2A_EXTRA_SCRUTINY:-0}
 
 Strict requirements:
 1) Return ONLY JSON matching the provided schema.
