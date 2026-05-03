@@ -45,6 +45,7 @@ from .score_engine import (
     evaluate_round_scores,
     mark_findings_low_quality,
 )
+from .series_manager import auto_discover_series, run_all_series
 from .types import StatusView
 from .upstream_evidence import enrich_findings_with_evidence, kernel_tree_exists
 
@@ -2311,6 +2312,51 @@ def cmd_loop(args: argparse.Namespace) -> int:
         reviewer_cmd = _resolve_agent_command(cfg, args.reviewer_cmd, "reviewer_command")
         builder_cmd, reviewer_cmd = _resolve_default_agent_commands(root, cfg, builder_cmd, reviewer_cmd)
         watch_path = str(Path(args.watch_path).resolve()) if args.watch_path else None
+        single_series_mode = bool(getattr(args, "_single_series", False))
+
+        if not single_series_mode and not args.session and watch_path:
+            wp = Path(watch_path)
+            if wp.is_dir():
+                series_dirs = [d for d in sorted(wp.iterdir()) if d.is_dir() and list(d.glob("*.patch"))]
+                if len(series_dirs) > 1:
+                    manifest = auto_discover_series(root, wp)
+                    _echo(
+                        f"Auto-discovered {len(manifest.get('series', []))} series. "
+                        "Running dependency-aware patchset loop."
+                    )
+
+                    def _run_series(series_row: dict) -> dict[str, str | int]:
+                        before = {p.stem for p in (root / A2A_DIRNAME / "sessions").glob("sess-*.json")}
+                        sub_args = argparse.Namespace(
+                            session=None,
+                            task=f"{args.task or 'patchset'}:{series_row.get('name')}",
+                            max_rounds=max_rounds,
+                            timeout_min=args.timeout_min,
+                            builder_cmd=args.builder_cmd,
+                            reviewer_cmd=args.reviewer_cmd,
+                            watch_path=str(series_row.get("path")),
+                            max_iterations=args.max_iterations,
+                            _single_series=True,
+                        )
+                        rc = cmd_loop(sub_args)
+                        after = {p.stem for p in (root / A2A_DIRNAME / "sessions").glob("sess-*.json")}
+                        new_ids = sorted(after - before)
+                        sid = new_ids[-1] if new_ids else None
+                        status = "failed"
+                        if sid:
+                            try:
+                                status = str(_load_session(root, sid).get("status", "failed"))
+                            except RuntimeError:
+                                status = "failed"
+                        return {
+                            "session_id": sid or "",
+                            "status": status,
+                            "rc": int(rc),
+                        }
+
+                    patchset_payload = run_all_series(root, manifest, _run_series)
+                    _echo(json.dumps(patchset_payload, indent=2, sort_keys=True))
+                    return 0 if str(patchset_payload.get("status", "")).lower() == "lgtm" else 1
 
         if args.session and args.task:
             _echo("Use either --session or --task, not both.")
