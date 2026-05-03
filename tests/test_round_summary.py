@@ -65,6 +65,8 @@ class RoundSummaryTests(unittest.TestCase):
             session = {
                 "id": session_id,
                 "task": "t",
+                "builder_display_name": "chanakya",
+                "reviewer_display_name": "aryabhatta",
                 "reviewer_name": reviewer,
                 "watch_path": "/tmp/watch",
                 "prior_review": {
@@ -125,6 +127,8 @@ class RoundSummaryTests(unittest.TestCase):
 
             md = _render_round_runtime_summary_markdown(summary)
             self.assertIn("Round 2 Summary", md)
+            self.assertIn("- builder: chanakya", md)
+            self.assertIn("- reviewer: aryabhatta", md)
             self.assertIn("Top Open Findings", md)
 
 

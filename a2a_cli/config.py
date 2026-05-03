@@ -13,6 +13,8 @@ def utc_now() -> str:
 def default_config() -> dict:
     return {
         "version": 1,
+        "builder_display_name": "chanakya",
+        "reviewer_display_name": "aryabhatta",
         "reviewer_name": "aryabhatta",
         "strict_evidence": True,
         "llm_native_default": True,

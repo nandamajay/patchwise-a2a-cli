@@ -146,6 +146,13 @@ def _load_config(root: Path) -> dict:
     return cfg
 
 
+def _load_config_or_defaults(root: Path) -> dict:
+    cfg_path = _config_path(root)
+    if not cfg_path.exists():
+        return default_config()
+    return _load_config(root)
+
+
 def _state_path(root: Path) -> Path:
     return root / A2A_DIRNAME / "state.json"
 
@@ -161,6 +168,30 @@ def _report_dir(root: Path, session_id: str) -> Path:
 def _next_session_id() -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
     return f"sess-{stamp}"
+
+
+def _resolve_builder_display_name(session: dict | None = None, cfg: dict | None = None) -> str:
+    for source in (session, cfg):
+        if isinstance(source, dict):
+            raw = str(source.get("builder_display_name") or "").strip()
+            if raw:
+                return raw
+    return "builder"
+
+
+def _resolve_reviewer_display_name(session: dict | None = None, cfg: dict | None = None) -> str:
+    for source in (session, cfg):
+        if isinstance(source, dict):
+            raw = str(source.get("reviewer_display_name") or "").strip()
+            if raw:
+                return raw
+
+    for source in (session, cfg):
+        if isinstance(source, dict):
+            raw = str(source.get("reviewer_name") or "").strip()
+            if raw:
+                return raw
+    return "reviewer"
 
 
 def _increment_revision_stem(stem: str) -> str:
@@ -235,13 +266,20 @@ def _round_files(root: Path, session_id: str, round_no: int, reviewer_name: str)
     }
 
 
-def _write_round_templates(root: Path, session_id: str, round_no: int, reviewer_name: str) -> None:
+def _write_round_templates(
+    root: Path,
+    session_id: str,
+    round_no: int,
+    reviewer_name: str,
+    reviewer_display_name: str | None = None,
+) -> None:
     files = _round_files(root, session_id, round_no, reviewer_name)
     report_dir = files["report_dir"]
     builder_file = files["builder"]
     reviewer_file = files["reviewer"]
     findings_file = files["findings"]
     report_dir.mkdir(parents=True, exist_ok=True)
+    reviewer_label = (reviewer_display_name or "").strip() or reviewer_name
 
     builder_tpl = (
         f"# Round {round_no}: Builder Output\n\n"
@@ -251,7 +289,7 @@ def _write_round_templates(root: Path, session_id: str, round_no: int, reviewer_
         "## Response To Reviewer Findings\n- \n"
     )
     reviewer_tpl = (
-        f"# Round {round_no}: {reviewer_name} Review\n\n"
+        f"# Round {round_no}: {reviewer_label} Review\n\n"
         "## Findings\n- severity: \n"
         "  title: \n"
         "  location: path:line\n"
@@ -625,7 +663,7 @@ def _gate_artifacts(root: Path, session_id: str, round_no: int, reviewer_name: s
 
 
 def _run_validation_gate(root: Path, session: dict, round_no: int) -> tuple[bool, bool]:
-    cfg = _load_config(root)
+    cfg = _load_config_or_defaults(root)
     enabled = bool(cfg.get("validation_gate_enabled", True))
     strict = bool(cfg.get("validation_gate_strict", False))
     run_checkpatch = bool(cfg.get("validation_gate_checkpatch", True))
@@ -1020,7 +1058,10 @@ def _build_round_runtime_summary(
     reviewer_confidence: int,
 ) -> dict:
     session_id = str(session["id"])
+    cfg = _load_config_or_defaults(root)
     reviewer_name = str(session.get("reviewer_name", "aryabhatta"))
+    builder_display_name = _resolve_builder_display_name(session=session, cfg=cfg)
+    reviewer_display_name = _resolve_reviewer_display_name(session=session, cfg=cfg)
     files = _round_files(root, session_id, round_no, reviewer_name)
     gate_files = _gate_artifacts(root, session_id, round_no, reviewer_name)
     gate_payload = load_json(gate_files["json"]) if gate_files["json"].exists() else {}
@@ -1092,7 +1133,9 @@ def _build_round_runtime_summary(
         "session_id": session_id,
         "task": str(session.get("task") or ""),
         "round": round_no,
-        "reviewer_name": reviewer_name,
+        "builder_name": builder_display_name,
+        "reviewer_name": reviewer_display_name,
+        "reviewer_internal_name": reviewer_name,
         "watch_path": str(session.get("watch_path") or ""),
         "findings": {
             "total": len(findings),
@@ -1109,6 +1152,7 @@ def _build_round_runtime_summary(
             "tracked": prior_rows,
         },
         "builder": {
+            "name": builder_display_name,
             "changed_files": int(change_stats.get("changed_files", 0)),
             "diff_lines": int(change_stats.get("diff_lines", 0)),
             "diff_hunks": int(change_stats.get("diff_hunks", 0)),
@@ -1116,6 +1160,8 @@ def _build_round_runtime_summary(
             "confidence": builder_confidence,
         },
         "reviewer": {
+            "name": reviewer_display_name,
+            "internal_name": reviewer_name,
             "confidence": reviewer_confidence,
         },
         "validation_gate": {
@@ -1146,6 +1192,7 @@ def _render_round_runtime_summary_markdown(summary: dict) -> str:
         "",
         f"- session: {summary.get('session_id')}",
         f"- task: {summary.get('task')}",
+        f"- builder: {summary.get('builder_name')}",
         f"- reviewer: {summary.get('reviewer_name')}",
         f"- watch_path: {summary.get('watch_path')}",
         "",
@@ -1213,7 +1260,11 @@ def _write_round_runtime_summary(root: Path, session: dict, round_no: int, summa
 
 
 def _run_agent_step(root: Path, session: dict, role: str, command: str, round_no: int) -> int:
+    cfg = _load_config_or_defaults(root)
     reviewer_name = str(session.get("reviewer_name", "aryabhatta"))
+    builder_display_name = _resolve_builder_display_name(session=session, cfg=cfg)
+    reviewer_display_name = _resolve_reviewer_display_name(session=session, cfg=cfg)
+    role_display_name = builder_display_name if role == "builder" else reviewer_display_name
     files = _round_files(root, str(session["id"]), round_no, reviewer_name)
     worktrees = session.get("worktrees", {})
     if role == "builder":
@@ -1252,7 +1303,7 @@ def _run_agent_step(root: Path, session: dict, role: str, command: str, round_no
         f.write(f"findings_file={files['findings']}\n")
 
     if result["returncode"] != 0:
-        print(f"{role} command failed (rc={result['returncode']}). See log: {log_path}")
+        print(f"{role_display_name} command failed (rc={result['returncode']}). See log: {log_path}")
         return int(result["returncode"])
 
     if role == "builder" and watch_path:
@@ -1263,12 +1314,12 @@ def _run_agent_step(root: Path, session: dict, role: str, command: str, round_no
             watch_after = None
         _write_builder_change_artifacts(root, session, round_no, watch_before, watch_after)
 
-    print(f"{role} command completed. Log: {log_path}")
+    print(f"{role_display_name} command completed. Log: {log_path}")
     if role == "builder":
-        print(f"{role} report: {files['builder']}")
+        print(f"{role_display_name} report: {files['builder']}")
     else:
-        print(f"{role} report: {files['reviewer']}")
-        print(f"{role} findings: {files['findings']}")
+        print(f"{role_display_name} report: {files['reviewer']}")
+        print(f"{role_display_name} findings: {files['findings']}")
     return 0
 
 
@@ -1369,10 +1420,13 @@ def _parse_iso_datetime(raw: str) -> datetime:
 
 
 def _session_report_payload(root: Path, session_id: str) -> dict:
+    cfg = _load_config_or_defaults(root)
     session = _load_session(root, session_id)
     raw_rounds = sorted(session.get("rounds", []), key=lambda r: int(r.get("round", 0)))
     rounds: list[dict] = []
     previous_open: int | None = None
+    builder_display_name = _resolve_builder_display_name(session=session, cfg=cfg)
+    reviewer_display_name = _resolve_reviewer_display_name(session=session, cfg=cfg)
     reviewer_name = str(session.get("reviewer_name", "aryabhatta"))
     for record in raw_rounds:
         row = dict(record)
@@ -1459,6 +1513,8 @@ def _session_report_payload(root: Path, session_id: str) -> dict:
             "updated_at": session.get("updated_at"),
             "max_rounds": session.get("max_rounds"),
             "current_round": session.get("current_round"),
+            "builder_display_name": builder_display_name,
+            "reviewer_display_name": reviewer_display_name,
             "reviewer_name": session.get("reviewer_name"),
             "repo_path": session.get("repo_path"),
             "branch": session.get("branch"),
@@ -1505,6 +1561,8 @@ def _all_sessions_report_payload(
                 "id": sess.get("id"),
                 "task": sess.get("task"),
                 "status": status,
+                "builder_display_name": sess.get("builder_display_name"),
+                "reviewer_display_name": sess.get("reviewer_display_name"),
                 "reviewer_name": sess.get("reviewer_name"),
                 "repo_path": sess.get("repo_path"),
                 "branch": sess.get("branch"),
@@ -1532,12 +1590,16 @@ def _render_markdown_report(payload: dict) -> str:
     rounds = payload["rounds"]
     prior = sess.get("prior_review")
     prior_comment_summary = payload.get("prior_comment_summary", [])
+    builder_display_name = str(sess.get("builder_display_name") or "builder")
+    reviewer_display_name = str(sess.get("reviewer_display_name") or sess.get("reviewer_name"))
     lines = [
         f"# A2A Report: {sess['id']}",
         "",
         f"- task: {sess.get('task')}",
         f"- status: {sess.get('status')}",
-        f"- reviewer: {sess.get('reviewer_name')}",
+        f"- builder: {builder_display_name}",
+        f"- reviewer: {reviewer_display_name}",
+        f"- reviewer_internal_name: {sess.get('reviewer_name')}",
         f"- repo: {sess.get('repo_path')}",
         f"- branch: {sess.get('branch')}",
         f"- rounds_validated: {totals.get('rounds_validated')}",
@@ -1738,6 +1800,8 @@ def _start_session(
 
     session_id = _next_session_id()
     reviewer_name = str(prep.get("reviewer_name") or cfg.get("reviewer_name", "aryabhatta"))
+    builder_display_name = _resolve_builder_display_name(cfg=cfg)
+    reviewer_display_name = _resolve_reviewer_display_name(cfg=cfg)
     session = {
         "version": 1,
         "id": session_id,
@@ -1749,6 +1813,8 @@ def _start_session(
         "timeout_min": timeout_min,
         "current_round": 1,
         "open_findings": None,
+        "builder_display_name": builder_display_name,
+        "reviewer_display_name": reviewer_display_name,
         "reviewer_name": reviewer_name,
         "repo_path": prep["repo_path"],
         "branch": prep["branch"],
@@ -1786,14 +1852,22 @@ def _start_session(
     summary.write_text(
         f"# A2A Session {session_id}\n\n"
         f"- task: {task}\n"
-        f"- reviewer: {reviewer_name}\n"
+        f"- builder: {builder_display_name}\n"
+        f"- reviewer: {reviewer_display_name}\n"
+        f"- reviewer_internal_name: {reviewer_name}\n"
         f"- status: in_progress\n"
         f"- max_rounds: {max_rounds}\n\n"
         "## Round History\n\n",
         encoding="utf-8",
     )
 
-    _write_round_templates(root, session_id, 1, reviewer_name)
+    _write_round_templates(
+        root,
+        session_id,
+        1,
+        reviewer_name,
+        reviewer_display_name=reviewer_display_name,
+    )
 
     state["active_session_id"] = session_id
     state["last_updated"] = _now_utc()
@@ -1983,7 +2057,13 @@ def _advance_session(root: Path, session_id: str) -> int:
     session["current_round"] = next_round
     session["status"] = "in_progress"
     _write_session(root, session)
-    _write_round_templates(root, session_id, next_round, reviewer_name)
+    _write_round_templates(
+        root,
+        session_id,
+        next_round,
+        reviewer_name,
+        reviewer_display_name=_resolve_reviewer_display_name(session=session, cfg=_load_config(root)),
+    )
     print(
         f"Session {session_id}: round {round_no} validated with open findings={open_count}. "
         f"Prepared round {next_round} templates."
@@ -2053,6 +2133,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             return _advance_session(root, sid)
 
         print(f"Started session: {sid}")
+        print(f"Agents: {_resolve_builder_display_name(session=session)} (builder), {_resolve_reviewer_display_name(session=session)} (reviewer)")
         print(f"Round {round_no} files:")
         print(f"  - {files['builder']}")
         print(f"  - {files['reviewer']}")
@@ -2101,6 +2182,11 @@ def cmd_loop(args: argparse.Namespace) -> int:
             )
             sid = str(session["id"])
             print(f"Started session: {sid}")
+            print(
+                "Agents: "
+                f"{_resolve_builder_display_name(session=session, cfg=cfg)} (builder), "
+                f"{_resolve_reviewer_display_name(session=session, cfg=cfg)} (reviewer)"
+            )
 
         if not builder_cmd:
             builder_cmd = str(session.get("builder_command") or "").strip() or None
@@ -2138,7 +2224,12 @@ def cmd_loop(args: argparse.Namespace) -> int:
                 return 0
 
             round_no = int(session.get("current_round", 1))
-            print(f"Session {sid}: autonomous round {round_no} start.")
+            builder_display_name = _resolve_builder_display_name(session=session, cfg=cfg)
+            reviewer_display_name = _resolve_reviewer_display_name(session=session, cfg=cfg)
+            print(
+                f"Session {sid}: autonomous round {round_no} start "
+                f"({builder_display_name} -> {reviewer_display_name})."
+            )
 
             rc = _run_agent_step(root, session, "builder", builder_cmd, round_no)
             if rc != 0:
@@ -2373,11 +2464,10 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 def _load_status_view(root: Path) -> StatusView:
     a2a_dir = root / A2A_DIRNAME
-    cfg_path = a2a_dir / "config.json"
     state_path = a2a_dir / "state.json"
     sessions_dir = a2a_dir / "sessions"
 
-    cfg = load_json(cfg_path) if cfg_path.exists() else default_config()
+    cfg = _load_config(root)
     state = load_json(state_path) if state_path.exists() else default_state()
 
     session_files = sorted(sessions_dir.glob("*.json")) if sessions_dir.is_dir() else []
@@ -2387,6 +2477,9 @@ def _load_status_view(root: Path) -> StatusView:
     active_status = None
     current_round = None
     max_rounds = None
+    builder_name = _resolve_builder_display_name(cfg=cfg)
+    reviewer_name = _resolve_reviewer_display_name(cfg=cfg)
+    reviewer_internal_name = str(cfg.get("reviewer_name", "aryabhatta"))
 
     if active:
         active_path = sessions_dir / f"{active}.json"
@@ -2400,13 +2493,18 @@ def _load_status_view(root: Path) -> StatusView:
             active_status = str(sess.get("status", "unknown"))
             current_round = int(sess.get("current_round", 0))
             max_rounds = int(sess.get("max_rounds", 0))
+            builder_name = _resolve_builder_display_name(session=sess, cfg=cfg)
+            reviewer_name = _resolve_reviewer_display_name(session=sess, cfg=cfg)
+            reviewer_internal_name = str(sess.get("reviewer_name") or reviewer_internal_name)
 
     return StatusView(
         root=str(root),
         active_session_id=active,
         session_count=len(session_files),
         open_findings=open_findings,
-        reviewer_name=str(cfg.get("reviewer_name", "aryabhatta")),
+        builder_name=builder_name,
+        reviewer_name=reviewer_name,
+        reviewer_internal_name=reviewer_internal_name,
         active_status=active_status,
         current_round=current_round,
         max_rounds=max_rounds,
@@ -2422,7 +2520,9 @@ def cmd_status(_args: argparse.Namespace) -> int:
 
     view = _load_status_view(root)
     print(f"A2A root: {view.root}")
+    print(f"Builder: {view.builder_name}")
     print(f"Reviewer: {view.reviewer_name}")
+    print(f"Reviewer internal name: {view.reviewer_internal_name}")
     print(f"Sessions: {view.session_count}")
     print(f"Active session: {view.active_session_id or 'none'}")
     if view.active_session_id is not None:

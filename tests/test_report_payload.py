@@ -94,6 +94,8 @@ class ReportPayloadTests(unittest.TestCase):
                 "max_rounds": 2,
                 "current_round": 2,
                 "open_findings": 0,
+                "builder_display_name": "chanakya",
+                "reviewer_display_name": "aryabhatta",
                 "reviewer_name": "aryabhatta",
                 "repo_path": "/tmp/repo",
                 "branch": "a2a/test",
@@ -128,6 +130,8 @@ class ReportPayloadTests(unittest.TestCase):
             payload = _session_report_payload(root, "sess-1")
             self.assertEqual(payload["totals"]["gate_failures_total"], 2)
             self.assertEqual(payload["totals"]["gate_failed_rounds"], 1)
+            self.assertEqual(payload["session"]["builder_display_name"], "chanakya")
+            self.assertEqual(payload["session"]["reviewer_display_name"], "aryabhatta")
 
             summary = {row["source_comment_id"]: row for row in payload["prior_comment_summary"]}
             self.assertEqual(summary["prior-msg:c1"]["fixed_by_a2a"], False)

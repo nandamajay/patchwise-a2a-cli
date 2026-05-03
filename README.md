@@ -2,8 +2,8 @@
 
 A local CLI scaffold for running a two-agent engineering loop:
 
-- `builder`: implements changes.
-- `aryabhatta`: adversarial reviewer with evidence-backed findings.
+- `chanakya` (builder display name): implements changes.
+- `aryabhatta` (reviewer display name): adversarial reviewer with evidence-backed findings.
 
 This repository currently provides:
 
@@ -135,6 +135,8 @@ a2a status
 
 Common keys:
 
+- `builder_display_name` (default `chanakya`; output/report label only)
+- `reviewer_display_name` (default `aryabhatta`; output/report label only)
 - `reviewer_name`
 - `strict_evidence`
 - `llm_native_default` (default true; auto-uses LLM-native builder/reviewer wrappers)
@@ -152,6 +154,8 @@ Common keys:
 - `default_max_rounds`
 - `builder_command`
 - `reviewer_command`
+
+`reviewer_name` is still the internal reviewer identity used for worktree keys and reviewer artifact filenames.
 
 ## What `a2a report` does
 
