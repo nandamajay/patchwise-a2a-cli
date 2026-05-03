@@ -8,7 +8,9 @@ services:
       - "7788:7788"
     volumes:
       - /local/mnt/workspace/A2A_CLI:/workspace/A2A_CLI
+      - /local/mnt/workspace/A2A_CLI:/local/mnt/workspace/A2A_CLI
       - /local/mnt/workspace/upstream_patches:/workspace/patches:ro
+      - /local/mnt/workspace/upstream_patches:/local/mnt/workspace/upstream_patches:ro
       - ${HOME}/.local/bin:/host/bin:ro
     environment:
       - A2A_ROOT=/workspace/A2A_CLI

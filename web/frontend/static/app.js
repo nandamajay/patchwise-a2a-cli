@@ -113,11 +113,17 @@
 
   function connectAllTerminalStreams(sessionId) {
     closeTerminalSockets();
+    Object.values(state.terminals).forEach((term) => {
+      try { term.clear(); } catch (_) {}
+    });
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const base = `${proto}://${location.host}/ws/${sessionId}`;
     state.ws.chanakya = connectTerminalWS(state.terminals.chanakya, `${base}/builder`);
     state.ws.aryabhata = connectTerminalWS(state.terminals.aryabhata, `${base}/reviewer`);
     state.ws.orchestrator = connectTerminalWS(state.terminals.orchestrator, `${base}/orchestrator`);
+    state.terminals.chanakya.writeln(`[session ${sessionId}] connected -> builder`);
+    state.terminals.aryabhata.writeln(`[session ${sessionId}] connected -> reviewer`);
+    state.terminals.orchestrator.writeln(`[session ${sessionId}] connected -> orchestrator`);
   }
 
   function closeTerminalSockets() {

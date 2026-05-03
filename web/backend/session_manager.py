@@ -99,6 +99,8 @@ def _drain_process_output(runtime: RuntimeSession) -> None:
 
 def _spawn_loop(req: SessionStartRequest) -> RuntimeSession:
     provisional_id = _next_session_id()
+    default_builder_cmd = "python /workspace/A2A_CLI/scripts/agents/builder_agent.py"
+    default_reviewer_cmd = "python /workspace/A2A_CLI/scripts/agents/reviewer_aryabhatta.py"
     cmd = [
         "python",
         "-m",
@@ -110,6 +112,10 @@ def _spawn_loop(req: SessionStartRequest) -> RuntimeSession:
         req.watch_path,
         "--max-rounds",
         str(req.max_rounds),
+        "--builder-cmd",
+        default_builder_cmd,
+        "--reviewer-cmd",
+        default_reviewer_cmd,
     ]
 
     proc = subprocess.Popen(
