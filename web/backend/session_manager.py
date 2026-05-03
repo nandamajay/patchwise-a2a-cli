@@ -16,6 +16,8 @@ from .screen_bridge import WS_PORTS, start_bridges, stop_bridges
 
 
 _STARTED_SESSION_RE = re.compile(r"^Started session:\s+(?P<sid>\S+)")
+_LLM_BUILDER_CMD = "PATH=/host/bin:$PATH bash /workspace/A2A_CLI/scripts/agents/builder_llm_native.sh"
+_LLM_REVIEWER_CMD = "PATH=/host/bin:$PATH bash /workspace/A2A_CLI/scripts/agents/reviewer_llm_native.sh"
 
 
 @dataclass
@@ -99,8 +101,6 @@ def _drain_process_output(runtime: RuntimeSession) -> None:
 
 def _spawn_loop(req: SessionStartRequest) -> RuntimeSession:
     provisional_id = _next_session_id()
-    default_builder_cmd = "python /workspace/A2A_CLI/scripts/agents/builder_agent.py"
-    default_reviewer_cmd = "python /workspace/A2A_CLI/scripts/agents/reviewer_aryabhatta.py"
     cmd = [
         "python",
         "-m",
@@ -113,10 +113,13 @@ def _spawn_loop(req: SessionStartRequest) -> RuntimeSession:
         "--max-rounds",
         str(req.max_rounds),
         "--builder-cmd",
-        default_builder_cmd,
+        _LLM_BUILDER_CMD,
         "--reviewer-cmd",
-        default_reviewer_cmd,
+        _LLM_REVIEWER_CMD,
     ]
+
+    proc_env = dict(os.environ)
+    proc_env["PATH"] = f"/host/bin:{proc_env.get('PATH', '')}"
 
     proc = subprocess.Popen(
         cmd,
@@ -125,7 +128,7 @@ def _spawn_loop(req: SessionStartRequest) -> RuntimeSession:
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
-        env=dict(os.environ),
+        env=proc_env,
     )
 
     runtime = RuntimeSession(proc=proc, provisional_id=provisional_id)
@@ -147,6 +150,8 @@ async def start_session(req: SessionStartRequest) -> SessionStatus:
     if req.open_screen:
         screen_log = SETTINGS.logs_dir / session_id / "screen-launch.log"
         screen_log.parent.mkdir(parents=True, exist_ok=True)
+        proc_env = dict(os.environ)
+        proc_env["PATH"] = f"/host/bin:{proc_env.get('PATH', '')}"
         with screen_log.open("a", encoding="utf-8") as handle:
             subprocess.Popen(
                 ["bash", "scripts/launch_live_screens.sh", "--session", session_id],
@@ -154,7 +159,7 @@ async def start_session(req: SessionStartRequest) -> SessionStatus:
                 stdout=handle,
                 stderr=subprocess.STDOUT,
                 text=True,
-                env=dict(os.environ),
+                env=proc_env,
             )
 
     if req.open_web_terminals:
