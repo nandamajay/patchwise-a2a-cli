@@ -28,6 +28,8 @@ from .knowledge_base import (
     load_kb,
     update_kb_after_lgtm,
 )
+from .lore_watcher import watch as watch_lore
+from .maintainer_tracker import load_profiles
 from .respin import respin as run_respin
 from .rich_output import (
     render_finding_card,
@@ -2691,6 +2693,57 @@ def cmd_kb(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_watch(args: argparse.Namespace) -> int:
+    try:
+        root = _must_find_root()
+        _echo(f"Watching lore thread: {args.msgid} (poll={args.poll}s)")
+        events = watch_lore(
+            root,
+            args.msgid,
+            poll_interval_secs=int(args.poll),
+            max_loops=args.max_loops,
+        )
+        for event in events:
+            _echo(json.dumps(event, indent=2, sort_keys=True))
+        return 0
+    except RuntimeError as exc:
+        _echo(str(exc))
+        return 1
+    except KeyboardInterrupt:
+        _echo("watch interrupted by user")
+        return 0
+
+
+def cmd_maintainers(args: argparse.Namespace) -> int:
+    try:
+        root = _must_find_root()
+        payload = load_profiles(root)
+        maintainers = payload.get("maintainers", {})
+        if args.list:
+            _echo(f"Maintainers: {len(maintainers)}")
+            for name, row in sorted(maintainers.items()):
+                _echo(
+                    "- {name} priority={priority} approval_rate={rate}".format(
+                        name=name,
+                        priority=row.get("priority", "medium"),
+                        rate=row.get("approval_rate", 0.0),
+                    )
+                )
+            return 0
+        if args.profile:
+            row = maintainers.get(args.profile)
+            if not row:
+                _echo(f"Maintainer profile not found: {args.profile}")
+                return 1
+            _echo(json.dumps(row, indent=2, sort_keys=True))
+            return 0
+        _echo("Use --list or --profile.")
+        return 1
+    except RuntimeError as exc:
+        _echo(str(exc))
+        return 1
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     try:
         root = _must_find_root()
@@ -3079,6 +3132,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print KB payload as JSON.",
     )
     p_kb.set_defaults(func=cmd_kb)
+
+    p_watch = sub.add_parser("watch", help="Watch lore thread for new replies.")
+    p_watch.add_argument("--msgid", required=True, help="LKML/lore message-id root.")
+    p_watch.add_argument("--poll", type=int, default=300, help="Poll interval in seconds.")
+    p_watch.add_argument(
+        "--max-loops",
+        type=int,
+        help="Optional max polling loops (useful for tests/smoke).",
+    )
+    p_watch.set_defaults(func=cmd_watch)
+
+    p_maint = sub.add_parser("maintainers", help="Maintainer profile operations.")
+    p_maint.add_argument("--list", action="store_true", help="List maintainer profiles.")
+    p_maint.add_argument("--profile", help="Show specific maintainer profile.")
+    p_maint.set_defaults(func=cmd_maintainers)
 
     p_report = sub.add_parser("report", help="Render session report (markdown/json).")
     p_report.add_argument("--session", help="Session id. Defaults to active or latest.")
