@@ -56,6 +56,7 @@ Strict requirements:
 3) For every prior comment, include source_comment_id and set status=closed only with concrete evidence.
 4) Use location as patch_file_name:line_number.
 5) If an issue is not addressed, keep it open.
+6) Any REJECT/open finding must include concrete evidence text suitable for upstream evidence enrichment.
 
 Focus on correctness, bisect safety, PM-runtime/refcount behavior, and whether prior-thread feedback is addressed.
 EOF

@@ -34,6 +34,12 @@ def default_config() -> dict:
             "volatility_swing": 30,
             "zero_patch_gauge": 0,
         },
+        "upstream_evidence": {
+            "kernel_tree": "",
+            "strict_mode": True,
+            "block_on_no_evidence": True,
+            "elixir_base": "https://elixir.bootlin.com/linux/latest",
+        },
         "respin": {
             "conflict_strategy": "abort",
             "keep_temp_branch": False,

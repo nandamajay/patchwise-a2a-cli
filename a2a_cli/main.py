@@ -46,6 +46,7 @@ from .score_engine import (
     mark_findings_low_quality,
 )
 from .types import StatusView
+from .upstream_evidence import enrich_findings_with_evidence, kernel_tree_exists
 
 try:
     from rich.console import Console
@@ -1377,6 +1378,39 @@ def _run_agent_step(root: Path, session: dict, role: str, command: str, round_no
         except OSError:
             watch_after = None
         _write_builder_change_artifacts(root, session, round_no, watch_before, watch_after)
+    elif role != "builder":
+        evidence_cfg = cfg.get("upstream_evidence", {}) if isinstance(cfg, dict) else {}
+        kernel_tree = str(evidence_cfg.get("kernel_tree") or "").strip()
+        if not kernel_tree and watch_path:
+            try:
+                kernel_tree = str(_detect_kernel_repo_root(Path(str(watch_path))) or "")
+            except Exception:
+                kernel_tree = ""
+        strict_mode = bool(evidence_cfg.get("strict_mode", True))
+        block_no_evidence = bool(evidence_cfg.get("block_on_no_evidence", True))
+        elixir_base = str(evidence_cfg.get("elixir_base") or "https://elixir.bootlin.com/linux/latest")
+        payload = load_json(files["findings"]) if files["findings"].exists() else {"findings": []}
+        findings_rows = payload.get("findings", []) if isinstance(payload, dict) else []
+        if isinstance(findings_rows, list):
+            kb_rows = list_kb_entries(root)
+            enriched, violations = enrich_findings_with_evidence(
+                findings_rows,
+                kernel_tree=kernel_tree if kernel_tree_exists(kernel_tree) else "",
+                strict_mode=strict_mode,
+                block_on_no_evidence=block_no_evidence,
+                kb_entries=kb_rows,
+                elixir_base=elixir_base,
+            )
+            payload = dict(payload) if isinstance(payload, dict) else {}
+            payload["findings"] = enriched
+            dump_json(files["findings"], payload)
+            if strict_mode and violations:
+                with log_path.open("a", encoding="utf-8") as f:
+                    f.write("\n[evidence] strict mode violations:\n")
+                    for v in violations:
+                        f.write(f"- {v}\n")
+                _echo(f"{role_display_name} evidence strict mode blocked verdict. See log: {log_path}")
+                return 1
 
     _echo(f"{role_display_name} command completed. Log: {log_path}")
     if role == "builder":
