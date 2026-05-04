@@ -9,9 +9,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+from urllib.parse import unquote, urlparse
 
 from .adapters.shell_adapter import run_shell_command
 from .config import A2A_DIRNAME, default_config, default_state, dump_json, load_json
@@ -192,6 +194,80 @@ def _elapsed_seconds(started_at: str | None, ended_at: str | None) -> int | None
         return None
     elapsed = int((end_dt - start_dt).total_seconds())
     return max(0, elapsed)
+
+
+def _extract_lore_message_id(value: str) -> str:
+    raw = str(value or "").strip().strip("<>").strip()
+    if not raw:
+        raise RuntimeError("Lore input is empty.")
+
+    if "://" not in raw:
+        if "/" not in raw:
+            return raw
+        parsed = urlparse("https://" + raw)
+    else:
+        parsed = urlparse(raw)
+
+    if parsed.scheme and parsed.scheme not in {"http", "https"}:
+        raise RuntimeError(f"Unsupported lore URL scheme: {parsed.scheme}")
+
+    host = (parsed.netloc or "").lower()
+    if host and "lore.kernel.org" not in host:
+        raise RuntimeError(f"Unsupported lore host: {host}")
+
+    path = parsed.path.strip("/")
+    if not path:
+        raise RuntimeError(f"Cannot extract message-id from lore URL: {value}")
+
+    for prefix in ("r/", "all/"):
+        if path.startswith(prefix):
+            token = path[len(prefix) :].split("/", 1)[0].strip().strip("<>").strip()
+            if token:
+                return unquote(token)
+    token = path.split("/", 1)[0].strip().strip("<>").strip()
+    if token:
+        return unquote(token)
+    raise RuntimeError(f"Cannot extract message-id from lore URL: {value}")
+
+
+def _lore_fetch_base_dir(cfg: dict) -> Path:
+    upstream = cfg.get("upstream_evidence", {}) if isinstance(cfg, dict) else {}
+    kernel_tree = str(upstream.get("kernel_tree") or "").strip()
+    if kernel_tree:
+        tree = Path(kernel_tree).expanduser().resolve()
+        if tree.exists() and (tree / "scripts" / "checkpatch.pl").is_file():
+            return tree / ".a2a" / "lore_series"
+    return Path(tempfile.gettempdir()) / "a2a_lore_series"
+
+
+def _fetch_lore_series(cfg: dict, lore_input: str) -> tuple[Path, str]:
+    message_id = _extract_lore_message_id(lore_input)
+    if shutil.which("b4") is None:
+        raise RuntimeError("b4 is required for lore input. Install b4 and retry.")
+
+    base_dir = _lore_fetch_base_dir(cfg)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    safe_mid = re.sub(r"[^A-Za-z0-9._@+-]+", "-", message_id).strip("-") or "thread"
+    out_dir = (base_dir / f"{safe_mid}-{stamp}").resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    proc = subprocess.run(
+        ["b4", "am", "-o", str(out_dir), message_id],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Failed to fetch lore series with b4.\n"
+            f"msgid={message_id}\n"
+            f"stdout:\n{proc.stdout}\n"
+            f"stderr:\n{proc.stderr}"
+        )
+
+    patches = sorted(out_dir.glob("*.patch"))
+    if not patches:
+        raise RuntimeError(f"No patch files fetched from lore for message-id: {message_id}")
+    return out_dir, message_id
 
 
 def _prompt_extend_after_max_rounds(
@@ -2735,7 +2811,22 @@ def cmd_loop(args: argparse.Namespace) -> int:
         reviewer_cmd = _resolve_agent_command(cfg, args.reviewer_cmd, "reviewer_command")
         builder_cmd, reviewer_cmd = _resolve_default_agent_commands(root, cfg, builder_cmd, reviewer_cmd)
         watch_path = str(Path(args.watch_path).resolve()) if args.watch_path else None
+        lore_url = str(getattr(args, "lore_url", "") or "").strip()
+        lore_msgid = str(getattr(args, "lore_msgid", "") or "").strip()
+        lore_input = lore_msgid or lore_url
         single_series_mode = bool(getattr(args, "_single_series", False))
+
+        if lore_input:
+            if args.session:
+                _echo("Lore fetch flags are only supported for new sessions (no --session).")
+                return 1
+            if watch_path:
+                _echo("Use either --watch-path or --lore-url/--lore-msgid, not both.")
+                return 1
+            fetched_dir, fetched_msgid = _fetch_lore_series(cfg, lore_input)
+            watch_path = str(fetched_dir)
+            _echo(f"Lore source message-id: {fetched_msgid}")
+            _echo(f"Lore patch series fetched to: {watch_path}")
 
         if not single_series_mode and not args.session and watch_path:
             wp = Path(watch_path)
@@ -2758,6 +2849,8 @@ def cmd_loop(args: argparse.Namespace) -> int:
                             builder_cmd=args.builder_cmd,
                             reviewer_cmd=args.reviewer_cmd,
                             watch_path=str(series_row.get("path")),
+                            lore_url=None,
+                            lore_msgid=None,
                             max_iterations=args.max_iterations,
                             _single_series=True,
                         )
@@ -3455,6 +3548,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_loop.add_argument(
         "--watch-path",
         help="Path to watch for builder file changes; emits round changed_files/diff artifacts.",
+    )
+    p_loop.add_argument(
+        "--lore-url",
+        help="Lore URL to fetch patch series via b4 for this new loop session.",
+    )
+    p_loop.add_argument(
+        "--lore-msgid",
+        help="Lore message-id root to fetch patch series via b4 for this new loop session.",
     )
     p_loop.add_argument(
         "--max-iterations",
