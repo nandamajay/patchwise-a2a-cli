@@ -510,6 +510,86 @@ def _validate_findings(findings: list[dict], strict_evidence: bool) -> tuple[lis
     return errors, open_count
 
 
+def should_issue_lgtm(findings_json_path: str, reviewer_verdict: str) -> tuple[bool, str]:
+    """
+    LGTM requires ALL THREE conditions simultaneously:
+      1. current round open  == 0  (no open findings right now)
+      2. current round new   == 0  (no new findings raised this round)
+      3. reviewer verdict    == LGTM (explicit agent verdict)
+
+    Resolving old findings does NOT qualify for LGTM
+    if new findings were raised in the same round.
+    """
+    try:
+        with open(findings_json_path, encoding="utf-8") as handle:
+            findings_payload = json.load(handle)
+    except Exception as exc:
+        return False, f"cannot read findings JSON: {exc}"
+
+    if not isinstance(findings_payload, dict):
+        return False, "cannot read findings JSON: payload must be a JSON object"
+
+    findings = findings_payload.get("findings")
+    if not isinstance(findings, list):
+        findings = []
+
+    raw_open = findings_payload.get("open", None)
+    raw_new = findings_payload.get("new", None)
+
+    try:
+        open_count = int(raw_open) if raw_open is not None else -1
+    except (TypeError, ValueError):
+        open_count = -1
+    try:
+        new_count = int(raw_new) if raw_new is not None else -1
+    except (TypeError, ValueError):
+        new_count = -1
+
+    # Fallback to current-round findings list when top-level counters are unavailable.
+    if open_count < 0:
+        open_count = 0
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            status = str(finding.get("status") or "").strip().lower()
+            if status != "closed":
+                open_count += 1
+
+    if new_count < 0:
+        new_count = 0
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            source_id = str(finding.get("source_comment_id") or "").strip().lower()
+            if not source_id:
+                new_count += 1
+                continue
+            if source_id.startswith("new-") or source_id.startswith("round") or source_id.startswith("issue-temp"):
+                new_count += 1
+
+    verdict = reviewer_verdict.strip().upper()
+
+    if new_count != 0:
+        return False, (
+            f"new findings raised this round = {new_count} "
+            f"(Aryabhata raised new issues — cannot issue LGTM)"
+        )
+
+    if open_count != 0:
+        return False, (
+            f"open findings = {open_count} "
+            f"(must be 0 for LGTM)"
+        )
+
+    if verdict != "LGTM":
+        return False, (
+            f"Aryabhata verdict = {verdict} "
+            f"(must be explicit LGTM)"
+        )
+
+    return True, "LGTM"
+
+
 def _load_session(root: Path, session_id: str) -> dict:
     path = _session_path(root, session_id)
     if not path.exists():
@@ -519,6 +599,30 @@ def _load_session(root: Path, session_id: str) -> dict:
 
 def _write_session(root: Path, session: dict) -> None:
     dump_json(_session_path(root, str(session["id"])), session)
+
+
+def _reviewer_verdict_for_round(root: Path, session_id: str, round_no: int, reviewer_name: str) -> str:
+    files = _round_files(root, session_id, round_no, reviewer_name)
+    review_path = files["reviewer"]
+    if not review_path.exists():
+        return ""
+
+    text = review_path.read_text(encoding="utf-8", errors="replace")
+    # Prefer explicit verdict section from reviewer markdown.
+    for line in text.splitlines():
+        m = re.match(r"^\s*-\s*(LGTM|REJECT|PENDING)\s*$", line.strip(), re.IGNORECASE)
+        if m:
+            token = m.group(1).strip().upper()
+            if token == "PENDING":
+                return "REJECT"
+            return token
+    # Fallback: keyword scan.
+    upper = text.upper()
+    if "LGTM" in upper:
+        return "LGTM"
+    if "REJECT" in upper or "PENDING" in upper:
+        return "REJECT"
+    return ""
 
 
 def _agent_env(session: dict, round_no: int, files: dict[str, Path], role: str) -> dict[str, str]:
@@ -2242,7 +2346,20 @@ def _advance_session(root: Path, session_id: str) -> int:
         _echo(str(score_decision.get("abort_reason") or "Session aborted by score engine."))
         return 1
 
-    should_lgtm = open_count == 0
+    round_files = _round_files(root, session_id, round_no, reviewer_name)
+    reviewer_verdict = _reviewer_verdict_for_round(root, session_id, round_no, reviewer_name)
+    should_lgtm, lgtm_reason = should_issue_lgtm(str(round_files["findings"]), reviewer_verdict)
+    if not should_lgtm:
+        max_rounds_local = int(session.get("max_rounds", 1))
+        next_round_hint = round_no + 1
+        _echo("┌──────────────────────────────────────────────────────────────────────┐")
+        _echo(f"│ LGTM blocked: {lgtm_reason}")
+        if round_no < max_rounds_local:
+            _echo(f"│ Continuing to Round {next_round_hint}")
+        else:
+            _echo(f"│ At max rounds ({max_rounds_local}); stopping rules apply")
+        _echo("└──────────────────────────────────────────────────────────────────────┘")
+
     if score_decision.get("block_lgtm"):
         should_lgtm = False
     if score_decision.get("force_extra_round"):
