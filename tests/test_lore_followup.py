@@ -50,6 +50,7 @@ def test_ingest_prior_review_context_uses_seed_message_ids() -> None:
         payload = json.loads((report / "prior_comments.json").read_text(encoding="utf-8"))
         assert payload["sources"][0]["kind"] == "seed"
         assert payload["sources"][0]["message_id"] == "20260504-seed@example.com"
+        assert payload["comments"][0]["comment_type"] == "actionable_review"
 
 
 def test_build_suggested_replies_markdown_includes_open_and_closed() -> None:
@@ -68,6 +69,12 @@ def test_build_suggested_replies_markdown_includes_open_and_closed() -> None:
                     "subject": "Check refcount",
                     "current_status": "open",
                 },
+                {
+                    "source_comment_id": "prior-msg:3",
+                    "subject": "Applied upstream",
+                    "current_status": "external_resolved",
+                    "external_reference": "https://git.kernel.org/broonie/sound/c/74c876bfd71b",
+                },
             ]
         }
     }
@@ -83,6 +90,8 @@ def test_build_suggested_replies_markdown_includes_open_and_closed() -> None:
     assert "Addressed in this revision at foo.patch:12" in out
     assert "prior-msg:2" in out
     assert "planned action: Add shared-rail reference counting" in out
+    assert "prior-msg:3" in out
+    assert "Already applied upstream (https://git.kernel.org/broonie/sound/c/74c876bfd71b)" in out
 
 
 def test_generate_lore_next_version_copies_and_bumps_subject() -> None:

@@ -20,6 +20,58 @@ _PATCH_SUBJECT_RE = re.compile(
 _LORE_LINK_RE = re.compile(r"(?:https?://)?lore\.kernel\.org/r/([^\s>]+)", re.IGNORECASE)
 _GENERIC_URL_RE = re.compile(r"https?://[^\s>]+")
 _RESULT_LINK_RE = re.compile(r"\d+\.\s+<b><a\s*\n?href=\"([^\"]+)/\"", re.MULTILINE)
+_GIT_KERNEL_COMMIT_RE = re.compile(r"https?://git\.kernel\.org/[^\s]*/c/[0-9a-f]{7,40}", re.IGNORECASE)
+_APPLY_NOTICE_TOKENS = (
+    "applied to",
+    "applied in",
+    "merged into",
+    "queued in",
+    "queued for",
+    "picked up",
+    "integrated into the linux-next tree",
+    "sent to linus",
+)
+
+
+def classify_prior_comment(comment: dict) -> dict[str, str | bool]:
+    comment_id = str(comment.get("id") or "")
+    subject = str(comment.get("subject") or "")
+    excerpt = str(comment.get("excerpt") or "")
+    source = str(comment.get("source") or "")
+    body = " ".join([subject, excerpt, source]).lower()
+    if comment_id.startswith("prior-meta:"):
+        return {
+            "comment_type": "meta",
+            "external_resolved": False,
+            "external_reference": "",
+            "classification_reason": "system-generated prior-thread metadata",
+        }
+
+    has_apply_token = any(token in body for token in _APPLY_NOTICE_TOKENS)
+    commit_match = _GIT_KERNEL_COMMIT_RE.search(" ".join([subject, excerpt, source]))
+    has_kernel_tree_ref = "git.kernel.org" in body and "/c/" in body
+    if has_apply_token and (commit_match is not None or has_kernel_tree_ref):
+        external_ref = commit_match.group(0) if commit_match else source
+        return {
+            "comment_type": "maintainer_apply_notice",
+            "external_resolved": True,
+            "external_reference": external_ref,
+            "classification_reason": "maintainer apply/merge notification",
+        }
+
+    return {
+        "comment_type": "actionable_review",
+        "external_resolved": False,
+        "external_reference": "",
+        "classification_reason": "review comment requires mapping/closure evidence",
+    }
+
+
+def _annotate_prior_comment(comment: dict) -> dict:
+    out = dict(comment)
+    meta = classify_prior_comment(out)
+    out.update(meta)
+    return out
 
 
 def ingest_prior_review_context(
@@ -158,9 +210,21 @@ def ingest_prior_review_context(
                 }
             )
 
+    comments = [_annotate_prior_comment(comment) for comment in comments]
+
     report_dir.mkdir(parents=True, exist_ok=True)
     comments_path = report_dir / "prior_comments.json"
     matrix_path = report_dir / "prior_comment_matrix.md"
+
+    type_totals = {
+        "actionable_review": 0,
+        "maintainer_apply_notice": 0,
+        "meta": 0,
+    }
+    for comment in comments:
+        ctype = str(comment.get("comment_type") or "actionable_review")
+        if ctype in type_totals:
+            type_totals[ctype] += 1
 
     context = {
         "version": 1,
@@ -169,6 +233,7 @@ def ingest_prior_review_context(
         "detected": metadata,
         "sources": deduped_sources,
         "comments_total": len(comments),
+        "comment_type_totals": type_totals,
         "comments": comments,
     }
     comments_path.write_text(json.dumps(context, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -181,6 +246,7 @@ def ingest_prior_review_context(
         "comments_file": str(comments_path),
         "matrix_file": str(matrix_path),
         "comments_total": len(comments),
+        "comment_type_totals": type_totals,
         "source_total": len(deduped_sources),
         "search_used": bool(search_attempted),
         "detected_version": metadata.get("version"),
@@ -222,6 +288,12 @@ def augment_findings_with_prior_comments(findings: list[dict], prior_comments: l
         if linked:
             # Reviewer already emitted a mapped finding for this prior comment.
             # Do not duplicate it with an additional synthetic entry.
+            continue
+        class_meta = classify_prior_comment(comment)
+        if bool(comment.get("external_resolved", class_meta.get("external_resolved", False))) or str(
+            comment.get("comment_type") or class_meta.get("comment_type") or ""
+        ) == "maintainer_apply_notice":
+            # Maintainer apply/merge notifications are externally resolved.
             continue
 
         subject = str(comment.get("subject") or "prior review comment").strip()
@@ -273,7 +345,11 @@ def render_prior_comment_matrix(prior_comments: list[dict], findings: list[dict]
 
         linked = by_source.get(comment_id, [])
         closed = [f for f in linked if str(f.get("status", "")).lower() == "closed"]
-        status = "closed" if closed else "open"
+        class_meta = classify_prior_comment(comment)
+        external_resolved = bool(comment.get("external_resolved", class_meta.get("external_resolved", False))) or str(
+            comment.get("comment_type") or class_meta.get("comment_type") or ""
+        ) == "maintainer_apply_notice"
+        status = "closed" if closed else ("external_resolved" if external_resolved else "open")
 
         evidence_text = ""
         if closed:
@@ -286,6 +362,16 @@ def render_prior_comment_matrix(prior_comments: list[dict], findings: list[dict]
                 evidence_text = str(evidence or "")
             if location:
                 evidence_text = f"{location} | {evidence_text}".strip()
+        elif external_resolved:
+            external_ref = str(comment.get("external_reference") or class_meta.get("external_reference") or "").strip()
+            excerpt = str(comment.get("excerpt") or "").strip()
+            evidence_text = (
+                f"upstream_apply_notice={external_ref}"
+                if external_ref
+                else "upstream_apply_notice present"
+            )
+            if excerpt:
+                evidence_text = f"{evidence_text} | {excerpt[:240]}"
 
         lines.append(
             "| {id} | {from_} | {subject} | {status} | {evidence} |".format(

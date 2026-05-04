@@ -19,6 +19,7 @@ from .adapters.shell_adapter import run_shell_command
 from .config import A2A_DIRNAME, default_config, default_state, dump_json, load_json
 from .prior_review import (
     augment_findings_with_prior_comments,
+    classify_prior_comment,
     ingest_prior_review_context,
     load_prior_comments,
     render_prior_comment_matrix,
@@ -523,7 +524,17 @@ def _build_suggested_replies_markdown(round_summary: dict, findings: list[dict],
         lines.append(f"## {source_id}")
         lines.append(f"- Subject: {subject}")
         lines.append(f"- Status: {status}")
-        if status == "closed":
+        if status == "external_resolved":
+            external_ref = str(row.get("external_reference") or "").strip()
+            if external_ref:
+                lines.append(
+                    f'- Suggested reply: "Already applied upstream ({external_ref}); no further action required for this comment."'
+                )
+            else:
+                lines.append(
+                    '- Suggested reply: "Already applied upstream by maintainer; no further action required for this comment."'
+                )
+        elif status == "closed":
             location = str(row.get("latest_location") or "").strip() or "n/a"
             evidence = str(row.get("latest_evidence") or "").strip() or "verified in patch update"
             lines.append(
@@ -1632,16 +1643,29 @@ def _build_prior_comment_summary(session: dict, rounds: list[dict]) -> list[dict
             source_id = str(comment.get("id") or "").strip()
             if not source_id:
                 continue
+            class_meta = classify_prior_comment(comment)
+            external_resolved = bool(comment.get("external_resolved", class_meta.get("external_resolved", False)))
+            external_ref = str(comment.get("external_reference") or class_meta.get("external_reference") or "").strip()
+            external_evidence = str(comment.get("excerpt") or "").strip()
             linked = by_source.get(source_id, [])
             closed = [f for f in linked if str(f.get("status", "")).lower() == "closed"]
-            selected = closed[0] if closed else (linked[0] if linked else None)
-            status = "closed" if closed else "open"
+            if linked:
+                selected = closed[0] if closed else linked[0]
+                status = "closed" if closed else "open"
+            elif external_resolved:
+                selected = None
+                status = "external_resolved"
+            else:
+                selected = None
+                status = "open"
+            location = str(selected.get("location") or "") if selected else (external_ref or str(comment.get("source") or ""))
+            evidence = selected.get("evidence") if selected else ([external_evidence] if external_evidence else [])
             history_by_id.setdefault(source_id, []).append(
                 {
                     "round": round_no,
                     "status": status,
-                    "location": str(selected.get("location") or "") if selected else "",
-                    "evidence": selected.get("evidence") if selected else [],
+                    "location": location,
+                    "evidence": evidence,
                 }
             )
 
@@ -1650,9 +1674,22 @@ def _build_prior_comment_summary(session: dict, rounds: list[dict]) -> list[dict
         source_id = str(comment.get("id") or "").strip()
         if not source_id:
             continue
+        class_meta = classify_prior_comment(comment)
+        comment_type = str(comment.get("comment_type") or class_meta.get("comment_type") or "actionable_review")
+        external_resolved = bool(comment.get("external_resolved", class_meta.get("external_resolved", False)))
+        external_reference = str(
+            comment.get("external_reference") or class_meta.get("external_reference") or ""
+        ).strip()
         history = history_by_id.get(source_id, [])
-        initial_status = history[0]["status"] if history else "open"
-        current_status = history[-1]["status"] if history else "open"
+        if history:
+            initial_status = history[0]["status"]
+            current_status = history[-1]["status"]
+        elif external_resolved:
+            initial_status = "external_resolved"
+            current_status = "external_resolved"
+        else:
+            initial_status = "open"
+            current_status = "open"
 
         closed_round = None
         latest_location = ""
@@ -1667,18 +1704,26 @@ def _build_prior_comment_summary(session: dict, rounds: list[dict]) -> list[dict
                 latest_evidence = "; ".join(str(x) for x in ev[:2])
             else:
                 latest_evidence = str(ev or "")
+        elif external_resolved:
+            latest_location = external_reference or str(comment.get("source") or "")
+            latest_evidence = str(comment.get("excerpt") or "").strip()
 
         fixed_by_a2a = bool(initial_status == "open" and current_status == "closed")
+        resolution_origin = "a2a" if fixed_by_a2a else ("upstream" if current_status == "external_resolved" else "none")
         rows.append(
             {
                 "source_comment_id": source_id,
                 "from": str(comment.get("from") or ""),
                 "subject": str(comment.get("subject") or ""),
+                "comment_type": comment_type,
                 "initial_status": initial_status,
                 "current_status": current_status,
                 "closed_round": closed_round,
                 "fixed_by_a2a": fixed_by_a2a,
-                "already_fixed_before_a2a": bool(initial_status == "closed"),
+                "already_fixed_before_a2a": bool(initial_status in {"closed", "external_resolved"}),
+                "external_resolved": bool(current_status == "external_resolved"),
+                "external_reference": external_reference,
+                "resolution_origin": resolution_origin,
                 "latest_location": latest_location,
                 "latest_evidence": latest_evidence,
             }
@@ -1780,10 +1825,25 @@ def _build_round_runtime_summary(
         }
     ]
     prior_rows = _build_prior_comment_summary(session, rounds_plus_current)
+    external_resolved = len([r for r in prior_rows if str(r.get("current_status")) == "external_resolved"])
     prior_totals = {
         "received_total": len(prior_rows),
-        "open": len([r for r in prior_rows if r.get("current_status") != "closed"]),
-        "closed": len([r for r in prior_rows if r.get("current_status") == "closed"]),
+        "open": len(
+            [
+                r
+                for r in prior_rows
+                if str(r.get("current_status")) not in {"closed", "external_resolved"}
+            ]
+        ),
+        "closed": len(
+            [
+                r
+                for r in prior_rows
+                if str(r.get("current_status")) in {"closed", "external_resolved"}
+            ]
+        ),
+        "external_resolved": external_resolved,
+        "closed_by_upstream": external_resolved,
         "fixed_by_a2a": len([r for r in prior_rows if bool(r.get("fixed_by_a2a"))]),
     }
 
@@ -1872,6 +1932,7 @@ def _render_round_runtime_summary_markdown(summary: dict) -> str:
         f"- received_total: {prior.get('received_total')}",
         f"- open: {prior.get('open')}",
         f"- closed: {prior.get('closed')}",
+        f"- external_resolved: {prior.get('external_resolved')}",
         f"- fixed_by_a2a: {prior.get('fixed_by_a2a')}",
         "",
         "## Scores",
@@ -2186,10 +2247,25 @@ def _session_report_payload(root: Path, session_id: str) -> dict:
         rounds.append(row)
 
     prior_comment_summary = _build_prior_comment_summary(session, rounds)
+    prior_closed = len(
+        [
+            r
+            for r in prior_comment_summary
+            if str(r.get("current_status") or "") in {"closed", "external_resolved"}
+        ]
+    )
+    prior_external = len(
+        [
+            r
+            for r in prior_comment_summary
+            if str(r.get("current_status") or "") == "external_resolved"
+        ]
+    )
     prior_totals = {
         "comments_total": len(prior_comment_summary),
-        "comments_closed": len([r for r in prior_comment_summary if r.get("current_status") == "closed"]),
-        "comments_open": len([r for r in prior_comment_summary if r.get("current_status") != "closed"]),
+        "comments_closed": prior_closed,
+        "comments_open": len(prior_comment_summary) - prior_closed,
+        "comments_external_resolved": prior_external,
         "fixed_by_a2a": len([r for r in prior_comment_summary if bool(r.get("fixed_by_a2a"))]),
     }
     prior = session.get("prior_review")
@@ -2202,6 +2278,7 @@ def _session_report_payload(root: Path, session_id: str) -> dict:
             "search_used": bool(prior.get("search_used", False)),
             "detected_version": prior.get("detected_version"),
             "detected_subject": prior.get("detected_subject"),
+            "comment_type_totals": prior.get("comment_type_totals", {}),
             "comment_status_totals": prior_totals,
         }
 
@@ -2328,10 +2405,16 @@ def _render_markdown_report(payload: dict) -> str:
         lines.append(f"- prior_comments_total: {prior.get('comments_total')}")
         lines.append(f"- prior_sources_total: {prior.get('source_total')}")
         lines.append(f"- prior_search_used: {prior.get('search_used')}")
+        type_totals = prior.get("comment_type_totals")
+        if isinstance(type_totals, dict):
+            lines.append(f"- prior_actionable_comments: {type_totals.get('actionable_review')}")
+            lines.append(f"- prior_apply_notices: {type_totals.get('maintainer_apply_notice')}")
+            lines.append(f"- prior_meta_comments: {type_totals.get('meta')}")
         status_totals = prior.get("comment_status_totals")
         if isinstance(status_totals, dict):
             lines.append(f"- prior_comments_closed: {status_totals.get('comments_closed')}")
             lines.append(f"- prior_comments_open: {status_totals.get('comments_open')}")
+            lines.append(f"- prior_comments_external_resolved: {status_totals.get('comments_external_resolved')}")
             lines.append(f"- prior_fixed_by_a2a: {status_totals.get('fixed_by_a2a')}")
 
     lines.extend(["", "## Rounds", ""])
@@ -2363,17 +2446,19 @@ def _render_markdown_report(payload: dict) -> str:
     else:
         lines.extend(
             [
-                "| source_comment_id | subject | initial | current | fixed_by_a2a | closed_round | latest_location |",
-                "|---|---|---|---|---|---|---|",
+                "| source_comment_id | subject | type | initial | current | resolution_origin | fixed_by_a2a | closed_round | latest_location |",
+                "|---|---|---|---|---|---|---|---|---|",
             ]
         )
         for row in prior_comment_summary:
             lines.append(
-                "| {id} | {subject} | {initial} | {current} | {fixed} | {closed_round} | {loc} |".format(
+                "| {id} | {subject} | {ctype} | {initial} | {current} | {origin} | {fixed} | {closed_round} | {loc} |".format(
                     id=str(row.get("source_comment_id") or "").replace("|", "\\|"),
                     subject=str(row.get("subject") or "").replace("|", "\\|"),
+                    ctype=str(row.get("comment_type") or "").replace("|", "\\|"),
                     initial=str(row.get("initial_status") or ""),
                     current=str(row.get("current_status") or ""),
+                    origin=str(row.get("resolution_origin") or ""),
                     fixed="yes" if bool(row.get("fixed_by_a2a")) else "no",
                     closed_round=str(row.get("closed_round") if row.get("closed_round") is not None else "-"),
                     loc=str(row.get("latest_location") or "").replace("|", "\\|"),

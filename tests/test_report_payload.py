@@ -138,6 +138,77 @@ class ReportPayloadTests(unittest.TestCase):
             self.assertEqual(summary["prior-msg:c2"]["fixed_by_a2a"], True)
             self.assertEqual(summary["prior-msg:c2"]["closed_round"], 2)
 
+    def test_prior_comment_summary_marks_upstream_apply_notice(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            a2a = root / ".a2a"
+            sessions = a2a / "sessions"
+            reports = a2a / "reports" / "sess-upstream"
+            sessions.mkdir(parents=True, exist_ok=True)
+            reports.mkdir(parents=True, exist_ok=True)
+
+            prior_comments = {
+                "comments": [
+                    {
+                        "id": "prior-msg:apply@example.com",
+                        "from": "broonie@kernel.org",
+                        "subject": "Re: [PATCH] test",
+                        "excerpt": (
+                            "Applied to https://git.kernel.org/pub/scm/linux/kernel/git/broonie/sound.git "
+                            "for-7.1 Thanks! https://git.kernel.org/broonie/sound/c/74c876bfd71b"
+                        ),
+                        "source": "https://lore.kernel.org/r/example/t.mbox.gz",
+                    }
+                ]
+            }
+            _write_json(reports / "prior_comments.json", prior_comments)
+            _write_json(reports / "round-01-findings.json", {"findings": []})
+            _write_json(reports / "round-01-gate.json", {"ran": True, "passed": True, "failures": 0})
+
+            session = {
+                "id": "sess-upstream",
+                "task": "report-payload-upstream",
+                "status": "lgtm",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:01:00+00:00",
+                "max_rounds": 1,
+                "current_round": 1,
+                "open_findings": 0,
+                "builder_display_name": "chanakya",
+                "reviewer_display_name": "aryabhatta",
+                "reviewer_name": "aryabhatta",
+                "repo_path": "/tmp/repo",
+                "branch": "a2a/test",
+                "builder_command": "builder",
+                "reviewer_command": "reviewer",
+                "prior_review": {
+                    "enabled": True,
+                    "comments_file": str(reports / "prior_comments.json"),
+                    "comments_total": 1,
+                    "source_total": 1,
+                    "search_used": False,
+                },
+                "rounds": [
+                    {
+                        "round": 1,
+                        "validated_at": "2026-01-01T00:01:00+00:00",
+                        "findings_total": 0,
+                        "findings_open": 0,
+                        "findings_file": str(reports / "round-01-findings.json"),
+                    }
+                ],
+            }
+            _write_json(sessions / "sess-upstream.json", session)
+
+            payload = _session_report_payload(root, "sess-upstream")
+            self.assertEqual(
+                payload["session"]["prior_review"]["comment_status_totals"]["comments_external_resolved"],
+                1,
+            )
+            summary = {row["source_comment_id"]: row for row in payload["prior_comment_summary"]}
+            self.assertEqual(summary["prior-msg:apply@example.com"]["current_status"], "external_resolved")
+            self.assertEqual(summary["prior-msg:apply@example.com"]["resolution_origin"], "upstream")
+
 
 if __name__ == "__main__":
     unittest.main()

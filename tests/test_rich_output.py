@@ -2,6 +2,7 @@ from a2a_cli.rich_output import (
     render_finding_card,
     render_gate_status,
     render_lgtm_banner,
+    render_prior_comment_status,
     render_prior_comment_table,
     render_round_table,
     render_scores,
@@ -218,3 +219,37 @@ def test_needs_eye_computation_missing_evidence() -> None:
     )
     assert "prior-no-evidence" in out
     assert "needs_eye=yes" in out
+
+
+def test_prior_comment_status_shows_upstream_resolved_count() -> None:
+    out = render_prior_comment_status(
+        {
+            "totals": {"received_total": 2, "open": 0, "closed": 2, "external_resolved": 1},
+        }
+    )
+    assert "closed=2" in out
+    assert "(upstream=1)" in out
+
+
+def test_prior_comment_table_shows_upstream_total_and_origin() -> None:
+    out = render_prior_comment_table(
+        {
+            "totals": {"received_total": 1, "open": 0, "closed": 1, "external_resolved": 1},
+            "tracked": [
+                {
+                    "source_comment_id": "prior-upstream-1",
+                    "subject": "Applied upstream",
+                    "current_status": "external_resolved",
+                    "fixed_by_a2a": False,
+                    "resolution_origin": "upstream",
+                    "closed_round": None,
+                    "latest_location": "https://git.kernel.org/broonie/sound/c/74c876bfd71b",
+                    "latest_evidence": "Applied to ... for-7.1",
+                }
+            ],
+        },
+        width=120,
+    )
+    assert "upstream=1" in out
+    assert "origin=upstream" in out
+    assert "needs_eye=no" in out

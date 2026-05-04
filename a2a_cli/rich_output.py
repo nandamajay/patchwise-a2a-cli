@@ -162,12 +162,15 @@ def render_round_table(
         )
     )
     prior_totals = prior.get("totals", prior) if isinstance(prior, dict) else {}
+    external_resolved = int(prior_totals.get("external_resolved", prior_totals.get("closed_by_upstream", 0)) or 0)
+    upstream_chunk = f" (upstream={external_resolved})" if external_resolved > 0 else ""
     out.append(
         _line(
-            " Prior Comments: received={rcv} open={op} closed={cl}".format(
+            " Prior Comments: received={rcv} open={op} closed={cl}{upstream}".format(
                 rcv=prior_totals.get("received_total", prior_totals.get("received", 0)),
                 op=prior_totals.get("open", 0),
                 cl=prior_totals.get("closed", 0),
+                upstream=upstream_chunk,
             ),
             w,
             box["v"],
@@ -242,17 +245,24 @@ def render_prior_comment_status(comments: dict[str, Any] | list[dict[str, Any]])
         received = int(totals.get("received_total", totals.get("received", 0)) or 0)
         open_count = int(totals.get("open", 0) or 0)
         closed = int(totals.get("closed", 0) or 0)
+        external = int(totals.get("external_resolved", totals.get("closed_by_upstream", 0)) or 0)
     else:
         received = len(comments)
         open_count = 0
         closed = 0
+        external = 0
         for row in comments:
             status = str((row or {}).get("status", "")).lower()
-            if status == "closed":
+            if status in {"closed", "external_resolved"}:
                 closed += 1
+                if status == "external_resolved":
+                    external += 1
             else:
                 open_count += 1
-    return f"Prior Comments: received={received} open={open_count} closed={closed}"
+    out = f"Prior Comments: received={received} open={open_count} closed={closed}"
+    if external > 0:
+        out += f" (upstream={external})"
+    return out
 
 
 def render_prior_comment_table(
@@ -268,6 +278,7 @@ def render_prior_comment_table(
     received_total = int(totals.get("received_total", totals.get("received", 0)) or 0)
     open_total = int(totals.get("open", 0) or 0)
     closed_total = int(totals.get("closed", 0) or 0)
+    external_total = int(totals.get("external_resolved", totals.get("closed_by_upstream", 0)) or 0)
     if not isinstance(rows, list):
         rows = []
 
@@ -282,7 +293,10 @@ def render_prior_comment_table(
 
     out.append(
         _line(
-            f" Totals: received={received_total} open={open_total} closed={closed_total}",
+            (
+                f" Totals: received={received_total} open={open_total} closed={closed_total}"
+                + (f" upstream={external_total}" if external_total > 0 else "")
+            ),
             w,
             "│" if not ascii_flag else "|",
             "│" if not ascii_flag else "|",
@@ -305,12 +319,18 @@ def render_prior_comment_table(
         subject = str(row.get("subject") or "")
         status = str(row.get("current_status") or row.get("status") or "open")
         fixed = "yes" if bool(row.get("fixed_by_a2a")) else "no"
+        origin = str(row.get("resolution_origin") or "").strip()
         closed_round = row.get("closed_round")
         closed_text = str(closed_round) if closed_round is not None else "-"
         evidence = str(row.get("latest_evidence") or "").strip()
         location = str(row.get("latest_location") or "").strip()
-        needs_eye = "yes" if status.lower() != "closed" or not evidence or not location else "no"
-        out.append(_line(f" {idx}. {source_id} [{status}] fixed_by_a2a={fixed} needs_eye={needs_eye}", w, "│" if not ascii_flag else "|", "│" if not ascii_flag else "|"))
+        status_norm = status.lower()
+        if status_norm == "external_resolved":
+            needs_eye = "yes" if not evidence and not location else "no"
+        else:
+            needs_eye = "yes" if status_norm != "closed" or not evidence or not location else "no"
+        origin_chunk = f" origin={origin}" if origin else ""
+        out.append(_line(f" {idx}. {source_id} [{status}] fixed_by_a2a={fixed}{origin_chunk} needs_eye={needs_eye}", w, "│" if not ascii_flag else "|", "│" if not ascii_flag else "|"))
         out.append(_line(f"    closed_round={closed_text}  subject={subject}", w, "│" if not ascii_flag else "|", "│" if not ascii_flag else "|"))
     out.append("└" + ("─" * (w - 2)) + "┘" if not ascii_flag else "+" + ("-" * (w - 2)) + "+")
     return "\n".join(out)
