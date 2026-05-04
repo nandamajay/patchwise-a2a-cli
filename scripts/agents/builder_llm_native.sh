@@ -128,6 +128,31 @@ text = src.read_text(encoding="utf-8", errors="replace").strip()
 if not text:
     text = "# Builder Output\n\n## Changes\n- no file changes reported by LLM\n"
 
+low = text.lower()
+bad_markers = [
+    "starting review workflow",
+    "loaded skill instructions",
+    "patchwise skill selected",
+    "loading required skill instructions",
+    "i will load the patch-review skill",
+]
+if any(marker in low for marker in bad_markers):
+    raise RuntimeError(
+        "builder output looks like workflow/meta chatter, not implementation report"
+    )
+
+required_sections = [
+    "## changes",
+    "## rationale",
+    "## verification commands",
+    "## response to reviewer findings",
+]
+missing = [sec for sec in required_sections if sec not in low]
+if missing:
+    raise RuntimeError(
+        "builder output missing required sections: " + ", ".join(missing)
+    )
+
 out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
 

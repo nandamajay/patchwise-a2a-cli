@@ -105,7 +105,7 @@ if [[ $RC -ne 0 ]]; then
   exit $RC
 fi
 
-python - "$OUT_FILE" "$A2A_FINDINGS_FILE" "$A2A_REVIEW_FILE" "${A2A_ROUND:-?}" <<'PY'
+python - "$OUT_FILE" "$A2A_FINDINGS_FILE" "$A2A_REVIEW_FILE" "${A2A_ROUND:-?}" "${A2A_WATCH_PATH:-}" <<'PY'
 import json
 import re
 import sys
@@ -115,6 +115,7 @@ src = Path(sys.argv[1])
 out_findings = Path(sys.argv[2])
 out_review = Path(sys.argv[3])
 round_no = str(sys.argv[4])
+watch_path = str(sys.argv[5] if len(sys.argv) > 5 else "").strip()
 text = src.read_text(encoding="utf-8", errors="replace").strip()
 
 payload = None
@@ -137,6 +138,58 @@ if not isinstance(payload, dict):
 findings = payload.get("findings", [])
 if not isinstance(findings, list):
     raise RuntimeError("LLM output missing findings list")
+
+def is_meta_finding(row: dict) -> bool:
+    title = str(row.get("title", "")).strip().lower()
+    source_id = str(row.get("source_comment_id", "")).strip().lower()
+    location = str(row.get("location", "")).strip().lower()
+    evidence = row.get("evidence", [])
+    if isinstance(evidence, list):
+        evidence_text = " ".join(str(x) for x in evidence).lower()
+    else:
+        evidence_text = str(evidence).lower()
+    markers = [
+        "workflow",
+        "patchwise skill",
+        "loaded skill instructions",
+        "starting review workflow",
+        "loading required skill",
+    ]
+    if any(m in title for m in markers):
+        return True
+    if source_id in {"workflow", "workflow-2", "n/a"}:
+        return True
+    if location.startswith("n/a:") or location == "n/a":
+        return True
+    if any(m in evidence_text for m in markers):
+        return True
+    return False
+
+meta_rows = [row for row in findings if isinstance(row, dict) and is_meta_finding(row)]
+if meta_rows:
+    raise RuntimeError(
+        f"reviewer output contains workflow/meta chatter findings ({len(meta_rows)}), refusing round"
+    )
+
+if findings:
+    # Ensure findings point to patch-like locations, not generic placeholders.
+    watch_name = Path(watch_path).name if watch_path else ""
+    bad_locations = []
+    for idx, row in enumerate(findings, start=1):
+        location = str(row.get("location", "")).strip()
+        if ":" not in location:
+            bad_locations.append((idx, location, "missing path:line"))
+            continue
+        path_part = location.split(":", 1)[0].strip()
+        if not path_part:
+            bad_locations.append((idx, location, "empty path"))
+            continue
+        if watch_name and watch_name.endswith(".patch"):
+            if path_part != watch_name and path_part not in {"<patch>", "<current_patch>"}:
+                bad_locations.append((idx, location, f"expected {watch_name}"))
+    if bad_locations:
+        details = "; ".join(f"#{i} '{loc}' ({reason})" for i, loc, reason in bad_locations[:5])
+        raise RuntimeError("reviewer output has invalid finding locations: " + details)
 
 out_findings.parent.mkdir(parents=True, exist_ok=True)
 out_findings.write_text(json.dumps({"findings": findings}, indent=2) + "\n", encoding="utf-8")
