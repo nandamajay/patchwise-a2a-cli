@@ -159,7 +159,7 @@ When prior comments exist and policy is enabled (`full_subsystem_review_required
 Per round, terminal output includes:
 
 - scorecard (builder/reviewer confidence, patch gauge)
-- prior-comment status and table
+- prior-comment status summary
 - advertised key findings (high severity, medium-open, evidence-backed, new findings, hardware-risk keywords)
 - hardware risk banner when matching keywords are present
 - top open findings and reasons
@@ -228,6 +228,7 @@ Frequently tuned keys:
 - `reviewer_consistency_guard`
 - `full_subsystem_review_required`
 - `lore_fetch_dir`
+- `email_bridge`
 - `default_max_rounds`
 
 ## Useful Commands
@@ -246,6 +247,50 @@ a2a report --all --status lgtm --since 2026-05-01T00:00:00+00:00
 a2a maintainers --list
 ```
 
+## Email Bridge (Phone/Remote Control)
+
+Run one cycle (safe smoke):
+
+```bash
+a2a email-bridge --once
+```
+
+Run daemon poller:
+
+```bash
+a2a email-bridge --poll-sec 60
+# or wrapper
+python scripts/email_a2a_bridge.py --poll-sec 60
+```
+
+Supported email commands:
+
+- `A2A HELP`
+- `A2A STATUS`
+- `A2A STATUS SESSION=sess-...`
+- `A2A RUN LORE URL=<lore-url> TASK=<task> MAX_ROUNDS=3`
+- `A2A RUN FILE WATCH_PATH=/abs/path/to/patch_or_series TASK=<task>`
+- `A2A RUN ATTACHMENT TASK=<task>` (attach `.patch`/`.diff`)
+- `A2A RESUME SESSION=sess-...`
+- `A2A EXTEND SESSION=sess-... TOKEN=<token> AUTO_RUN=yes`
+
+Recommended config block in `.a2a/config.json`:
+
+```json
+{
+  "email_bridge": {
+    "poll_sec": 60,
+    "imap_host": "imap.example.com",
+    "imap_port": 993,
+    "imap_user": "user@example.com",
+    "imap_password_env": "A2A_EMAIL_IMAP_PASSWORD",
+    "mailbox": "INBOX",
+    "allowed_senders": ["user@example.com"],
+    "notify_to": ["user@example.com"]
+  }
+}
+```
+
 ## Validation / Smoke
 
 ```bash
@@ -260,3 +305,15 @@ scripts/launch_live_screens.sh --session <session-id>
 # or
 scripts/launch_live_screens.sh --task "my task" --watch-path /abs/path/to/patches
 ```
+
+Interactive loop wizard:
+
+```bash
+python scripts/a2a_loop_wizard.py
+```
+
+Wizard actions:
+- Start a new loop (file-based patch or lore-based)
+- Resume an existing session
+- Extend a stopped session by one round and resume
+- Show loop command options help

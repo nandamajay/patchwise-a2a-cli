@@ -17,6 +17,7 @@ from urllib.parse import unquote, urlparse
 
 from .adapters.shell_adapter import run_shell_command
 from .config import A2A_DIRNAME, default_config, default_state, dump_json, load_json
+from .email_bridge import run_bridge_loop
 from .prior_review import (
     augment_findings_with_prior_comments,
     classify_prior_comment,
@@ -44,7 +45,6 @@ from .rich_output import (
     render_lgtm_banner,
     render_phase_progress,
     render_prior_comment_status,
-    render_prior_comment_table,
     render_round_table,
     render_scores,
     render_session_header,
@@ -2884,7 +2884,6 @@ def _advance_session(root: Path, session_id: str) -> int:
     )
     _echo(render_scores(builder_confidence, reviewer_confidence, builder_patch_gauge))
     _echo(render_prior_comment_status(round_summary.get("prior_comments", {})))
-    _echo(render_prior_comment_table(round_summary.get("prior_comments", {})))
     advertised = extract_advertised_findings(
         {"findings": findings},
         round_summary,
@@ -3023,8 +3022,6 @@ def _advance_session(root: Path, session_id: str) -> int:
                 kb_updates=0,
             )
         )
-        _echo("Final prior comments table:")
-        _echo(render_prior_comment_table(round_summary.get("prior_comments", {})))
         return 0
 
     if round_no >= max_rounds:
@@ -3625,6 +3622,47 @@ def cmd_watch(args: argparse.Namespace) -> int:
         return 0
 
 
+def cmd_email_bridge(args: argparse.Namespace) -> int:
+    try:
+        root = _must_find_root()
+        overrides = {
+            "imap_host": args.imap_host,
+            "imap_port": args.imap_port,
+            "imap_user": args.imap_user,
+            "imap_password": args.imap_password,
+            "imap_password_env": args.imap_password_env,
+            "mailbox": args.mailbox,
+            "smtp_from": args.smtp_from,
+            "allowed_senders": args.allowed_sender or [],
+            "notify_to": args.notify_to or [],
+            "inbox_dir": args.inbox_dir,
+            "state_db": args.state_db,
+            "lore_out_dir": args.lore_out_dir,
+            "approval_token_ttl_min": args.approval_token_ttl_min,
+            "poll_sec": args.poll_sec,
+            "python_bin": args.python_bin,
+        }
+        result = run_bridge_loop(
+            root,
+            overrides=overrides,
+            once=bool(args.once),
+            max_loops=args.max_loops,
+        )
+        if not bool(result.get("imap_enabled")):
+            _echo(
+                "Email bridge note: IMAP polling is disabled (missing host/user/password). "
+                "Only session notifications were processed."
+            )
+        _echo(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    except KeyboardInterrupt:
+        _echo("Email bridge interrupted by user.")
+        return 130
+    except RuntimeError as exc:
+        _echo(str(exc))
+        return 1
+
+
 def cmd_maintainers(args: argparse.Namespace) -> int:
     try:
         root = _must_find_root()
@@ -4100,6 +4138,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional max polling loops (useful for tests/smoke).",
     )
     p_watch.set_defaults(func=cmd_watch)
+
+    p_email = sub.add_parser(
+        "email-bridge",
+        help="Process A2A commands over email and send session status notifications.",
+    )
+    p_email.add_argument(
+        "--once",
+        action="store_true",
+        help="Run one poll cycle and exit (default is daemon loop).",
+    )
+    p_email.add_argument(
+        "--max-loops",
+        type=int,
+        help="Optional loop cap for daemon mode/testing.",
+    )
+    p_email.add_argument("--poll-sec", type=int, help="Poll interval in seconds.")
+    p_email.add_argument("--imap-host", help="IMAP server host.")
+    p_email.add_argument("--imap-port", type=int, help="IMAP server port (default 993).")
+    p_email.add_argument("--imap-user", help="IMAP username.")
+    p_email.add_argument("--imap-password", help="IMAP password.")
+    p_email.add_argument(
+        "--imap-password-env",
+        help="Environment variable name for IMAP password (default: A2A_EMAIL_IMAP_PASSWORD).",
+    )
+    p_email.add_argument("--mailbox", help="Mailbox name (default INBOX).")
+    p_email.add_argument("--smtp-from", help="Override sender address for bridge replies.")
+    p_email.add_argument(
+        "--allowed-sender",
+        action="append",
+        help="Allowlisted sender email (repeatable).",
+    )
+    p_email.add_argument(
+        "--notify-to",
+        action="append",
+        help="Notification recipient email (repeatable).",
+    )
+    p_email.add_argument("--inbox-dir", help="Directory for saved email patch attachments.")
+    p_email.add_argument("--state-db", help="SQLite DB path for bridge state.")
+    p_email.add_argument("--lore-out-dir", help="Default lore fetch directory used by email-triggered runs.")
+    p_email.add_argument(
+        "--approval-token-ttl-min",
+        type=int,
+        help="Approval token lifetime in minutes for EXTEND actions.",
+    )
+    p_email.add_argument("--python-bin", help="Python executable used for spawned loop commands.")
+    p_email.set_defaults(func=cmd_email_bridge)
 
     p_maint = sub.add_parser("maintainers", help="Maintainer profile operations.")
     p_maint.add_argument("--list", action="store_true", help="List maintainer profiles.")
