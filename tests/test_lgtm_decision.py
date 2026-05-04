@@ -3,7 +3,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from a2a_cli.main import reviewer_log_has_unresolved_risk, should_issue_lgtm
+from a2a_cli.main import (
+    has_independent_subsystem_findings,
+    requires_full_subsystem_review,
+    reviewer_log_has_unresolved_risk,
+    should_issue_lgtm,
+)
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -83,6 +88,47 @@ class LgtmDecisionTests(unittest.TestCase):
             blocked, snippet = reviewer_log_has_unresolved_risk(path)
             self.assertFalse(blocked)
             self.assertEqual(snippet, "")
+
+    def test_dual_track_helper_prior_only_is_not_independent(self) -> None:
+        findings = [
+            {"source_comment_id": "prior-msg:abc"},
+            {"source_comment_id": "prior-meta:xyz"},
+            {"source_comment_id": "meta:guard"},
+        ]
+        self.assertFalse(has_independent_subsystem_findings(findings))
+
+    def test_dual_track_helper_subsys_scan_is_independent(self) -> None:
+        findings = [
+            {"source_comment_id": "prior-msg:abc"},
+            {"source_comment_id": "subsys-scan:pm-runtime"},
+        ]
+        self.assertTrue(has_independent_subsystem_findings(findings))
+
+    def test_dual_track_helper_non_prior_id_is_independent(self) -> None:
+        findings = [
+            {"source_comment_id": "prior-msg:abc"},
+            {"source_comment_id": "issue-123"},
+        ]
+        self.assertTrue(has_independent_subsystem_findings(findings))
+
+    def test_requires_full_subsystem_review_enabled_with_prior_comments(self) -> None:
+        session = {"prior_review": {"comments_total": 2}}
+        cfg = {"full_subsystem_review_required": True}
+        self.assertTrue(requires_full_subsystem_review(session, cfg))
+
+    def test_requires_full_subsystem_review_disabled_or_no_prior(self) -> None:
+        self.assertFalse(
+            requires_full_subsystem_review(
+                {"prior_review": {"comments_total": 2}},
+                {"full_subsystem_review_required": False},
+            )
+        )
+        self.assertFalse(
+            requires_full_subsystem_review(
+                {"prior_review": {"comments_total": 0}},
+                {"full_subsystem_review_required": True},
+            )
+        )
 
 
 if __name__ == "__main__":

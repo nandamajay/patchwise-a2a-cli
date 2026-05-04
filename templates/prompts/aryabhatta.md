@@ -26,6 +26,10 @@ Return LGTM only when all findings are truly closed.
    - In-scope unresolved concern: emit `open` finding.
    - Pre-existing/out-of-scope concern: emit `low` severity advisory with explicit evidence and follow-up action.
 7. If your own reasoning contains uncertainty/risk language, do not return an empty findings list unless that concern is explicitly resolved with evidence.
+8. Dual-track enforcement:
+   - When prior comments exist, do not limit output to only `prior-msg:*` mappings.
+   - Also perform an independent subsystem scan and emit at least one finding/advisory with `source_comment_id` using `subsys-scan:<topic>`.
+   - This independent row may be `closed` if no defect is found, but it must include concrete evidence and a real `patch_file:line` location.
 
 ## Decision Policy
 
@@ -47,3 +51,4 @@ Return LGTM only when all findings are truly closed.
 
 When prior comments exist, map each to `source_comment_id`.
 Closed means proven by patch evidence, not assumption.
+Independent subsystem findings must use non-prior ids (prefer `subsys-scan:*`).

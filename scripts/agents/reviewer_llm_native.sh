@@ -63,6 +63,7 @@ Runtime context:
 - Knowledge base evidence context:
 ${A2A_KB_ARYABHATTA_CONTEXT:-<none>}
 - Extra scrutiny required: ${A2A_EXTRA_SCRUTINY:-0}
+- Require independent subsystem scan: ${A2A_REQUIRE_INDEPENDENT_SCAN:-0}
 
 Strict requirements:
 1) Return ONLY JSON matching the provided schema.
@@ -75,6 +76,7 @@ Strict requirements:
    - In-scope unresolved concern -> emit open finding.
    - Pre-existing/out-of-scope concern -> emit low-severity advisory finding with explicit follow-up.
 8) If your own reasoning mentions uncertainty/risk, do not return an empty findings list unless resolved with concrete evidence.
+9) If prior comments exist and independent scan is required, include at least one non-prior finding with source_comment_id like subsys-scan:<topic>.
 EOF
 
 set +e
@@ -113,7 +115,7 @@ if [[ $RC -ne 0 ]]; then
   exit $RC
 fi
 
-python - "$OUT_FILE" "$A2A_FINDINGS_FILE" "$A2A_REVIEW_FILE" "${A2A_ROUND:-?}" "${A2A_WATCH_PATH:-}" <<'PY'
+python - "$OUT_FILE" "$A2A_FINDINGS_FILE" "$A2A_REVIEW_FILE" "${A2A_ROUND:-?}" "${A2A_WATCH_PATH:-}" "${A2A_REQUIRE_INDEPENDENT_SCAN:-0}" "${A2A_PRIOR_COMMENTS_TOTAL:-0}" <<'PY'
 import json
 import re
 import sys
@@ -124,6 +126,11 @@ out_findings = Path(sys.argv[2])
 out_review = Path(sys.argv[3])
 round_no = str(sys.argv[4])
 watch_path = str(sys.argv[5] if len(sys.argv) > 5 else "").strip()
+require_independent = str(sys.argv[6] if len(sys.argv) > 6 else "0").strip() == "1"
+try:
+    prior_comments_total = int(str(sys.argv[7] if len(sys.argv) > 7 else "0").strip() or "0")
+except ValueError:
+    prior_comments_total = 0
 text = src.read_text(encoding="utf-8", errors="replace").strip()
 
 payload = None
@@ -201,6 +208,29 @@ if findings:
     if bad_locations:
         details = "; ".join(f"#{i} '{loc}' ({reason})" for i, loc, reason in bad_locations[:5])
         raise RuntimeError("reviewer output has invalid finding locations: " + details)
+
+def is_prior_or_meta(source_id: str) -> bool:
+    norm = source_id.strip().lower()
+    return norm.startswith("prior-msg:") or norm.startswith("prior-meta:") or norm.startswith("meta")
+
+has_independent = False
+for row in findings:
+    if not isinstance(row, dict):
+        continue
+    source_id = str(row.get("source_comment_id", "")).strip()
+    if not source_id:
+        continue
+    if is_prior_or_meta(source_id):
+        continue
+    has_independent = True
+    break
+
+if require_independent and prior_comments_total > 0 and not has_independent:
+    print(
+        "[aryabhatta-llm] warning: missing independent subsystem-scan finding while prior comments exist; "
+        "LGTM may be blocked by dual-track guard.",
+        file=sys.stderr,
+    )
 
 out_findings.parent.mkdir(parents=True, exist_ok=True)
 out_findings.write_text(json.dumps({"findings": findings}, indent=2) + "\n", encoding="utf-8")

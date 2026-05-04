@@ -1005,7 +1005,51 @@ def reviewer_log_has_unresolved_risk(log_path: Path) -> tuple[bool, str]:
     return False, ""
 
 
-def _agent_env(session: dict, round_no: int, files: dict[str, Path], role: str) -> dict[str, str]:
+def _is_prior_or_meta_source_id(source_id: str) -> bool:
+    norm = source_id.strip().lower()
+    return (
+        norm.startswith("prior-msg:")
+        or norm.startswith("prior-meta:")
+        or norm.startswith("meta")
+    )
+
+
+def has_independent_subsystem_findings(findings: list[dict]) -> bool:
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        source_id = str(finding.get("source_comment_id") or "").strip().lower()
+        if not source_id:
+            continue
+        if _is_prior_or_meta_source_id(source_id):
+            continue
+        if source_id.startswith("subsys-scan:") or source_id.startswith("independent-scan:"):
+            return True
+        if source_id:
+            return True
+    return False
+
+
+def requires_full_subsystem_review(session: dict, cfg: dict) -> bool:
+    if not bool(cfg.get("full_subsystem_review_required", True)):
+        return False
+    prior = session.get("prior_review")
+    if not isinstance(prior, dict):
+        return False
+    try:
+        comments_total = int(prior.get("comments_total") or 0)
+    except (TypeError, ValueError):
+        comments_total = 0
+    return comments_total > 0
+
+
+def _agent_env(
+    session: dict,
+    round_no: int,
+    files: dict[str, Path],
+    role: str,
+    cfg: dict,
+) -> dict[str, str]:
     env = dict(os.environ)
     watch_path = session.get("watch_path")
     llm_native = session.get("llm_native")
@@ -1056,6 +1100,9 @@ def _agent_env(session: dict, round_no: int, files: dict[str, Path], role: str) 
             "A2A_FALLBACK_REVIEWER_CMD": fallback_reviewer_cmd,
             "A2A_LLM_TIMEOUT_SEC": str(llm_timeout_sec),
             "A2A_EXTRA_SCRUTINY": "1" if bool(session.get("extra_scrutiny_next_round")) else "0",
+            "A2A_REQUIRE_INDEPENDENT_SCAN": (
+                "1" if requires_full_subsystem_review(session, cfg) else "0"
+            ),
             "CODEX_HOME": str(codex_home),
             "TMPDIR": str(runtime_tmp),
         }
@@ -1905,7 +1952,7 @@ def _run_agent_step(root: Path, session: dict, role: str, command: str, round_no
         except OSError:
             watch_before = None
 
-    env = _agent_env(session, round_no, files, role)
+    env = _agent_env(session, round_no, files, role, cfg)
     result = run_shell_command(command, cwd=cwd, env=env)
 
     with log_path.open("w", encoding="utf-8") as f:
@@ -2789,6 +2836,13 @@ def _advance_session(root: Path, session_id: str) -> int:
                     "reviewer self-consistency guard: unresolved concern noted in reasoning "
                     f"({snippet})"
                 )
+    if should_lgtm and requires_full_subsystem_review(session, cfg_for_round):
+        if not has_independent_subsystem_findings(findings):
+            should_lgtm = False
+            lgtm_reason = (
+                "dual-track guard: prior-thread mapping exists but independent subsystem scan "
+                "finding/evidence is missing"
+            )
 
     if not should_lgtm:
         max_rounds_local = int(session.get("max_rounds", 1))
