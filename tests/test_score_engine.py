@@ -82,6 +82,23 @@ class ScoreEngineTests(unittest.TestCase):
             thresholds=thresholds,
         )
         self.assertTrue(decision["volatility_warning"])
+        self.assertTrue(decision["force_extra_round"])
+
+    def test_open_findings_always_block_lgtm(self) -> None:
+        thresholds = ScoreThresholds()
+        decision = evaluate_round_scores(
+            round_no=1,
+            open_findings=2,
+            builder_confidence=98,
+            reviewer_confidence=97,
+            patch_gauge=80,
+            previous_builder_confidence=None,
+            previous_reviewer_confidence=None,
+            thresholds=thresholds,
+        )
+        self.assertTrue(decision["block_lgtm"])
+        self.assertFalse(decision["allow_early_lgtm"])
+        self.assertIn("open findings remain — LGTM blocked by findings gate", " ".join(decision["messages"]))
 
     def test_score_decisions_written_to_json(self) -> None:
         with tempfile.TemporaryDirectory() as td:

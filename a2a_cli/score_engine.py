@@ -114,11 +114,14 @@ def evaluate_round_scores(
         swings.append(abs(rconf - clamp_score(previous_reviewer_confidence)))
     if swings and max(swings) > thresholds.volatility_swing:
         decisions["volatility_warning"] = True
+        decisions["force_extra_round"] = True
         decisions["extra_scrutiny_next_round"] = True
-        decisions["messages"].append("score instability detected (volatility swing > threshold)")
+        decisions["messages"].append("score instability detected (volatility swing > threshold) — extra round forced")
 
     if open_findings > 0:
         decisions["allow_early_lgtm"] = False
+        decisions["block_lgtm"] = True
+        decisions["messages"].append("open findings remain — LGTM blocked by findings gate")
 
     if bconf == 0 and rconf == 0 and gauge == 0:
         decisions["abort_session"] = True
