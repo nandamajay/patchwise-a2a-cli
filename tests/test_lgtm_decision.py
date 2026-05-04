@@ -59,6 +59,7 @@ class LgtmDecisionTests(unittest.TestCase):
             path.write_text(
                 "stderr:\n"
                 "thinking\n"
+                "**Validating patch semantics**\n"
                 "I see a potential issue and uncertainty around shared rail ownership.\n"
                 "This might be a duplicate #define problem.\n"
                 "exec\n",
@@ -67,6 +68,7 @@ class LgtmDecisionTests(unittest.TestCase):
             blocked, snippet = reviewer_log_has_unresolved_risk(path)
             self.assertTrue(blocked)
             self.assertTrue(snippet)
+            self.assertIn("shared rail ownership", snippet)
 
     def test_reviewer_guard_ignores_clean_reasoning(self) -> None:
         with tempfile.TemporaryDirectory() as td:

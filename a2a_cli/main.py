@@ -772,12 +772,16 @@ def reviewer_log_has_unresolved_risk(log_path: Path) -> tuple[bool, str]:
         "uncertain",
         "uncertainty",
         "not sure",
+        "cannot verify",
+        "can't verify",
+        "unable to verify",
+        "unresolved",
+        "remaining uncertainty",
         "potential issue",
+        "potential risk",
         "concern",
         "risk",
         "might",
-        "could",
-        "may",
     ]
     issue_tokens = [
         "duplicate",
@@ -788,9 +792,8 @@ def reviewer_log_has_unresolved_risk(log_path: Path) -> tuple[bool, str]:
         "post_pmd",
         "ana_rx_supplies",
         "ownership",
-        "warning",
-        "compile",
     ]
+    skip_prefixes = ("**", "thinking", "exec")
 
     for segment in segments:
         lower = segment.lower()
@@ -798,13 +801,30 @@ def reviewer_log_has_unresolved_risk(log_path: Path) -> tuple[bool, str]:
             continue
         if not any(token in lower for token in issue_tokens):
             continue
-        first_line = ""
+        matched_line = ""
         for raw in segment.splitlines():
             line = raw.strip()
-            if line:
-                first_line = line
-                break
-        snippet = first_line[:120] if first_line else "uncertainty/risk language found in reviewer reasoning"
+            if not line:
+                continue
+            line_lower = line.lower()
+            if line_lower.startswith("202") and "failed to record rollout items" in line_lower:
+                continue
+            if line_lower.startswith(skip_prefixes):
+                continue
+            if not any(token in line_lower for token in uncertainty_tokens):
+                continue
+            if not any(token in line_lower for token in issue_tokens):
+                continue
+            matched_line = line
+            break
+
+        if not matched_line:
+            for raw in segment.splitlines():
+                line = raw.strip()
+                if line and not line.lower().startswith(skip_prefixes):
+                    matched_line = line
+                    break
+        snippet = matched_line[:160] if matched_line else "uncertainty/risk language found in reviewer reasoning"
         return True, snippet
     return False, ""
 
