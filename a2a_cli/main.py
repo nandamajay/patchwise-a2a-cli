@@ -69,6 +69,8 @@ except Exception:  # pragma: no cover - rich is optional in host runtime
 _REV_TRAILING_RE = re.compile(r"^(?P<prefix>.*?)(?P<sep>[_-])v(?P<num>\d+)$", re.IGNORECASE)
 _REV_PREFIX_RE = re.compile(r"^v(?P<num>\d+)-(?P<rest>.+)$", re.IGNORECASE)
 _VOLATILE_SOURCE_ID_RE = re.compile(r"^(?:new|round\d+-new|issue-temp)[-:]", re.IGNORECASE)
+_PATCH_SUBJECT_LINE_RE = re.compile(r"^(Subject:\s*\[PATCH)(?P<body>[^\]]*)(\].*)$", re.IGNORECASE)
+_PATCH_VERSION_TOKEN_RE = re.compile(r"\bv(?P<num>\d+)\b", re.IGNORECASE)
 _CONSOLE = Console() if Console else None
 
 
@@ -430,6 +432,180 @@ def _copy_respin_source(source: Path, output: Path, force: bool) -> None:
         shutil.copy2(source, output)
         return
     raise RuntimeError(f"Respin source path does not exist: {source}")
+
+
+def _bump_patch_subject_versions(patch_files: list[Path]) -> int:
+    detected_max = 1
+    for patch in patch_files:
+        try:
+            text = patch.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            m = _PATCH_SUBJECT_LINE_RE.match(line)
+            if not m:
+                continue
+            vm = _PATCH_VERSION_TOKEN_RE.search(m.group("body") or "")
+            if vm:
+                try:
+                    detected_max = max(detected_max, int(vm.group("num")))
+                except ValueError:
+                    pass
+            break
+    target = detected_max + 1
+
+    for patch in patch_files:
+        try:
+            text = patch.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        replaced = False
+        out_lines: list[str] = []
+        for line in text.splitlines():
+            if replaced:
+                out_lines.append(line)
+                continue
+            m = _PATCH_SUBJECT_LINE_RE.match(line)
+            if not m:
+                out_lines.append(line)
+                continue
+
+            body = m.group("body") or ""
+            if _PATCH_VERSION_TOKEN_RE.search(body):
+                new_body = _PATCH_VERSION_TOKEN_RE.sub(f"v{target}", body, count=1)
+            else:
+                if re.search(r"\d+/\d+", body):
+                    new_body = re.sub(r"(\s*)(\d+/\d+)", rf"\1v{target} \2", body, count=1)
+                else:
+                    new_body = f"{body} v{target}"
+            out_lines.append(f"{m.group(1)}{new_body}{m.group(3)}")
+            replaced = True
+
+        if replaced:
+            patch.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+
+    return target
+
+
+def _build_suggested_replies_markdown(round_summary: dict, findings: list[dict], round_no: int) -> str:
+    prior = round_summary.get("prior_comments", {}) if isinstance(round_summary, dict) else {}
+    tracked = prior.get("tracked", []) if isinstance(prior, dict) else []
+    tracked_rows = [row for row in tracked if isinstance(row, dict)]
+    open_by_source: dict[str, dict] = {}
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        if str(finding.get("status", "open")).lower() == "closed":
+            continue
+        source_id = str(finding.get("source_comment_id") or "").strip()
+        if source_id and source_id not in open_by_source:
+            open_by_source[source_id] = finding
+
+    lines = [
+        f"# Round {round_no} Suggested Replies",
+        "",
+    ]
+    if not tracked_rows:
+        lines.extend(
+            [
+                "- No prior lore comments detected for this round.",
+                "- Suggested reply: \"No prior-thread review comments were detected from lore sources for this revision.\"",
+                "",
+            ]
+        )
+        return "\n".join(lines)
+
+    for row in tracked_rows:
+        source_id = str(row.get("source_comment_id") or "")
+        subject = str(row.get("subject") or "review comment")
+        status = str(row.get("current_status") or "open")
+        lines.append(f"## {source_id}")
+        lines.append(f"- Subject: {subject}")
+        lines.append(f"- Status: {status}")
+        if status == "closed":
+            location = str(row.get("latest_location") or "").strip() or "n/a"
+            evidence = str(row.get("latest_evidence") or "").strip() or "verified in patch update"
+            lines.append(
+                f'- Suggested reply: "Addressed in this revision at {location}. Evidence: {evidence}."'
+            )
+        else:
+            open_finding = open_by_source.get(source_id, {})
+            action = str(open_finding.get("required_action") or "").strip() or "follow-up fix in next revision"
+            lines.append(f'- Suggested reply: "Thanks for the review. This is still open; planned action: {action}."')
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _write_round_suggested_replies(
+    root: Path,
+    session_id: str,
+    round_no: int,
+    round_summary: dict,
+    findings: list[dict],
+) -> Path:
+    report_dir = _report_dir(root, session_id)
+    out_path = report_dir / f"{_round_basename(round_no, 'suggested-replies')}.md"
+    out_path.write_text(
+        _build_suggested_replies_markdown(round_summary=round_summary, findings=findings, round_no=round_no),
+        encoding="utf-8",
+    )
+    return out_path
+
+
+def _generate_lore_next_version(root: Path, session: dict) -> dict:
+    session_id = str(session.get("id") or "")
+    watch_raw = str(session.get("watch_path") or "").strip()
+    if not watch_raw:
+        raise RuntimeError("Cannot generate next version: session watch_path is empty.")
+    source = Path(watch_raw).resolve()
+    if not source.exists():
+        raise RuntimeError(f"Cannot generate next version: watch_path not found: {source}")
+
+    output = _default_respin_output_path(source)
+    _copy_respin_source(source, output, force=False)
+
+    patch_files: list[Path] = []
+    if output.is_file() and output.suffix == ".patch":
+        patch_files = [output]
+    elif output.is_dir():
+        patch_files = sorted(p for p in output.rglob("*.patch") if p.is_file())
+    if not patch_files:
+        raise RuntimeError(f"No patch files found in generated output path: {output}")
+
+    next_version = _bump_patch_subject_versions(patch_files)
+    payload = {
+        "status": "ok",
+        "kind": "lore_copy",
+        "session_id": session_id,
+        "source_watch_path": str(source),
+        "output_path": str(output),
+        "patch_count": len(patch_files),
+        "next_version": next_version,
+        "generated_at": _now_utc(),
+    }
+    report_path = _report_dir(root, session_id) / "lore_next_version.json"
+    dump_json(report_path, payload)
+    payload["report"] = str(report_path)
+    return payload
+
+
+def _auto_generate_next_version(root: Path, session: dict) -> dict:
+    session_id = str(session.get("id") or "")
+    try:
+        result = run_respin(root, session_id, dry_run=False)
+        if isinstance(result, dict):
+            result = dict(result)
+            result.setdefault("kind", "git_respin")
+        return result
+    except Exception as exc:
+        lore_meta = session.get("lore")
+        if isinstance(lore_meta, dict) and str(lore_meta.get("message_id") or "").strip():
+            fallback = _generate_lore_next_version(root, session)
+            fallback["fallback_reason"] = str(exc)
+            return fallback
+        raise
 
 
 def _round_basename(round_no: int, suffix: str) -> str:
@@ -2285,6 +2461,7 @@ def _start_session(
     builder_command: str | None = None,
     reviewer_command: str | None = None,
     watch_path: str | None = None,
+    lore_message_id: str | None = None,
 ) -> dict:
     cfg = _load_config(root)
     prep = load_json(_prepare_path(root))
@@ -2330,6 +2507,8 @@ def _start_session(
             "timeout_sec": int(cfg.get("llm_native_timeout_sec", 900)),
         },
     }
+    if lore_message_id:
+        session["lore"] = {"message_id": str(lore_message_id).strip()}
 
     prior_gate = bool(cfg.get("prior_review_gate", True))
     search_if_missing = bool(cfg.get("prior_review_search", True))
@@ -2341,6 +2520,7 @@ def _start_session(
             report_dir,
             search_if_missing=search_if_missing,
             max_comments=max_comments,
+            seed_message_ids=[str(lore_message_id).strip()] if lore_message_id else None,
         )
         if context:
             session["prior_review"] = context
@@ -2522,6 +2702,13 @@ def _advance_session(root: Path, session_id: str) -> int:
         round_elapsed_seconds=round_elapsed_seconds,
     )
     summary_files = _write_round_runtime_summary(root, session, round_no, round_summary)
+    suggested_replies_file = _write_round_suggested_replies(
+        root,
+        session_id,
+        round_no,
+        round_summary,
+        findings,
+    )
     rounds = [r for r in session.get("rounds", []) if int(r.get("round", -1)) != round_no]
     rounds.append(round_record)
     rounds = sorted(rounds, key=lambda r: int(r["round"]))
@@ -2570,6 +2757,7 @@ def _advance_session(root: Path, session_id: str) -> int:
             _echo(render_finding_card(item))
     _echo(f"Round summary json: {summary_files['json']}")
     _echo(f"Round summary md: {summary_files['md']}")
+    _echo(f"Suggested replies: {suggested_replies_file}")
 
     max_rounds = int(session.get("max_rounds", 1))
     if score_decision.get("abort_session"):
@@ -2783,6 +2971,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             builder_command=builder_cmd,
             reviewer_command=reviewer_cmd,
             watch_path=watch_path,
+            lore_message_id=None,
         )
         sid = session["id"]
         round_no = int(session["current_round"])
@@ -2834,6 +3023,9 @@ def cmd_loop(args: argparse.Namespace) -> int:
         lore_url = str(getattr(args, "lore_url", "") or "").strip()
         lore_msgid = str(getattr(args, "lore_msgid", "") or "").strip()
         lore_input = lore_msgid or lore_url
+        lore_source_msgid = _extract_lore_message_id(lore_input) if lore_input else None
+        auto_respin_raw = getattr(args, "auto_respin", None)
+        auto_respin = bool(auto_respin_raw) if auto_respin_raw is not None else bool(lore_input)
         single_series_mode = bool(getattr(args, "_single_series", False))
 
         if lore_input:
@@ -2845,6 +3037,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
                 return 1
             fetched_dir, fetched_msgid = _fetch_lore_series(cfg, lore_input)
             watch_path = str(fetched_dir)
+            lore_source_msgid = fetched_msgid
             _echo(f"Lore source message-id: {fetched_msgid}")
             _echo(f"Lore patch series fetched to: {watch_path}")
 
@@ -2871,6 +3064,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
                             watch_path=str(series_row.get("path")),
                             lore_url=None,
                             lore_msgid=None,
+                            auto_respin=False,
                             max_iterations=args.max_iterations,
                             _single_series=True,
                         )
@@ -2913,6 +3107,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
                 builder_command=builder_cmd,
                 reviewer_command=reviewer_cmd,
                 watch_path=watch_path,
+                lore_message_id=lore_source_msgid,
             )
             sid = str(session["id"])
             _echo(f"Started session: {sid}")
@@ -3004,6 +3199,13 @@ def cmd_loop(args: argparse.Namespace) -> int:
             iterations += 1
 
             if status == "lgtm":
+                if auto_respin:
+                    try:
+                        next_version_payload = _auto_generate_next_version(root, session)
+                        _echo("Auto next-version generation completed:")
+                        _echo(json.dumps(next_version_payload, indent=2, sort_keys=True))
+                    except Exception as exc:
+                        _echo(f"Auto next-version generation warning: {exc}")
                 return 0
             if status == "stopped":
                 return 1
@@ -3581,6 +3783,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-iterations",
         type=int,
         help="Optional per-invocation cap on autonomous rounds.",
+    )
+    p_loop.add_argument(
+        "--auto-respin",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="After LGTM, auto-generate next patch version (defaults to enabled for lore input).",
     )
     p_loop.set_defaults(func=cmd_loop)
 

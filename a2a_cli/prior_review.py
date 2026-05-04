@@ -28,6 +28,7 @@ def ingest_prior_review_context(
     *,
     search_if_missing: bool,
     max_comments: int,
+    seed_message_ids: list[str] | None = None,
 ) -> dict | None:
     patch_files = _collect_patch_files(watch_path)
     if not patch_files:
@@ -38,6 +39,19 @@ def ingest_prior_review_context(
 
     sources: list[dict] = []
     search_attempted = False
+    for seed in seed_message_ids or []:
+        msgid = str(seed or "").strip()
+        if not msgid:
+            continue
+        sources.append(
+            {
+                "kind": "seed",
+                "message_id": msgid,
+                "source": f"seed:{msgid}",
+                "fetch_url": _thread_mbox_url(msgid),
+            }
+        )
+
     for link in links:
         msgid = _message_id_from_link(link)
         if msgid:
