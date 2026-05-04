@@ -42,14 +42,16 @@ class LoreLoopInputTests(unittest.TestCase):
                 out_idx = cmd.index("-o") + 1
                 out_dir = Path(cmd[out_idx])
                 out_dir.mkdir(parents=True, exist_ok=True)
-                (out_dir / "0001-test.patch").write_text("From test\n", encoding="utf-8")
+                quilt_dir = out_dir / "thread.patches"
+                quilt_dir.mkdir(parents=True, exist_ok=True)
+                (quilt_dir / "0001-test.patch").write_text("From test\n", encoding="utf-8")
                 return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
             with mock.patch("a2a_cli.main.shutil.which", return_value="/usr/bin/b4"):
                 with mock.patch("a2a_cli.main.subprocess.run", side_effect=_fake_run):
                     out_dir, mid = _fetch_lore_series(cfg, "https://lore.kernel.org/r/20260504-xyz@example.com")
             self.assertTrue(out_dir.exists())
-            self.assertTrue((out_dir / "0001-test.patch").exists())
+            self.assertTrue((out_dir / "thread.patches" / "0001-test.patch").exists())
             self.assertEqual(mid, "20260504-xyz@example.com")
 
 

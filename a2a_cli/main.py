@@ -252,7 +252,7 @@ def _fetch_lore_series(cfg: dict, lore_input: str) -> tuple[Path, str]:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     proc = subprocess.run(
-        ["b4", "am", "-o", str(out_dir), message_id],
+        ["b4", "am", "-Q", "-o", str(out_dir), message_id],
         text=True,
         capture_output=True,
     )
@@ -264,7 +264,7 @@ def _fetch_lore_series(cfg: dict, lore_input: str) -> tuple[Path, str]:
             f"stderr:\n{proc.stderr}"
         )
 
-    patches = sorted(out_dir.glob("*.patch"))
+    patches = sorted(out_dir.rglob("*.patch"))
     if not patches:
         raise RuntimeError(f"No patch files fetched from lore for message-id: {message_id}")
     return out_dir, message_id
