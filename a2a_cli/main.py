@@ -166,6 +166,32 @@ def _now_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_iso_datetime_optional(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _elapsed_seconds(started_at: str | None, ended_at: str | None) -> int | None:
+    start_dt = _parse_iso_datetime_optional(started_at)
+    end_dt = _parse_iso_datetime_optional(ended_at)
+    if start_dt is None or end_dt is None:
+        return None
+    elapsed = int((end_dt - start_dt).total_seconds())
+    return max(0, elapsed)
+
+
 def _must_find_root() -> Path:
     root = find_a2a_root()
     if root is None:
@@ -1339,6 +1365,8 @@ def _build_round_runtime_summary(
     builder_patch_gauge: int,
     builder_confidence: int,
     reviewer_confidence: int,
+    round_started_at: str | None = None,
+    round_elapsed_seconds: int | None = None,
 ) -> dict:
     session_id = str(session["id"])
     cfg = _load_config_or_defaults(root)
@@ -1453,6 +1481,10 @@ def _build_round_runtime_summary(
             "artifact_json": str(gate_files["json"]),
             "artifact_log": str(gate_files["log"]),
         },
+        "timing": {
+            "started_at": str(round_started_at or ""),
+            "elapsed_seconds": round_elapsed_seconds,
+        },
         "artifacts": {
             "builder_report": str(files["builder"]),
             "reviewer_report": str(files["reviewer"]),
@@ -1468,6 +1500,7 @@ def _render_round_runtime_summary_markdown(summary: dict) -> str:
     builder = summary.get("builder", {})
     reviewer = summary.get("reviewer", {})
     gate = summary.get("validation_gate", {})
+    timing = summary.get("timing", {})
     artifacts = summary.get("artifacts", {})
 
     lines = [
@@ -1499,6 +1532,11 @@ def _render_round_runtime_summary_markdown(summary: dict) -> str:
         f"- builder_patch_gauge: {builder.get('patch_gauge')}",
         f"- builder_confidence: {builder.get('confidence')}",
         f"- reviewer_confidence: {reviewer.get('confidence')}",
+        "",
+        "## Round Timing",
+        "",
+        f"- started_at: {timing.get('started_at')}",
+        f"- elapsed_seconds: {timing.get('elapsed_seconds')}",
         "",
         "## Validation Gate",
         "",
@@ -2324,9 +2362,14 @@ def _advance_session(root: Path, session_id: str) -> int:
     for msg in messages:
         _echo(f"Score decision: {msg}")
 
+    validated_at = _now_utc()
+    started_round = session.get("round_started_round")
+    round_started_at = session.get("round_started_at") if int(started_round or -1) == round_no else None
+    round_elapsed_seconds = _elapsed_seconds(round_started_at, validated_at)
+
     round_record = {
         "round": round_no,
-        "validated_at": _now_utc(),
+        "validated_at": validated_at,
         "findings_total": len(findings),
         "findings_open": open_count,
         "findings_file": str(findings_path),
@@ -2336,6 +2379,8 @@ def _advance_session(root: Path, session_id: str) -> int:
         "builder_patch_gauge": builder_patch_gauge,
         "builder_confidence": builder_confidence,
         "reviewer_confidence": reviewer_confidence,
+        "round_started_at": round_started_at,
+        "round_elapsed_seconds": round_elapsed_seconds,
         "score_decision": score_decision,
     }
 
@@ -2349,6 +2394,8 @@ def _advance_session(root: Path, session_id: str) -> int:
         builder_patch_gauge,
         builder_confidence,
         reviewer_confidence,
+        round_started_at=round_started_at,
+        round_elapsed_seconds=round_elapsed_seconds,
     )
     summary_files = _write_round_runtime_summary(root, session, round_no, round_summary)
     rounds = [r for r in session.get("rounds", []) if int(r.get("round", -1)) != round_no]
@@ -2372,6 +2419,7 @@ def _advance_session(root: Path, session_id: str) -> int:
                 "verdict": "LGTM" if open_count == 0 else "REJECT",
                 "findings": fsum,
                 "prior_comments": round_summary.get("prior_comments", {}),
+                "round_elapsed_seconds": round_summary.get("timing", {}).get("elapsed_seconds"),
             }
         )
     )
@@ -2759,6 +2807,11 @@ def cmd_loop(args: argparse.Namespace) -> int:
                 f"({builder_display_name} -> {reviewer_display_name})."
             )
             _echo(render_phase_progress(round_no, int(session.get("max_rounds", 0) or 0)))
+            round_started_at = _now_utc()
+            session["round_started_at"] = round_started_at
+            session["round_started_round"] = round_no
+            session["updated_at"] = round_started_at
+            _write_session(root, session)
 
             rc = _run_agent_step(root, session, "builder", builder_cmd, round_no)
             if rc != 0:

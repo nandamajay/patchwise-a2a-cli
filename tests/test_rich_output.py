@@ -34,6 +34,7 @@ def test_render_round_table_all_fields_present() -> None:
                 "resolved_since_prev": 2,
             },
             "prior_comments": {"totals": {"received_total": 6, "open": 1, "closed": 5}},
+            "round_elapsed_seconds": 92,
         },
         width=100,
     )
@@ -43,6 +44,7 @@ def test_render_round_table_all_fields_present() -> None:
     assert "ARYABHATTA" in out
     assert "Findings: total=4 open=2 closed=2 new=1 resolved=2" in out
     assert "Prior Comments: received=6 open=1 closed=5" in out
+    assert "Elapsed: 92s" in out
 
 
 def test_render_finding_card_severity_colours() -> None:
@@ -102,6 +104,7 @@ def test_narrow_terminal_80_cols_no_overflow() -> None:
             "verdict": "REJECT",
             "findings": {"total": 0, "open": 0, "closed": 0, "new_since_prev": 0, "resolved_since_prev": 0},
             "prior_comments": {"totals": {"received_total": 0, "open": 0, "closed": 0}},
+            "round_elapsed_seconds": 7,
         },
         width=80,
     )

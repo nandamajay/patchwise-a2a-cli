@@ -116,6 +116,8 @@ class RoundSummaryTests(unittest.TestCase):
                 builder_patch_gauge=42,
                 builder_confidence=60,
                 reviewer_confidence=70,
+                round_started_at="2026-05-04T06:00:00+00:00",
+                round_elapsed_seconds=95,
             )
 
             self.assertEqual(summary["findings"]["total"], 2)
@@ -124,11 +126,15 @@ class RoundSummaryTests(unittest.TestCase):
             self.assertEqual(summary["findings"]["resolved_since_prev"], 1)
             self.assertEqual(summary["prior_comments"]["totals"]["received_total"], 2)
             self.assertEqual(summary["prior_comments"]["totals"]["fixed_by_a2a"], 1)
+            self.assertEqual(summary["timing"]["started_at"], "2026-05-04T06:00:00+00:00")
+            self.assertEqual(summary["timing"]["elapsed_seconds"], 95)
 
             md = _render_round_runtime_summary_markdown(summary)
             self.assertIn("Round 2 Summary", md)
             self.assertIn("- builder: chanakya", md)
             self.assertIn("- reviewer: aryabhatta", md)
+            self.assertIn("## Round Timing", md)
+            self.assertIn("- elapsed_seconds: 95", md)
             self.assertIn("Top Open Findings", md)
 
 

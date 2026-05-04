@@ -174,6 +174,13 @@ def render_round_table(
             box["v"],
         )
     )
+    elapsed_seconds = round_data.get("round_elapsed_seconds")
+    try:
+        elapsed_value = int(elapsed_seconds) if elapsed_seconds is not None else None
+    except (TypeError, ValueError):
+        elapsed_value = None
+    if elapsed_value is not None and elapsed_value >= 0:
+        out.append(_line(f" Elapsed: {elapsed_value}s", w, box["v"], box["v"]))
     out.append(f"{box['bl']}{box['h'] * (w - 2)}{box['br']}")
     return "\n".join(out)
 
