@@ -230,8 +230,15 @@ cd "$ROOT"
 if [[ -d "/host/bin" ]]; then
   export PATH="/host/bin:\$PATH"
 fi
-if [[ -f "$ROOT/.runtime/qgenie-cli/config.toml" ]]; then
-  export QGENIE_CLI_HOME="$ROOT/.runtime/qgenie-cli"
+export CODEX_HOME="$ROOT/.runtime/codex-home"
+export TMPDIR="$ROOT/.runtime/tmp"
+mkdir -p "\$CODEX_HOME" "\$TMPDIR"
+if [[ -z "\${QGENIE_CLI_HOME:-}" ]]; then
+  if [[ -d "\$HOME/.config/qgenie-cli" && -w "\$HOME/.config/qgenie-cli" ]]; then
+    export QGENIE_CLI_HOME="\$HOME/.config/qgenie-cli"
+  elif [[ -f "$ROOT/.runtime/qgenie-cli/config.toml" ]]; then
+    export QGENIE_CLI_HOME="$ROOT/.runtime/qgenie-cli"
+  fi
 fi
 export A2A_SESSION_ID="$SESSION_ID"
 export A2A_TASK="${TASK:-manual-live}"
@@ -256,8 +263,18 @@ cd "$ROOT"
 if [[ -d "/host/bin" ]]; then
   export PATH="/host/bin:\$PATH"
 fi
-if [[ -f "$ROOT/.runtime/qgenie-cli/config.toml" ]]; then
-  export QGENIE_CLI_HOME="$ROOT/.runtime/qgenie-cli"
+export CODEX_HOME="$ROOT/.runtime/codex-home"
+export TMPDIR="$ROOT/.runtime/tmp"
+mkdir -p "\$CODEX_HOME" "\$TMPDIR"
+if [[ -z "\${QGENIE_CLI_HOME:-}" ]]; then
+  if [[ -d "\$HOME/.config/qgenie-cli" && -w "\$HOME/.config/qgenie-cli" ]]; then
+    export QGENIE_CLI_HOME="\$HOME/.config/qgenie-cli"
+  elif [[ -f "$ROOT/.runtime/qgenie-cli/config.toml" ]]; then
+    export QGENIE_CLI_HOME="$ROOT/.runtime/qgenie-cli"
+  fi
+fi
+if [[ -z "\${QGENIE_CLI_HOME:-}" ]]; then
+  echo "[reviewer screen] qgenie config home not found; using qgenie defaults"
 fi
 export A2A_SESSION_ID="$SESSION_ID"
 export A2A_TASK="${TASK:-manual-live}"
