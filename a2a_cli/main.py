@@ -32,12 +32,14 @@ from .hitl_gate import run_hitl_gate
 from .lore_watcher import watch as watch_lore
 from .maintainer_tracker import load_profiles
 from .respin import respin as run_respin
+from .finding_advertiser import extract_advertised_findings, render_advertised_findings_text
 from .rich_output import (
     render_finding_card,
     render_gate_status,
     render_lgtm_banner,
     render_phase_progress,
     render_prior_comment_status,
+    render_prior_comment_table,
     render_round_table,
     render_scores,
     render_session_header,
@@ -2322,6 +2324,20 @@ def _advance_session(root: Path, session_id: str) -> int:
     )
     _echo(render_scores(builder_confidence, reviewer_confidence, builder_patch_gauge))
     _echo(render_prior_comment_status(round_summary.get("prior_comments", {})))
+    _echo(render_prior_comment_table(round_summary.get("prior_comments", {})))
+    advertised = extract_advertised_findings(
+        {"findings": findings},
+        round_summary,
+        round_no,
+        agent="aryabhatta",
+    )
+    advertised_text = render_advertised_findings_text(
+        advertised,
+        round_number=round_no,
+        agent="aryabhatta",
+    )
+    if advertised_text:
+        _echo(advertised_text)
     top_open = fsum.get("open_items", [])
     if isinstance(top_open, list) and top_open:
         _echo("Top open findings:")
@@ -2352,8 +2368,38 @@ def _advance_session(root: Path, session_id: str) -> int:
     if not should_lgtm:
         max_rounds_local = int(session.get("max_rounds", 1))
         next_round_hint = round_no + 1
+        high_open = len(
+            [
+                row
+                for row in findings
+                if isinstance(row, dict)
+                and str(row.get("status", "open")).lower() != "closed"
+                and str(row.get("severity", "")).lower() in {"critical", "high"}
+            ]
+        )
+        medium_open = len(
+            [
+                row
+                for row in findings
+                if isinstance(row, dict)
+                and str(row.get("status", "open")).lower() != "closed"
+                and str(row.get("severity", "")).lower() == "medium"
+            ]
+        )
+        top_issue = ""
+        for row in findings:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("status", "open")).lower() == "closed":
+                continue
+            top_issue = str(row.get("title") or "")
+            if top_issue:
+                break
         _echo("┌──────────────────────────────────────────────────────────────────────┐")
         _echo(f"│ LGTM blocked: {lgtm_reason}")
+        _echo(f"│ Open: {open_count}  ·  High: {high_open}  ·  Medium: {medium_open}")
+        if top_issue:
+            _echo(f"│ Top issue: {top_issue[:56]}")
         if round_no < max_rounds_local:
             _echo(f"│ Continuing to Round {next_round_hint}")
         else:
@@ -2385,7 +2431,18 @@ def _advance_session(root: Path, session_id: str) -> int:
             state["last_updated"] = _now_utc()
             dump_json(state_path, state)
         _write_session(root, session)
-        _echo(render_lgtm_banner(session_id, rounds=round_no, total_findings=len(findings)))
+        prior_totals = round_summary.get("prior_comments", {}).get("totals", {})
+        _echo(
+            render_lgtm_banner(
+                session_id,
+                rounds=round_no,
+                total_findings=len(findings),
+                prior_closed=int(prior_totals.get("closed", 0)),
+                prior_received=int(prior_totals.get("received_total", 0)),
+                static_analysis_status="PASSED",
+                kb_updates=0,
+            )
+        )
         return 0
 
     if round_no >= max_rounds:

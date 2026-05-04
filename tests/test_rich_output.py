@@ -2,6 +2,7 @@ from a2a_cli.rich_output import (
     render_finding_card,
     render_gate_status,
     render_lgtm_banner,
+    render_prior_comment_table,
     render_round_table,
     render_scores,
     render_session_header,
@@ -112,3 +113,63 @@ def test_ascii_fallback_no_unicode_box_chars() -> None:
     out = render_lgtm_banner("sess-ascii", ascii_only=True)
     assert "╔" not in out
     assert "+" in out
+
+
+def test_render_prior_comment_table_with_rows() -> None:
+    out = render_prior_comment_table(
+        {
+            "totals": {"received_total": 2, "open": 1, "closed": 1},
+            "tracked": [
+                {
+                    "source_comment_id": "prior-1",
+                    "subject": "Fix unwind path",
+                    "current_status": "closed",
+                    "fixed_by_a2a": True,
+                    "closed_round": 2,
+                    "latest_location": "foo.c:10",
+                    "latest_evidence": "verified",
+                },
+                {
+                    "source_comment_id": "prior-2",
+                    "subject": "Check refcount",
+                    "current_status": "open",
+                    "fixed_by_a2a": False,
+                    "closed_round": None,
+                    "latest_location": "",
+                    "latest_evidence": "",
+                },
+            ],
+        },
+        width=100,
+    )
+    assert "Prior Comments Table" in out
+    assert "prior-1" in out
+    assert "needs_eye=no" in out
+    assert "prior-2" in out
+    assert "needs_eye=yes" in out
+
+
+def test_render_prior_comment_table_empty() -> None:
+    out = render_prior_comment_table({"totals": {"received_total": 0}, "tracked": []})
+    assert "no tracked comments" in out
+
+
+def test_prior_comment_table_narrow_width_no_overflow() -> None:
+    out = render_prior_comment_table(
+        {
+            "tracked": [
+                {
+                    "source_comment_id": "prior-very-long-comment-id",
+                    "subject": "This is a deliberately long subject line for width testing",
+                    "current_status": "open",
+                    "fixed_by_a2a": False,
+                    "closed_round": None,
+                    "latest_location": "",
+                    "latest_evidence": "",
+                }
+            ]
+        },
+        width=92,
+    )
+    for line in out.splitlines():
+        assert len(line) <= 92

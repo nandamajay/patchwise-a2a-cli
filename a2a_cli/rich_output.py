@@ -248,6 +248,45 @@ def render_prior_comment_status(comments: dict[str, Any] | list[dict[str, Any]])
     return f"Prior Comments: received={received} open={open_count} closed={closed}"
 
 
+def render_prior_comment_table(
+    comments: dict[str, Any] | list[dict[str, Any]],
+    *,
+    width: int | None = None,
+    ascii_only: bool | None = None,
+) -> str:
+    ascii_flag = (not _supports_unicode()) if ascii_only is None else ascii_only
+    w = max(90, min(width or _terminal_width(), 160))
+    rows = comments.get("tracked", []) if isinstance(comments, dict) else comments
+    if not isinstance(rows, list) or not rows:
+        return "Prior comments table: no tracked comments"
+
+    header = "Prior Comments Table"
+    if ascii_flag:
+        sep = "+" + ("-" * (w - 2)) + "+"
+        out = [sep, _line(f" {header}", w, "|", "|"), sep]
+    else:
+        sep = "┌" + ("─" * (w - 2)) + "┐"
+        mid = "├" + ("─" * (w - 2)) + "┤"
+        out = [sep, _line(f" {header}", w, "│", "│"), mid]
+
+    for idx, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            continue
+        source_id = str(row.get("source_comment_id") or "")
+        subject = str(row.get("subject") or "")
+        status = str(row.get("current_status") or row.get("status") or "open")
+        fixed = "yes" if bool(row.get("fixed_by_a2a")) else "no"
+        closed_round = row.get("closed_round")
+        closed_text = str(closed_round) if closed_round is not None else "-"
+        evidence = str(row.get("latest_evidence") or "").strip()
+        location = str(row.get("latest_location") or "").strip()
+        needs_eye = "yes" if status.lower() != "closed" or not evidence or not location else "no"
+        out.append(_line(f" {idx}. {source_id} [{status}] fixed_by_a2a={fixed} needs_eye={needs_eye}", w, "│" if not ascii_flag else "|", "│" if not ascii_flag else "|"))
+        out.append(_line(f"    closed_round={closed_text}  subject={subject}", w, "│" if not ascii_flag else "|", "│" if not ascii_flag else "|"))
+    out.append("└" + ("─" * (w - 2)) + "┘" if not ascii_flag else "+" + ("-" * (w - 2)) + "+")
+    return "\n".join(out)
+
+
 def render_gate_status(passed: bool) -> str:
     if passed:
         return "Gate: ✅ PASSED"
@@ -259,6 +298,10 @@ def render_lgtm_banner(
     *,
     rounds: int | None = None,
     total_findings: int | None = None,
+    prior_closed: int | None = None,
+    prior_received: int | None = None,
+    static_analysis_status: str | None = None,
+    kb_updates: int | None = None,
     ascii_only: bool | None = None,
 ) -> str:
     ascii_flag = (not _supports_unicode()) if ascii_only is None else ascii_only
@@ -279,6 +322,21 @@ def render_lgtm_banner(
         lines.append(
             f"║   Rounds: {rounds if rounds is not None else 'N/A'}  ·  Total findings: "
             f"{total_findings if total_findings is not None else 'N/A':<4}║"
+        )
+    if prior_closed is not None and prior_received is not None:
+        lines.append(
+            f"║   Prior comments: {prior_closed}/{prior_received} closed"
+            f"{' ' * max(0, 14 - len(str(prior_closed)) - len(str(prior_received)))}║"
+        )
+    if static_analysis_status:
+        lines.append(
+            f"║   Static analysis: {static_analysis_status[:20]:<20}"
+            f"{' ' * 12}║"
+        )
+    if kb_updates is not None:
+        lines.append(
+            f"║   Knowledge base: {kb_updates} new pattern{'s' if kb_updates != 1 else ''}"
+            f"{' ' * max(0, 12 - len(str(kb_updates)))}║"
         )
     lines.append(bot)
     return "\n".join(lines)
