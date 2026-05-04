@@ -8,8 +8,10 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from .adapters.shell_adapter import run_shell_command
 from .config import A2A_DIRNAME, default_config, default_state, dump_json, load_json
@@ -190,6 +192,32 @@ def _elapsed_seconds(started_at: str | None, ended_at: str | None) -> int | None
         return None
     elapsed = int((end_dt - start_dt).total_seconds())
     return max(0, elapsed)
+
+
+def _prompt_extend_after_max_rounds(
+    session_id: str,
+    round_no: int,
+    max_rounds: int,
+    open_count: int,
+    *,
+    interactive: bool | None = None,
+    input_fn: Callable[[str], str] = input,
+) -> bool:
+    if interactive is None:
+        interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
+    if not interactive:
+        return False
+
+    _echo("┌──────────────────────────────────────────────────────────────────────┐")
+    _echo(f"│ Max rounds reached for session {session_id}")
+    _echo(f"│ Current round: {round_no}/{max_rounds}  ·  Open findings: {open_count}")
+    _echo("│ Proceed with one more round in the same session? [y/N]")
+    _echo("└──────────────────────────────────────────────────────────────────────┘")
+    try:
+        answer = str(input_fn("Proceed with one more round? [y/N]: ")).strip().lower()
+    except EOFError:
+        return False
+    return answer in {"y", "yes"}
 
 
 def _must_find_root() -> Path:
@@ -2561,6 +2589,31 @@ def _advance_session(root: Path, session_id: str) -> int:
         return 0
 
     if round_no >= max_rounds:
+        if _prompt_extend_after_max_rounds(
+            session_id=session_id,
+            round_no=round_no,
+            max_rounds=max_rounds,
+            open_count=open_count,
+        ):
+            next_round = round_no + 1
+            session["max_rounds"] = max_rounds + 1
+            session["current_round"] = next_round
+            session["status"] = "in_progress"
+            session["extra_scrutiny_next_round"] = bool(score_decision.get("extra_scrutiny_next_round"))
+            _write_session(root, session)
+            _write_round_templates(
+                root,
+                session_id,
+                next_round,
+                reviewer_name,
+                reviewer_display_name=_resolve_reviewer_display_name(session=session, cfg=_load_config(root)),
+            )
+            _echo(
+                f"Session {session_id}: max rounds extended to {session['max_rounds']}. "
+                f"Prepared round {next_round} templates."
+            )
+            return 0
+
         session["status"] = "stopped"
         stop_reason = "STOPPED (max rounds reached)"
         if score_decision.get("block_lgtm") and open_count == 0:
