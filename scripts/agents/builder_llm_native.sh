@@ -53,34 +53,32 @@ PROMPT_FILE="$(mktemp)"
 OUT_FILE="$(mktemp)"
 trap 'rm -f "$PROMPT_FILE" "$OUT_FILE"' EXIT
 
-cat >"$PROMPT_FILE" <<EOF
-You are builder, the implementation agent.
+PROMPT_TEMPLATE="$REPO_ROOT/templates/prompts/builder.md"
+if [[ ! -f "$PROMPT_TEMPLATE" ]]; then
+  echo "[builder-llm] missing prompt template: $PROMPT_TEMPLATE" >&2
+  exit 1
+fi
 
-Working directory:
-- ${WORKDIR}
+cat "$PROMPT_TEMPLATE" >"$PROMPT_FILE"
+cat >>"$PROMPT_FILE" <<EOF
 
-Task:
-- Apply fixes directly to patch files under ${A2A_WATCH_PATH:-<unset>}.
-- Prior review context: ${A2A_PRIOR_COMMENTS_FILE:-<none>}.
-- Previous round findings JSON: ${PREV_FINDINGS:-<none>}.
-- Current round: ${ROUND}.
-- Subsystem: ${A2A_KB_SUBSYSTEM:-unknown}.
+Runtime context:
+- Working directory: ${WORKDIR}
+- Patch watch path: ${A2A_WATCH_PATH:-<unset>}
+- Prior review context: ${A2A_PRIOR_COMMENTS_FILE:-<none>}
+- Previous round findings JSON: ${PREV_FINDINGS:-<none>}
+- Current round: ${ROUND}
+- Subsystem: ${A2A_KB_SUBSYSTEM:-unknown}
 - Knowledge base context:
 ${A2A_KB_CHANAKYA_CONTEXT:-<none>}
 - Extra scrutiny required: ${A2A_EXTRA_SCRUTINY:-0}
 
-Required behavior:
+Execution requirements:
 1) If previous findings exist, fix all OPEN findings first.
 2) Preserve patch semantics and maintain coherent patch ordering/bisect safety.
 3) Keep changes minimal and focused.
-4) After edits, return a concise markdown report with sections:
-   - Changes
-   - Rationale
-   - Verification Commands
-   - Response To Reviewer Findings
+4) Return markdown only with required section headings.
 5) If no changes were needed, state why with evidence.
-
-Do not return JSON; return markdown only.
 EOF
 
 set +e
@@ -135,6 +133,9 @@ bad_markers = [
     "patchwise skill selected",
     "loading required skill instructions",
     "i will load the patch-review skill",
+    "progress update",
+    "starting review",
+    "using patchwise skill workflow",
 ]
 if any(marker in low for marker in bad_markers):
     raise RuntimeError(

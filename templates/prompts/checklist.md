@@ -23,3 +23,11 @@
 ## Decision
 
 - `LGTM` only if all findings are closed.
+
+## A2A Enforcement Checks
+
+- No workflow/meta chatter in builder/reviewer outputs.
+- Reviewer locations must be `patch_file:line`.
+- Every open finding has actionable `required_action`.
+- Resolving old findings does not suppress newly discovered risks.
+- `LGTM` only if `open=0`, `new=0`, and reviewer verdict is explicit `LGTM`.

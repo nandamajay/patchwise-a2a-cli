@@ -46,12 +46,18 @@ PROMPT_FILE="$(mktemp)"
 OUT_FILE="$(mktemp)"
 trap 'rm -f "$PROMPT_FILE" "$OUT_FILE"' EXIT
 
-cat >"$PROMPT_FILE" <<EOF
-You are aryabhatta, the adversarial patch reviewer.
+PROMPT_TEMPLATE="$REPO_ROOT/templates/prompts/aryabhatta.md"
+if [[ ! -f "$PROMPT_TEMPLATE" ]]; then
+  echo "[aryabhatta-llm] missing prompt template: $PROMPT_TEMPLATE" >&2
+  exit 1
+fi
 
-Task:
+cat "$PROMPT_TEMPLATE" >"$PROMPT_FILE"
+cat >>"$PROMPT_FILE" <<EOF
+
+Runtime context:
 - Review patch files under: ${A2A_WATCH_PATH:-<unset>}
-- Use prior review context from: ${A2A_PRIOR_COMMENTS_FILE:-<none>}
+- Prior review context: ${A2A_PRIOR_COMMENTS_FILE:-<none>}
 - Round: ${A2A_ROUND:-?}
 - Subsystem: ${A2A_KB_SUBSYSTEM:-unknown}
 - Knowledge base evidence context:
@@ -60,13 +66,11 @@ ${A2A_KB_ARYABHATTA_CONTEXT:-<none>}
 
 Strict requirements:
 1) Return ONLY JSON matching the provided schema.
-2) findings must include severity/title/location/evidence/required_action/status.
+2) Findings must include severity/title/location/evidence/required_action/status/source_comment_id.
 3) For every prior comment, include source_comment_id and set status=closed only with concrete evidence.
 4) Use location as patch_file_name:line_number.
 5) If an issue is not addressed, keep it open.
-6) Any REJECT/open finding must include concrete evidence text suitable for upstream evidence enrichment.
-
-Focus on correctness, bisect safety, PM-runtime/refcount behavior, and whether prior-thread feedback is addressed.
+6) Any open finding must include concrete evidence text suitable for upstream evidence enrichment.
 EOF
 
 set +e
@@ -154,6 +158,9 @@ def is_meta_finding(row: dict) -> bool:
         "loaded skill instructions",
         "starting review workflow",
         "loading required skill",
+        "progress update",
+        "starting review",
+        "using patchwise skill workflow",
     ]
     if any(m in title for m in markers):
         return True
