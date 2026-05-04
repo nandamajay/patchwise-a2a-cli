@@ -26,6 +26,27 @@ class LoreLoopInputTests(unittest.TestCase):
             base = _lore_fetch_base_dir({"upstream_evidence": {"kernel_tree": str(kernel_tree)}})
             self.assertEqual(base, kernel_tree / ".a2a" / "lore_series")
 
+    def test_lore_fetch_base_dir_prefers_config_override(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            kernel_tree = Path(td) / "linux-next"
+            (kernel_tree / "scripts").mkdir(parents=True, exist_ok=True)
+            (kernel_tree / "scripts" / "checkpatch.pl").write_text("", encoding="utf-8")
+            cfg_dir = Path(td) / "custom-fetch-dir"
+            base = _lore_fetch_base_dir(
+                {
+                    "lore_fetch_dir": str(cfg_dir),
+                    "upstream_evidence": {"kernel_tree": str(kernel_tree)},
+                }
+            )
+            self.assertEqual(base, cfg_dir.resolve())
+
+    def test_lore_fetch_base_dir_cli_override_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg_dir = Path(td) / "cfg-fetch-dir"
+            cli_dir = Path(td) / "cli-fetch-dir"
+            base = _lore_fetch_base_dir({"lore_fetch_dir": str(cfg_dir)}, lore_out_dir=str(cli_dir))
+            self.assertEqual(base, cli_dir.resolve())
+
     def test_fetch_lore_series_requires_b4(self) -> None:
         with mock.patch("a2a_cli.main.shutil.which", return_value=None):
             with self.assertRaises(RuntimeError):
@@ -53,6 +74,26 @@ class LoreLoopInputTests(unittest.TestCase):
             self.assertTrue(out_dir.exists())
             self.assertTrue((out_dir / "thread.patches" / "0001-test.patch").exists())
             self.assertEqual(mid, "20260504-xyz@example.com")
+
+    def test_fetch_lore_series_uses_cli_out_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            out_base = Path(td) / "my-lore-cache"
+
+            def _fake_run(cmd: list[str], text: bool, capture_output: bool) -> SimpleNamespace:
+                out_idx = cmd.index("-o") + 1
+                out_dir = Path(cmd[out_idx])
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / "0001-test.patch").write_text("From test\n", encoding="utf-8")
+                return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+            with mock.patch("a2a_cli.main.shutil.which", return_value="/usr/bin/b4"):
+                with mock.patch("a2a_cli.main.subprocess.run", side_effect=_fake_run):
+                    out_dir, _mid = _fetch_lore_series(
+                        {},
+                        "https://lore.kernel.org/r/20260504-xyz@example.com",
+                        lore_out_dir=str(out_base),
+                    )
+            self.assertTrue(str(out_dir).startswith(str(out_base.resolve())))
 
 
 if __name__ == "__main__":

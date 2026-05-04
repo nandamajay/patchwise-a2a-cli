@@ -233,7 +233,15 @@ def _extract_lore_message_id(value: str) -> str:
     raise RuntimeError(f"Cannot extract message-id from lore URL: {value}")
 
 
-def _lore_fetch_base_dir(cfg: dict) -> Path:
+def _lore_fetch_base_dir(cfg: dict, lore_out_dir: str | None = None) -> Path:
+    override = str(lore_out_dir or "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+
+    cfg_override = str((cfg.get("lore_fetch_dir") if isinstance(cfg, dict) else "") or "").strip()
+    if cfg_override:
+        return Path(cfg_override).expanduser().resolve()
+
     upstream = cfg.get("upstream_evidence", {}) if isinstance(cfg, dict) else {}
     kernel_tree = str(upstream.get("kernel_tree") or "").strip()
     if kernel_tree:
@@ -243,12 +251,12 @@ def _lore_fetch_base_dir(cfg: dict) -> Path:
     return Path(tempfile.gettempdir()) / "a2a_lore_series"
 
 
-def _fetch_lore_series(cfg: dict, lore_input: str) -> tuple[Path, str]:
+def _fetch_lore_series(cfg: dict, lore_input: str, lore_out_dir: str | None = None) -> tuple[Path, str]:
     message_id = _extract_lore_message_id(lore_input)
     if shutil.which("b4") is None:
         raise RuntimeError("b4 is required for lore input. Install b4 and retry.")
 
-    base_dir = _lore_fetch_base_dir(cfg)
+    base_dir = _lore_fetch_base_dir(cfg, lore_out_dir=lore_out_dir)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     safe_mid = re.sub(r"[^A-Za-z0-9._@+-]+", "-", message_id).strip("-") or "thread"
     out_dir = (base_dir / f"{safe_mid}-{stamp}").resolve()
@@ -3161,6 +3169,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
         watch_path = str(Path(args.watch_path).resolve()) if args.watch_path else None
         lore_url = str(getattr(args, "lore_url", "") or "").strip()
         lore_msgid = str(getattr(args, "lore_msgid", "") or "").strip()
+        lore_out_dir = str(getattr(args, "lore_out_dir", "") or "").strip()
         lore_input = lore_msgid or lore_url
         lore_source_msgid = _extract_lore_message_id(lore_input) if lore_input else None
         auto_respin_raw = getattr(args, "auto_respin", None)
@@ -3174,11 +3183,19 @@ def cmd_loop(args: argparse.Namespace) -> int:
             if watch_path:
                 _echo("Use either --watch-path or --lore-url/--lore-msgid, not both.")
                 return 1
-            fetched_dir, fetched_msgid = _fetch_lore_series(cfg, lore_input)
+            fetch_base_dir = _lore_fetch_base_dir(cfg, lore_out_dir=lore_out_dir)
+            kernel_tree_cfg = str(((cfg.get("upstream_evidence") if isinstance(cfg, dict) else {}) or {}).get("kernel_tree") or "").strip()
+            if kernel_tree_cfg:
+                _echo(f"Kernel tree (config): {Path(kernel_tree_cfg).expanduser().resolve()}")
+            _echo(f"Lore fetch base dir: {fetch_base_dir}")
+            fetched_dir, fetched_msgid = _fetch_lore_series(cfg, lore_input, lore_out_dir=lore_out_dir)
             watch_path = str(fetched_dir)
             lore_source_msgid = fetched_msgid
             _echo(f"Lore source message-id: {fetched_msgid}")
             _echo(f"Lore patch series fetched to: {watch_path}")
+        elif lore_out_dir:
+            _echo("--lore-out-dir requires --lore-url or --lore-msgid.")
+            return 1
 
         if not single_series_mode and not args.session and watch_path:
             wp = Path(watch_path)
@@ -3917,6 +3934,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_loop.add_argument(
         "--lore-msgid",
         help="Lore message-id root to fetch patch series via b4 for this new loop session.",
+    )
+    p_loop.add_argument(
+        "--lore-out-dir",
+        help="Override directory where lore-fetched patch series are stored.",
     )
     p_loop.add_argument(
         "--max-iterations",

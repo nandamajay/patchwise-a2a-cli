@@ -65,6 +65,7 @@ def default_config() -> dict:
         "prior_review_max_comments": 120,
         "reviewer_consistency_guard": True,
         "full_subsystem_review_required": True,
+        "lore_fetch_dir": "",
         "builder_command": None,
         "reviewer_command": None,
         "default_max_rounds": 6,

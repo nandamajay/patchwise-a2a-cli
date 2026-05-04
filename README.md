@@ -65,11 +65,15 @@ a2a loop \
 a2a loop \
   --task lore-review-wcd937x \
   --lore-url "https://lore.kernel.org/all/<message-id>/" \
+  --lore-out-dir /abs/path/for/lore-fetch-cache \
   --max-rounds 3
 ```
 
 Notes:
 - Lore flow fetches patches using `b4` into a generated local directory (defaults under `/tmp/a2a_lore_series/` unless configured otherwise).
+- You can pass a cover-letter link (`[PATCH vN 0/M]`) or first patch mail link as `--lore-url`; both work as series roots.
+- `--lore-out-dir` overrides fetch location for that run.
+- You can set a persistent default fetch directory in config using key `lore_fetch_dir`.
 - `--auto-respin` is enabled by default for lore input; after LGTM it generates a next-version patch path.
 
 #### C. Resume an existing session
@@ -212,6 +216,7 @@ Use:
 ```bash
 a2a config get --json
 a2a config set <key> <value>
+a2a config set lore_fetch_dir /abs/path/for/lore-fetch-cache
 ```
 
 Frequently tuned keys:
@@ -222,6 +227,7 @@ Frequently tuned keys:
 - `prior_review_gate`, `prior_review_search`, `prior_review_max_comments`
 - `reviewer_consistency_guard`
 - `full_subsystem_review_required`
+- `lore_fetch_dir`
 - `default_max_rounds`
 
 ## Useful Commands
