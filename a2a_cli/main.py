@@ -261,13 +261,22 @@ def _fetch_lore_series(cfg: dict, lore_input: str, lore_out_dir: str | None = No
     safe_mid = re.sub(r"[^A-Za-z0-9._@+-]+", "-", message_id).strip("-") or "thread"
     out_dir = (base_dir / f"{safe_mid}-{stamp}").resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    b4_cache_home = (base_dir / ".b4_xdg_cache").resolve()
+    b4_data_home = (base_dir / ".b4_xdg_data").resolve()
+    b4_cache_home.mkdir(parents=True, exist_ok=True)
+    b4_data_home.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env["XDG_CACHE_HOME"] = str(b4_cache_home)
+    env["XDG_DATA_HOME"] = str(b4_data_home)
 
     proc = subprocess.run(
         ["b4", "am", "-Q", "-o", str(out_dir), message_id],
         text=True,
         capture_output=True,
+        env=env,
     )
-    if proc.returncode != 0:
+    patches = sorted(out_dir.rglob("*.patch"))
+    if proc.returncode != 0 and not patches:
         raise RuntimeError(
             "Failed to fetch lore series with b4.\n"
             f"msgid={message_id}\n"
@@ -275,7 +284,6 @@ def _fetch_lore_series(cfg: dict, lore_input: str, lore_out_dir: str | None = No
             f"stderr:\n{proc.stderr}"
         )
 
-    patches = sorted(out_dir.rglob("*.patch"))
     if not patches:
         raise RuntimeError(f"No patch files fetched from lore for message-id: {message_id}")
     return out_dir, message_id

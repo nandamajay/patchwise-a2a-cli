@@ -59,13 +59,15 @@ class LoreLoopInputTests(unittest.TestCase):
             (kernel_tree / "scripts" / "checkpatch.pl").write_text("", encoding="utf-8")
             cfg = {"upstream_evidence": {"kernel_tree": str(kernel_tree)}}
 
-            def _fake_run(cmd: list[str], text: bool, capture_output: bool) -> SimpleNamespace:
+            def _fake_run(cmd: list[str], text: bool, capture_output: bool, env: dict[str, str]) -> SimpleNamespace:
                 out_idx = cmd.index("-o") + 1
                 out_dir = Path(cmd[out_idx])
                 out_dir.mkdir(parents=True, exist_ok=True)
                 quilt_dir = out_dir / "thread.patches"
                 quilt_dir.mkdir(parents=True, exist_ok=True)
                 (quilt_dir / "0001-test.patch").write_text("From test\n", encoding="utf-8")
+                self.assertTrue(env.get("XDG_CACHE_HOME", "").startswith(str((kernel_tree / ".a2a" / "lore_series").resolve())))
+                self.assertTrue(env.get("XDG_DATA_HOME", "").startswith(str((kernel_tree / ".a2a" / "lore_series").resolve())))
                 return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
             with mock.patch("a2a_cli.main.shutil.which", return_value="/usr/bin/b4"):
@@ -79,11 +81,13 @@ class LoreLoopInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             out_base = Path(td) / "my-lore-cache"
 
-            def _fake_run(cmd: list[str], text: bool, capture_output: bool) -> SimpleNamespace:
+            def _fake_run(cmd: list[str], text: bool, capture_output: bool, env: dict[str, str]) -> SimpleNamespace:
                 out_idx = cmd.index("-o") + 1
                 out_dir = Path(cmd[out_idx])
                 out_dir.mkdir(parents=True, exist_ok=True)
                 (out_dir / "0001-test.patch").write_text("From test\n", encoding="utf-8")
+                self.assertTrue(env.get("XDG_CACHE_HOME", "").startswith(str(out_base.resolve())))
+                self.assertTrue(env.get("XDG_DATA_HOME", "").startswith(str(out_base.resolve())))
                 return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
             with mock.patch("a2a_cli.main.shutil.which", return_value="/usr/bin/b4"):
@@ -94,6 +98,29 @@ class LoreLoopInputTests(unittest.TestCase):
                         lore_out_dir=str(out_base),
                     )
             self.assertTrue(str(out_dir).startswith(str(out_base.resolve())))
+
+    def test_fetch_lore_series_tolerates_nonzero_when_patches_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            out_base = Path(td) / "my-lore-cache"
+
+            def _fake_run(cmd: list[str], text: bool, capture_output: bool, env: dict[str, str]) -> SimpleNamespace:
+                out_idx = cmd.index("-o") + 1
+                out_dir = Path(cmd[out_idx])
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / "0001-test.patch").write_text("From test\n", encoding="utf-8")
+                self.assertTrue(env.get("XDG_CACHE_HOME", "").startswith(str(out_base.resolve())))
+                self.assertTrue(env.get("XDG_DATA_HOME", "").startswith(str(out_base.resolve())))
+                return SimpleNamespace(returncode=1, stdout="partial", stderr="quota warning")
+
+            with mock.patch("a2a_cli.main.shutil.which", return_value="/usr/bin/b4"):
+                with mock.patch("a2a_cli.main.subprocess.run", side_effect=_fake_run):
+                    out_dir, mid = _fetch_lore_series(
+                        {},
+                        "https://lore.kernel.org/r/20260504-xyz@example.com",
+                        lore_out_dir=str(out_base),
+                    )
+            self.assertTrue(out_dir.exists())
+            self.assertEqual(mid, "20260504-xyz@example.com")
 
 
 if __name__ == "__main__":
