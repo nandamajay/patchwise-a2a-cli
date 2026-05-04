@@ -2,6 +2,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+if [[ -z "${CODEX_HOME:-}" ]]; then
+  export CODEX_HOME="$REPO_ROOT/.runtime/codex-home"
+fi
+if [[ -z "${TMPDIR:-}" ]]; then
+  export TMPDIR="$REPO_ROOT/.runtime/tmp"
+fi
+mkdir -p "$CODEX_HOME" "$TMPDIR"
 
 : "${A2A_BUILDER_FILE:?A2A_BUILDER_FILE is required}"
 : "${A2A_REPORT_DIR:?A2A_REPORT_DIR is required}"
@@ -92,6 +101,13 @@ else
 fi
 RC=$?
 set -e
+
+if [[ $RC -ne 0 ]]; then
+  if [[ -s "$OUT_FILE" ]]; then
+    echo "[builder-llm] qgenie returned rc=$RC but produced output; continuing" >&2
+    RC=0
+  fi
+fi
 
 if [[ $RC -ne 0 ]]; then
   if run_fallback; then

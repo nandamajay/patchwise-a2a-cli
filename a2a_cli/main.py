@@ -538,6 +538,16 @@ def _agent_env(session: dict, round_no: int, files: dict[str, Path], role: str) 
             llm_timeout_sec = 900
 
     repo_root = _repo_root_from_module()
+    runtime_root = repo_root / ".runtime"
+    codex_home = runtime_root / "codex-home"
+    runtime_tmp = runtime_root / "tmp"
+    try:
+        codex_home.mkdir(parents=True, exist_ok=True)
+        runtime_tmp.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Keep legacy env if runtime dirs cannot be created.
+        pass
+
     fallback_builder_cmd = f"python {repo_root / 'scripts' / 'agents' / 'builder_agent.py'}"
     fallback_reviewer_cmd = f"python {repo_root / 'scripts' / 'agents' / 'reviewer_aryabhatta.py'}"
     env.update(
@@ -562,6 +572,8 @@ def _agent_env(session: dict, round_no: int, files: dict[str, Path], role: str) 
             "A2A_FALLBACK_REVIEWER_CMD": fallback_reviewer_cmd,
             "A2A_LLM_TIMEOUT_SEC": str(llm_timeout_sec),
             "A2A_EXTRA_SCRUTINY": "1" if bool(session.get("extra_scrutiny_next_round")) else "0",
+            "CODEX_HOME": str(codex_home),
+            "TMPDIR": str(runtime_tmp),
         }
     )
     prior = session.get("prior_review")
@@ -1959,6 +1971,13 @@ def _start_session(
     state_path = root / A2A_DIRNAME / "state.json"
     state = load_json(state_path)
 
+    watch_path_resolved: str | None = None
+    if watch_path:
+        wp = Path(watch_path).expanduser().resolve()
+        if not wp.exists():
+            raise RuntimeError(f"watch_path not found: {wp}")
+        watch_path_resolved = str(wp)
+
     session_id = _next_session_id()
     reviewer_name = str(prep.get("reviewer_name") or cfg.get("reviewer_name", "aryabhatta"))
     builder_display_name = _resolve_builder_display_name(cfg=cfg)
@@ -1983,7 +2002,7 @@ def _start_session(
         "rounds": [],
         "builder_command": builder_command,
         "reviewer_command": reviewer_command,
-        "watch_path": watch_path,
+        "watch_path": watch_path_resolved,
         "llm_native": {
             "default": bool(cfg.get("llm_native_default", True)),
             "strict": bool(cfg.get("llm_native_strict", True)),
@@ -1995,10 +2014,10 @@ def _start_session(
     prior_gate = bool(cfg.get("prior_review_gate", True))
     search_if_missing = bool(cfg.get("prior_review_search", True))
     max_comments = int(cfg.get("prior_review_max_comments", 120))
-    if prior_gate and watch_path:
+    if prior_gate and watch_path_resolved:
         report_dir = _report_dir(root, session_id)
         context = ingest_prior_review_context(
-            Path(watch_path),
+            Path(watch_path_resolved),
             report_dir,
             search_if_missing=search_if_missing,
             max_comments=max_comments,
