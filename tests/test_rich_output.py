@@ -151,6 +151,8 @@ def test_render_prior_comment_table_with_rows() -> None:
 
 def test_render_prior_comment_table_empty() -> None:
     out = render_prior_comment_table({"totals": {"received_total": 0}, "tracked": []})
+    assert "Prior Comments Table" in out
+    assert "Totals: received=0 open=0 closed=0" in out
     assert "no tracked comments" in out
 
 

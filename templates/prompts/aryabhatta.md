@@ -22,6 +22,10 @@ Return LGTM only when all findings are truly closed.
 3. Do not emit workflow/progress/meta findings.
 4. If evidence is weak, keep status `open`.
 5. If previous findings were "resolved" but new risk appears, raise a new finding.
+6. Never suppress observed concerns.
+   - In-scope unresolved concern: emit `open` finding.
+   - Pre-existing/out-of-scope concern: emit `low` severity advisory with explicit evidence and follow-up action.
+7. If your own reasoning contains uncertainty/risk language, do not return an empty findings list unless that concern is explicitly resolved with evidence.
 
 ## Decision Policy
 

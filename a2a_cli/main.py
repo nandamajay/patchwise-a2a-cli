@@ -627,6 +627,58 @@ def _reviewer_verdict_for_round(root: Path, session_id: str, round_no: int, revi
     return ""
 
 
+def reviewer_log_has_unresolved_risk(log_path: Path) -> tuple[bool, str]:
+    if not log_path.exists():
+        return False, ""
+    text = log_path.read_text(encoding="utf-8", errors="replace")
+    segments = re.findall(
+        r"(?ms)^thinking\s*\n(.*?)(?=^exec\s*$|^qgenie\s*$|^\[aryabhatta-llm\]|^\{.*$|\Z)",
+        text,
+    )
+    if not segments:
+        return False, ""
+
+    uncertainty_tokens = [
+        "uncertain",
+        "uncertainty",
+        "not sure",
+        "potential issue",
+        "concern",
+        "risk",
+        "might",
+        "could",
+        "may",
+    ]
+    issue_tokens = [
+        "duplicate",
+        "#define",
+        "shared rail",
+        "refcount",
+        "pre_pmd",
+        "post_pmd",
+        "ana_rx_supplies",
+        "ownership",
+        "warning",
+        "compile",
+    ]
+
+    for segment in segments:
+        lower = segment.lower()
+        if not any(token in lower for token in uncertainty_tokens):
+            continue
+        if not any(token in lower for token in issue_tokens):
+            continue
+        first_line = ""
+        for raw in segment.splitlines():
+            line = raw.strip()
+            if line:
+                first_line = line
+                break
+        snippet = first_line[:120] if first_line else "uncertainty/risk language found in reviewer reasoning"
+        return True, snippet
+    return False, ""
+
+
 def _agent_env(session: dict, round_no: int, files: dict[str, Path], role: str) -> dict[str, str]:
     env = dict(os.environ)
     watch_path = session.get("watch_path")
@@ -2252,7 +2304,8 @@ def _advance_session(root: Path, session_id: str) -> int:
     builder_patch_gauge = _compute_builder_patch_gauge(change_stats)
     builder_confidence = _compute_builder_confidence(prev_open, open_count, change_stats)
     reviewer_confidence = _compute_reviewer_confidence(findings)
-    thresholds = ScoreThresholds.from_config(_load_config_or_defaults(root))
+    cfg_for_round = _load_config_or_defaults(root)
+    thresholds = ScoreThresholds.from_config(cfg_for_round)
     score_decision = evaluate_round_scores(
         round_no=round_no,
         open_findings=open_count,
@@ -2365,6 +2418,18 @@ def _advance_session(root: Path, session_id: str) -> int:
     round_files = _round_files(root, session_id, round_no, reviewer_name)
     reviewer_verdict = _reviewer_verdict_for_round(root, session_id, round_no, reviewer_name)
     should_lgtm, lgtm_reason = should_issue_lgtm(str(round_files["findings"]), reviewer_verdict)
+    if should_lgtm and int(open_count) == 0 and len(findings) == 0:
+        guard_enabled = bool(cfg_for_round.get("reviewer_consistency_guard", True))
+        if guard_enabled:
+            reviewer_log = root / A2A_DIRNAME / "logs" / session_id / f"{_round_basename(round_no, 'reviewer')}.log"
+            has_unresolved_risk, snippet = reviewer_log_has_unresolved_risk(reviewer_log)
+            if has_unresolved_risk:
+                should_lgtm = False
+                lgtm_reason = (
+                    "reviewer self-consistency guard: unresolved concern noted in reasoning "
+                    f"({snippet})"
+                )
+
     if not should_lgtm:
         max_rounds_local = int(session.get("max_rounds", 1))
         next_round_hint = round_no + 1
@@ -2443,6 +2508,8 @@ def _advance_session(root: Path, session_id: str) -> int:
                 kb_updates=0,
             )
         )
+        _echo("Final prior comments table:")
+        _echo(render_prior_comment_table(round_summary.get("prior_comments", {})))
         return 0
 
     if round_no >= max_rounds:

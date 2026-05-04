@@ -63,6 +63,7 @@ def default_config() -> dict:
         "prior_review_gate": True,
         "prior_review_search": True,
         "prior_review_max_comments": 120,
+        "reviewer_consistency_guard": True,
         "builder_command": None,
         "reviewer_command": None,
         "default_max_rounds": 6,

@@ -79,6 +79,7 @@ Execution requirements:
 3) Keep changes minimal and focused.
 4) Return markdown only with required section headings.
 5) If no changes were needed, state why with evidence.
+6) Always include a `## Residual Risks` section with explicit yes/no risk statements and evidence.
 EOF
 
 set +e
@@ -147,6 +148,7 @@ required_sections = [
     "## rationale",
     "## verification commands",
     "## response to reviewer findings",
+    "## residual risks",
 ]
 missing = [sec for sec in required_sections if sec not in low]
 if missing:

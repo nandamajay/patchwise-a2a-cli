@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from a2a_cli.main import should_issue_lgtm
+from a2a_cli.main import reviewer_log_has_unresolved_risk, should_issue_lgtm
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -52,6 +52,35 @@ class LgtmDecisionTests(unittest.TestCase):
         ok, reason = should_issue_lgtm(str(path), "LGTM")
         self.assertFalse(ok)
         self.assertIn("new findings raised this round = 1", reason)
+
+    def test_reviewer_guard_detects_uncertain_issue_reasoning(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "reviewer.log"
+            path.write_text(
+                "stderr:\n"
+                "thinking\n"
+                "I see a potential issue and uncertainty around shared rail ownership.\n"
+                "This might be a duplicate #define problem.\n"
+                "exec\n",
+                encoding="utf-8",
+            )
+            blocked, snippet = reviewer_log_has_unresolved_risk(path)
+            self.assertTrue(blocked)
+            self.assertTrue(snippet)
+
+    def test_reviewer_guard_ignores_clean_reasoning(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "reviewer.log"
+            path.write_text(
+                "stderr:\n"
+                "thinking\n"
+                "Validated patch locations and evidence; no unresolved issues remain.\n"
+                "exec\n",
+                encoding="utf-8",
+            )
+            blocked, snippet = reviewer_log_has_unresolved_risk(path)
+            self.assertFalse(blocked)
+            self.assertEqual(snippet, "")
 
 
 if __name__ == "__main__":

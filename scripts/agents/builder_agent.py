@@ -253,6 +253,11 @@ def write_builder_markdown(path: Path, changed: list[str], actions: list[str], r
         lines.extend([f"- {x}" for x in risks])
     else:
         lines.append("- All addressed in this round.")
+    lines.extend(["", "## Residual Risks"])
+    if risks:
+        lines.extend([f"- {x}" for x in risks])
+    else:
+        lines.append("- None identified from local/static review scope.")
     lines.append("")
 
     path.parent.mkdir(parents=True, exist_ok=True)

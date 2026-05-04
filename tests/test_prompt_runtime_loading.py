@@ -37,6 +37,7 @@ def test_builder_required_sections_still_enforced() -> None:
     assert '"## rationale"' in text
     assert '"## verification commands"' in text
     assert '"## response to reviewer findings"' in text
+    assert '"## residual risks"' in text
 
 
 def test_reviewer_schema_pipeline_unchanged() -> None:

@@ -257,8 +257,12 @@ def render_prior_comment_table(
     ascii_flag = (not _supports_unicode()) if ascii_only is None else ascii_only
     w = max(90, min(width or _terminal_width(), 160))
     rows = comments.get("tracked", []) if isinstance(comments, dict) else comments
-    if not isinstance(rows, list) or not rows:
-        return "Prior comments table: no tracked comments"
+    totals = comments.get("totals", comments) if isinstance(comments, dict) else {}
+    received_total = int(totals.get("received_total", totals.get("received", 0)) or 0)
+    open_total = int(totals.get("open", 0) or 0)
+    closed_total = int(totals.get("closed", 0) or 0)
+    if not isinstance(rows, list):
+        rows = []
 
     header = "Prior Comments Table"
     if ascii_flag:
@@ -268,6 +272,24 @@ def render_prior_comment_table(
         sep = "┌" + ("─" * (w - 2)) + "┐"
         mid = "├" + ("─" * (w - 2)) + "┤"
         out = [sep, _line(f" {header}", w, "│", "│"), mid]
+
+    out.append(
+        _line(
+            f" Totals: received={received_total} open={open_total} closed={closed_total}",
+            w,
+            "│" if not ascii_flag else "|",
+            "│" if not ascii_flag else "|",
+        )
+    )
+    if not rows:
+        out.append(
+            _line(
+                " no tracked comments",
+                w,
+                "│" if not ascii_flag else "|",
+                "│" if not ascii_flag else "|",
+            )
+        )
 
     for idx, row in enumerate(rows, start=1):
         if not isinstance(row, dict):

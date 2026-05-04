@@ -71,6 +71,10 @@ Strict requirements:
 4) Use location as patch_file_name:line_number.
 5) If an issue is not addressed, keep it open.
 6) Any open finding must include concrete evidence text suitable for upstream evidence enrichment.
+7) Never suppress observed concerns:
+   - In-scope unresolved concern -> emit open finding.
+   - Pre-existing/out-of-scope concern -> emit low-severity advisory finding with explicit follow-up.
+8) If your own reasoning mentions uncertainty/risk, do not return an empty findings list unless resolved with concrete evidence.
 EOF
 
 set +e

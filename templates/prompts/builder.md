@@ -22,6 +22,7 @@ Do not wait for reviewer guidance when risks are visible in the patch.
 - `## Rationale`
 - `## Verification Commands`
 - `## Response To Reviewer Findings`
+- `## Residual Risks`
 
 ## Quality Bar
 
@@ -29,6 +30,7 @@ Do not wait for reviewer guidance when risks are visible in the patch.
 - Never claim "fixed" without line-level evidence.
 - If uncertain, state uncertainty explicitly and list what remains risky.
 - No workflow chatter, no meta commentary, no skill-loading commentary.
+- Never hide residual uncertainty; surface it under `## Residual Risks` with concrete evidence.
 
 ## Kernel-Specific Focus
 
