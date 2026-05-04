@@ -173,3 +173,43 @@ def test_prior_comment_table_narrow_width_no_overflow() -> None:
     )
     for line in out.splitlines():
         assert len(line) <= 92
+
+
+def test_needs_eye_computation_open_comment() -> None:
+    out = render_prior_comment_table(
+        {
+            "tracked": [
+                {
+                    "source_comment_id": "prior-open",
+                    "subject": "Open comment",
+                    "current_status": "open",
+                    "fixed_by_a2a": False,
+                    "latest_location": "foo.c:1",
+                    "latest_evidence": "pending",
+                }
+            ]
+        },
+        width=100,
+    )
+    assert "prior-open" in out
+    assert "needs_eye=yes" in out
+
+
+def test_needs_eye_computation_missing_evidence() -> None:
+    out = render_prior_comment_table(
+        {
+            "tracked": [
+                {
+                    "source_comment_id": "prior-no-evidence",
+                    "subject": "Closed but missing proof",
+                    "current_status": "closed",
+                    "fixed_by_a2a": True,
+                    "latest_location": "foo.c:2",
+                    "latest_evidence": "",
+                }
+            ]
+        },
+        width=100,
+    )
+    assert "prior-no-evidence" in out
+    assert "needs_eye=yes" in out

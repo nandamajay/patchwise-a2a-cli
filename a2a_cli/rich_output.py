@@ -39,7 +39,7 @@ def _bar(value: Any, width: int = 10, full: str = "█", empty: str = "░", asc
 
 
 def _pad(text: str, width: int) -> str:
-    if len(text) >= width:
+    if len(text) > width:
         return text[: max(0, width - 1)] + ("…" if width > 0 else "")
     return text + (" " * (width - len(text)))
 
@@ -305,41 +305,40 @@ def render_lgtm_banner(
     ascii_only: bool | None = None,
 ) -> str:
     ascii_flag = (not _supports_unicode()) if ascii_only is None else ascii_only
-    if ascii_flag:
-        top = "+" + ("=" * 38) + "+"
-        bot = "+" + ("=" * 38) + "+"
-        check = "[LGTM]"
-    else:
-        top = "╔" + ("═" * 38) + "╗"
-        bot = "╚" + ("═" * 38) + "╝"
-        check = "✅"
-    lines = [
-        top,
-        f"║   {check}  LGTM — All findings closed     ║",
-        f"║   Session: {session_id[:25]:<25}║",
+    check = "[LGTM]" if ascii_flag else "✅"
+    body_lines = [
+        f"   {check}  LGTM — All findings closed",
+        f"   Session: {session_id}",
     ]
     if rounds is not None or total_findings is not None:
-        lines.append(
-            f"║   Rounds: {rounds if rounds is not None else 'N/A'}  ·  Total findings: "
-            f"{total_findings if total_findings is not None else 'N/A':<4}║"
+        body_lines.append(
+            f"   Rounds: {rounds if rounds is not None else 'N/A'}  ·  Total findings: "
+            f"{total_findings if total_findings is not None else 'N/A'}"
         )
     if prior_closed is not None and prior_received is not None:
-        lines.append(
-            f"║   Prior comments: {prior_closed}/{prior_received} closed"
-            f"{' ' * max(0, 14 - len(str(prior_closed)) - len(str(prior_received)))}║"
-        )
+        body_lines.append(f"   Prior comments: {prior_closed}/{prior_received} closed")
     if static_analysis_status:
-        lines.append(
-            f"║   Static analysis: {static_analysis_status[:20]:<20}"
-            f"{' ' * 12}║"
-        )
+        body_lines.append(f"   Static analysis: {static_analysis_status}")
     if kb_updates is not None:
-        lines.append(
-            f"║   Knowledge base: {kb_updates} new pattern{'s' if kb_updates != 1 else ''}"
-            f"{' ' * max(0, 12 - len(str(kb_updates)))}║"
+        body_lines.append(
+            f"   Knowledge base: {kb_updates} new pattern{'s' if kb_updates != 1 else ''}"
         )
-    lines.append(bot)
-    return "\n".join(lines)
+
+    inner_width = max(len(line) for line in body_lines) if body_lines else 40
+    if ascii_flag:
+        top = "+" + ("=" * inner_width) + "+"
+        bot = "+" + ("=" * inner_width) + "+"
+        left = right = "|"
+    else:
+        top = "╔" + ("═" * inner_width) + "╗"
+        bot = "╚" + ("═" * inner_width) + "╝"
+        left = right = "║"
+
+    out = [top]
+    for line in body_lines:
+        out.append(f"{left}{_pad(line, inner_width)}{right}")
+    out.append(bot)
+    return "\n".join(out)
 
 
 def render_phase_progress(phase: int, total_phases: int, *, ascii_only: bool | None = None) -> str:
