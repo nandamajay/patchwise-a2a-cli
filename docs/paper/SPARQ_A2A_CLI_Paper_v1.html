@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PatchWise A2A_CLI: Autonomous Agent2Agent Patch Review</title>
+  <style>
+    @page { size: A4; margin: 22mm 20mm; }
+    body {
+      margin: 0;
+      color: #111;
+      background: #fff;
+      font-family: "Times New Roman", Times, serif;
+      font-size: 12pt;
+      line-height: 1.35;
+    }
+    .paper { max-width: 170mm; margin: 0 auto; }
+    h1 { font-size: 18pt; margin: 0 0 6pt; text-align: center; font-weight: 700; }
+    .authors { text-align: center; font-size: 11pt; margin-bottom: 14pt; }
+    h2 { font-size: 13pt; margin: 14pt 0 6pt; font-weight: 700; }
+    p { margin: 0 0 8pt; text-align: justify; }
+    .abstract, .keywords { margin: 0 0 8pt; }
+    .label { font-weight: 700; }
+    ul { margin: 0 0 8pt 18pt; }
+    li { margin-bottom: 3pt; }
+    .figure {
+      border: 1px solid #333;
+      padding: 8pt;
+      margin: 8pt 0;
+      font-size: 10.5pt;
+      background: #fafafa;
+    }
+    .mono { font-family: "Courier New", Courier, monospace; font-size: 10pt; }
+    .small { font-size: 10.5pt; }
+    table { width: 100%; border-collapse: collapse; margin: 6pt 0 8pt; }
+    th, td { border: 1px solid #333; padding: 5pt; font-size: 10.5pt; vertical-align: top; }
+    th { background: #f0f0f0; text-align: left; }
+  </style>
+</head>
+<body>
+  <div class="paper">
+    <h1>PatchWise A2A_CLI: Autonomous Agent2Agent Patch Review for Linux Kernel Workflows</h1>
+    <div class="authors">Ajay Nandam (Project Owner), A2A_CLI Engineering Workspace</div>
+
+    <p class="abstract"><span class="label">Abstract:</span> Linux kernel patch review is often iterative, asynchronous, and manually intensive when using LLM-assisted workflows. Engineers spend significant time supervising agents, replaying context, and validating that reviewer decisions are consistent with evidence. This paper presents PatchWise A2A_CLI, a local Agent2Agent orchestration system that structures builder-reviewer collaboration into auditable rounds with explicit findings, policy-gated LGTM decisions, lore-thread ingestion, and automatic respin generation. The system separates implementation and review concerns, persists full artifacts per round, and enables resumable workflows from local patch files or lore links. Initial deployment in real patch-review sessions shows practical reductions in operator babysitting and improved traceability of technical decisions.</p>
+
+    <p class="keywords"><span class="label">Keywords:</span> Linux kernel, patch review, autonomous agents, Agent2Agent, lore.kernel.org, respin automation, evidence-based review.</p>
+
+    <h2>1. Problem Statement</h2>
+    <p>Traditional AI-assisted review loops frequently fail in two ways: (1) weak role separation where the reviewer becomes non-adversarial, and (2) incomplete context continuity across rounds, leading to repeated findings and manual restarts. In kernel workflows, these failures are expensive because reviewers must verify patch integrity, logical split quality, and subsystem-specific correctness under strict maintainer expectations.</p>
+
+    <h2>2. Proposed System</h2>
+    <p>PatchWise A2A_CLI implements a deterministic state machine for autonomous rounds with strict evidence contracts:</p>
+    <ul>
+      <li><b>Chanakya (Builder):</b> edits and fixes, must provide line-level evidence and residual risks.</li>
+      <li><b>Aryabhatta (Reviewer):</b> adversarially validates, emits structured findings with severity, location, evidence, and required action.</li>
+      <li><b>Orchestrator:</b> enforces round transitions, validation gates, and LGTM blocking policies.</li>
+    </ul>
+
+    <div class="figure">
+      <b>Figure 1. A2A_CLI Review Pipeline</b><br/>
+      Input (local patch / lore URL / session resume)
+      → Session Init
+      → Builder Round
+      → Validation Gate
+      → Reviewer Round
+      → Findings Engine
+      → LGTM Gate<br/>
+      If blocked: inject prior findings/comments and continue next round.<br/>
+      If passed: finalize reports and optionally auto-generate next patch version (vN+1).
+    </div>
+
+    <h2>3. Policy and Guardrails</h2>
+    <table>
+      <tr><th>Guardrail</th><th>Enforcement</th></tr>
+      <tr><td>Open findings safety</td><td>LGTM is blocked when open findings &gt; 0.</td></tr>
+      <tr><td>Reviewer consistency</td><td>LGTM blocked if reviewer reasoning still contains unresolved concern/risk.</td></tr>
+      <tr><td>Prior-thread continuity</td><td>Lore comments ingested and mapped via source identifiers; unresolved items carried forward.</td></tr>
+      <tr><td>Concurrency safety</td><td>Worktree lock prevents concurrent loops from corrupting shared prepared trees.</td></tr>
+    </table>
+
+    <h2>4. Implementation Snapshot</h2>
+    <p>The system is implemented as a local CLI with session state under <span class="mono">.a2a/</span>. It supports autonomous loop execution, report generation (JSON/Markdown/HTML), lore fetch integration, auto-respin workflows, and optional email bridge controls for remote operation.</p>
+    <p class="small"><b>Representative command:</b> <span class="mono">a2a loop --task &lt;name&gt; --lore-url "https://lore.kernel.org/all/&lt;msgid&gt;/" --max-rounds 3</span></p>
+
+    <h2>5. Validation Status</h2>
+    <p>Current project test suite in the local workspace passes successfully (<span class="mono">168 passed, 1 skipped</span>). Added validations include post-respin artifact coherence checks, cover-letter changelog quality checks, and worktree locking behavior tests.</p>
+
+    <h2>6. Contributions</h2>
+    <ul>
+      <li>Practical Agent2Agent orchestration for kernel patch review with strict role contracts.</li>
+      <li>Evidence-driven findings lifecycle and deterministic LGTM gating.</li>
+      <li>Lore-aware review continuity, including prior-comment ingestion and response scaffolding.</li>
+      <li>Respin automation with patchset consistency checks.</li>
+      <li>Operator-friendly execution via CLI loop, resume, report generation, and launcher script.</li>
+    </ul>
+
+    <h2>7. Limitations and Next Steps</h2>
+    <p>Current results are based on engineering deployment and integration validation rather than a controlled benchmark across multiple subsystems. Next work includes formal metrics (rounds-to-LGTM, false-positive rate, review latency), broader subsystem datasets, and SPARQ-template-specific formatting alignment.</p>
+
+    <h2>8. Reproducibility</h2>
+    <p>All artifacts are generated locally per session in the project repository. A typical run emits round logs, findings, diffs, summary payloads, and an HTML session report under <span class="mono">.a2a/reports/&lt;session-id&gt;/</span>, enabling audit and replay.</p>
+
+    <p class="small"><b>Prepared for:</b> SPARQ paper submission draft v1 (editable DOCX + PDF export).</p>
+  </div>
+</body>
+</html>

@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PatchWise A2A_CLI - One Page Poster</title>
+  <style>
+    @page { size: A4 landscape; margin: 10mm; }
+    :root {
+      --bg1: #f3f8ff;
+      --bg2: #eefdf4;
+      --ink: #1b2430;
+      --muted: #4b5b70;
+      --card: #ffffff;
+      --line: #d7e3f2;
+      --accent: #1261a0;
+      --accent2: #0d8f5c;
+      --warn: #b45309;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; font-family: "DejaVu Sans", "Liberation Sans", sans-serif; color: var(--ink); }
+    body {
+      background: linear-gradient(135deg, var(--bg1), var(--bg2));
+      width: 100%;
+      height: 100%;
+    }
+    .poster {
+      width: 100%;
+      min-height: 100vh;
+      padding: 12mm;
+    }
+    .header {
+      display: grid;
+      grid-template-columns: 2.3fr 1fr;
+      gap: 10mm;
+      margin-bottom: 8mm;
+    }
+    .titlebox {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-left: 8px solid var(--accent);
+      border-radius: 8px;
+      padding: 10px 14px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 28px;
+      line-height: 1.1;
+      letter-spacing: 0.2px;
+    }
+    .subtitle {
+      margin-top: 6px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+    .stats {
+      display: grid;
+      gap: 6px;
+    }
+    .pill {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 12px;
+      text-align: center;
+      font-weight: 700;
+      color: var(--accent);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1.25fr 2fr;
+      gap: 8mm;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 7px;
+    }
+    .card h2 {
+      margin: 0 0 6px;
+      font-size: 14px;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .card p, .card li { font-size: 12px; line-height: 1.35; margin: 0; }
+    ul { margin: 0; padding-left: 16px; }
+    .pipeline {
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 7px;
+    }
+    .pipeline h2 {
+      margin: 0 0 8px;
+      font-size: 14px;
+      color: var(--accent2);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .row {
+      display: flex;
+      flex-wrap: nowrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      margin-bottom: 6px;
+    }
+    .node {
+      flex: 1;
+      min-height: 40px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 5px 7px;
+      font-size: 11px;
+      line-height: 1.2;
+      background: #f9fcff;
+    }
+    .node strong { display: block; color: #113b63; font-size: 11px; }
+    .arrow {
+      font-size: 16px;
+      color: var(--accent2);
+      font-weight: 700;
+      flex: 0 0 auto;
+    }
+    .gate {
+      border-left: 5px solid var(--warn);
+      background: #fff9ed;
+    }
+    .footer {
+      margin-top: 4mm;
+      font-size: 10px;
+      color: #5b6677;
+      border-top: 1px dashed #cfd9e5;
+      padding-top: 4px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .mono { font-family: "DejaVu Sans Mono", "Liberation Mono", monospace; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <div class="poster">
+    <div class="header">
+      <div class="titlebox">
+        <h1>PatchWise A2A_CLI</h1>
+        <div class="subtitle">Autonomous Builder-Reviewer loop for Linux patch review, lore intake, findings gating, and respin generation.</div>
+      </div>
+      <div class="stats">
+        <div class="pill">Roles: Chanakya + Aryabhatta</div>
+        <div class="pill">Mode: Local / Resume / Lore</div>
+        <div class="pill">Outputs: Findings + HTML + Respin</div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div>
+        <div class="card">
+          <h2>Problem</h2>
+          <p>Manual patch babysitting is slow and inconsistent. A2A automates round-by-round review while preserving evidence and human auditability.</p>
+        </div>
+
+        <div class="card">
+          <h2>Agents</h2>
+          <ul>
+            <li><strong>Chanakya (Builder):</strong> Applies fixes, references exact lines, reports residual risks.</li>
+            <li><strong>Aryabhatta (Reviewer):</strong> Adversarial validation, concrete findings, no unsupported LGTM.</li>
+            <li><strong>Orchestrator:</strong> Session lifecycle, findings tracking, policy enforcement.</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <h2>Hard Gates</h2>
+          <ul>
+            <li>LGTM blocked when open findings exist.</li>
+            <li>Reviewer self-consistency guard blocks contradictory LGTM.</li>
+            <li>Optional: checkpatch/static-analysis gates.</li>
+            <li>Worktree lock avoids concurrent corruption.</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <h2>How To Run</h2>
+          <p class="mono">a2a loop --task &lt;name&gt; --watch-path /abs/path --max-rounds 3</p>
+          <p class="mono">a2a loop --task &lt;name&gt; --lore-url "https://lore.kernel.org/all/&lt;msgid&gt;/"</p>
+          <p class="mono">a2a loop --session &lt;session-id&gt;</p>
+          <p class="mono">./run.sh &lt;lore-url|msgid|session|path&gt;</p>
+        </div>
+      </div>
+
+      <div>
+        <div class="pipeline">
+          <h2>Pipeline</h2>
+          <div class="row">
+            <div class="node"><strong>Input</strong>Local patch, lore URL/msgid, or session resume</div>
+            <div class="arrow">→</div>
+            <div class="node"><strong>Session Init</strong>Create/update session metadata and round context</div>
+            <div class="arrow">→</div>
+            <div class="node"><strong>Builder Round</strong>Fix patch, emit evidence + residual risks</div>
+          </div>
+          <div class="row">
+            <div class="node"><strong>Validation Gate</strong>Schema + checkpatch/static checks</div>
+            <div class="arrow">→</div>
+            <div class="node"><strong>Reviewer Round</strong>Raise/close findings with location + action</div>
+            <div class="arrow">→</div>
+            <div class="node gate"><strong>LGTM Gate</strong>Block on open/new/inconsistent findings</div>
+          </div>
+          <div class="row">
+            <div class="node"><strong>Pass</strong>LGTM + session report + optional auto-respin vN+1</div>
+            <div class="arrow">↔</div>
+            <div class="node"><strong>Fail</strong>Inject prior findings/comments and continue next round</div>
+            <div class="arrow">→</div>
+            <div class="node"><strong>Stop</strong>Max rounds or operator decision</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Artifacts</h2>
+          <ul>
+            <li><span class="mono">.a2a/sessions/&lt;sid&gt;.json</span></li>
+            <li><span class="mono">.a2a/logs/&lt;sid&gt;/</span></li>
+            <li><span class="mono">.a2a/reports/&lt;sid&gt;/round-XX-*.{md,json}</span></li>
+            <li><span class="mono">.a2a/reports/&lt;sid&gt;/session-report.html</span></li>
+            <li><span class="mono">.a2a/patches/&lt;sid&gt;/vN/</span> (respin output)</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <h2>Capabilities Snapshot</h2>
+          <ul>
+            <li>Patch/lore review loops with resume and round extension.</li>
+            <li>Prior-thread comment ingestion and actionable mapping.</li>
+            <li>Auto-respin generation and patchset coherence checks.</li>
+            <li>Email bridge optional mode for remote operations.</li>
+            <li>Terminal + HTML reporting with round metrics.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <div>Project: A2A_CLI | Repository-local artifacts only</div>
+      <div>Generated: 2026-05-08</div>
+    </div>
+  </div>
+</body>
+</html>
