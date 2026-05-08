@@ -105,7 +105,14 @@ If accepted, the same session is extended by one round (no restart from round 1)
 ```bash
 a2a report --session <session-id> --format markdown
 a2a report --latest --format json
+a2a report --session <session-id> --format html --output /abs/path/report.html
 ```
+
+`a2a loop` now auto-generates an HTML session report at:
+
+- `.a2a/reports/<session-id>/session-report.html`
+
+When multiple loops target the same prepared worktrees, `a2a loop` now serializes them with a worktree lock under `.a2a/locks/worktrees/` to avoid concurrent write contention.
 
 ### 6) Optional submission gate
 
@@ -274,6 +281,13 @@ Supported email commands:
 - `A2A RESUME SESSION=sess-...`
 - `A2A EXTEND SESSION=sess-... TOKEN=<token> AUTO_RUN=yes`
 
+Optional implicit mode (no explicit `A2A ...` command):
+
+- Enable `email_bridge.auto_detect_requests=true`.
+- Then bridge auto-starts a review when an allowlisted email contains:
+  - a `lore.kernel.org` URL, or
+  - `.patch`/`.diff` attachments.
+
 Recommended config block in `.a2a/config.json`:
 
 ```json
@@ -286,7 +300,8 @@ Recommended config block in `.a2a/config.json`:
     "imap_password_env": "A2A_EMAIL_IMAP_PASSWORD",
     "mailbox": "INBOX",
     "allowed_senders": ["user@example.com"],
-    "notify_to": ["user@example.com"]
+    "notify_to": ["user@example.com"],
+    "auto_detect_requests": false
   }
 }
 ```
@@ -317,3 +332,21 @@ Wizard actions:
 - Resume an existing session
 - Extend a stopped session by one round and resume
 - Show loop command options help
+
+Quick smart launcher (auto-detect lore URL/msgid/session/path):
+
+```bash
+./run.sh "https://lore.kernel.org/all/<msgid>/"
+# or
+./run.sh "<message-id>"
+# or
+./run.sh sess-20260504-123829-203732
+# or
+./run.sh /abs/path/to/patch_or_series
+```
+
+Launch interactive mode:
+
+```bash
+./run.sh --wizard
+```
