@@ -38,6 +38,19 @@ def _bar(value: Any, width: int = 10, full: str = "█", empty: str = "░", asc
     return f"[{full * filled}{empty * (width - filled)}] {percent}%"
 
 
+def _format_elapsed_hms(value: Any) -> str | None:
+    try:
+        total = int(value) if value is not None else None
+    except (TypeError, ValueError):
+        total = None
+    if total is None or total < 0:
+        return None
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    seconds = total % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
 def _pad(text: str, width: int) -> str:
     if len(text) > width:
         return text[: max(0, width - 1)] + ("…" if width > 0 else "")
@@ -178,12 +191,9 @@ def render_round_table(
         )
     )
     elapsed_seconds = round_data.get("round_elapsed_seconds")
-    try:
-        elapsed_value = int(elapsed_seconds) if elapsed_seconds is not None else None
-    except (TypeError, ValueError):
-        elapsed_value = None
-    if elapsed_value is not None and elapsed_value >= 0:
-        out.append(_line(f" Elapsed: {elapsed_value}s", w, box["v"], box["v"]))
+    elapsed_hms = _format_elapsed_hms(elapsed_seconds)
+    if elapsed_hms:
+        out.append(_line(f" Elapsed: {elapsed_hms}", w, box["v"], box["v"]))
     out.append(f"{box['bl']}{box['h'] * (w - 2)}{box['br']}")
     return "\n".join(out)
 

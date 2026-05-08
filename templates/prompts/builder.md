@@ -27,16 +27,21 @@ Do not wait for reviewer guidance when risks are visible in the patch.
 ## Quality Bar
 
 - Minimal diffs only; preserve bisect safety.
+- Keep each patch logically scoped; avoid mixing unrelated mechanical and behavioral changes.
+- Preserve dependency-safe series ordering (prep/enabler patches before dependent functional patches).
 - Never claim "fixed" without line-level evidence.
 - If uncertain, state uncertainty explicitly and list what remains risky.
 - No workflow chatter, no meta commentary, no skill-loading commentary.
 - Never hide residual uncertainty; surface it under `## Residual Risks` with concrete evidence.
+- Cover-letter `Changes since vN` must capture technical deltas; never use tool/workflow-only changelog bullets.
 
 ## Kernel-Specific Focus
 
 - PM-runtime get/put pairing and error unwind symmetry.
 - Shared rails/refcount ownership (no unconditional force-off if shared).
 - PRE/POST DAPM event sequencing correctness.
+- Helper conversion preconditions (required hooks/init paths) to avoid recursive/dependency breakage.
+- Functional tunable changes (autosuspend delays, vote windows, timeouts) need explicit rationale in commit/cover text.
 - Side effects on related symbols/subsystems.
 
 ## Prior Context

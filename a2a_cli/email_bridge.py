@@ -4,6 +4,7 @@ import email
 import imaplib
 import json
 import os
+import re
 import secrets
 import shlex
 import sqlite3
@@ -17,6 +18,8 @@ from pathlib import Path
 from typing import Any
 
 from .email_notify import send_email
+
+_LORE_URL_RE = re.compile(r"https?://lore\.kernel\.org/(?:all|r)/[^\s<>()\"']+", re.IGNORECASE)
 
 
 def utc_now() -> str:
@@ -67,6 +70,7 @@ class BridgeConfig:
     default_lore_out_dir: str
     default_max_rounds: int
     approval_token_ttl_min: int
+    auto_detect_requests: bool
     python_bin: str
 
 
@@ -122,6 +126,10 @@ def load_bridge_config(root: Path, overrides: dict[str, Any]) -> BridgeConfig:
         overrides.get("approval_token_ttl_min") or bridge_cfg.get("approval_token_ttl_min") or 720,
         720,
     )
+    auto_detect_requests = _is_yes(
+        overrides.get("auto_detect_requests"),
+        default=_is_yes(bridge_cfg.get("auto_detect_requests"), default=False),
+    )
 
     return BridgeConfig(
         root=root,
@@ -139,6 +147,7 @@ def load_bridge_config(root: Path, overrides: dict[str, Any]) -> BridgeConfig:
         default_lore_out_dir=lore_fetch_dir,
         default_max_rounds=_safe_int(payload.get("default_max_rounds", 3), 3),
         approval_token_ttl_min=max(10, approval_token_ttl_min),
+        auto_detect_requests=bool(auto_detect_requests),
         python_bin=str(overrides.get("python_bin") or os.getenv("PYTHON", "") or "python"),
     )
 
@@ -465,6 +474,43 @@ def parse_a2a_command(subject: str, body: str) -> dict[str, Any]:
         "params": params,
         "raw": cmd_line,
     }
+
+
+def _trim_url_token(value: str) -> str:
+    out = value.strip()
+    while out and out[-1] in {".", ",", ";", ":", "!", "?", ")", "]", "}"}:
+        out = out[:-1]
+    return out
+
+
+def _extract_lore_url(text: str) -> str:
+    if not text.strip():
+        return ""
+    match = _LORE_URL_RE.search(text)
+    if not match:
+        return ""
+    return _trim_url_token(match.group(0))
+
+
+def _infer_auto_run_request(subject: str, body: str, attachments: list[Path]) -> dict[str, Any] | None:
+    patch_files = [p for p in attachments if p.suffix.lower() in {".patch", ".diff"}]
+    if patch_files:
+        return {
+            "command": "run",
+            "mode": "attachment",
+            "params": {},
+            "raw": "AUTO RUN ATTACHMENT",
+        }
+
+    lore_url = _extract_lore_url("\n".join([subject or "", body or ""]))
+    if lore_url:
+        return {
+            "command": "run",
+            "mode": "lore",
+            "params": {"URL": lore_url},
+            "raw": f"AUTO RUN LORE URL={lore_url}",
+        }
+    return None
 
 
 def _list_sessions(root: Path, limit: int = 12) -> list[dict[str, Any]]:
@@ -945,7 +991,6 @@ def process_incoming_once(cfg: BridgeConfig, store: BridgeStore) -> int:
             sender = _extract_sender_addr(msg)
             subject = str(msg.get("Subject") or "").strip()
             body = _extract_text_body(msg)
-            parsed = parse_a2a_command(subject, body)
             if store.is_processed(message_id):
                 continue
 
@@ -954,13 +999,18 @@ def process_incoming_once(cfg: BridgeConfig, store: BridgeStore) -> int:
                     message_id=message_id,
                     sender=sender,
                     subject=subject,
-                    command=str(parsed.get("raw") or ""),
+                    command="",
                     status="denied",
                     error="sender not allowlisted",
                 )
                 continue
 
             attachments = _save_patch_attachments(cfg, msg, message_id)
+            parsed = parse_a2a_command(subject, body)
+            if str(parsed.get("command") or "").lower() in {"", "none"} and cfg.auto_detect_requests:
+                inferred = _infer_auto_run_request(subject, body, attachments)
+                if inferred is not None:
+                    parsed = inferred
             status, response = handle_command(cfg, store, sender, parsed, attachments)
             _send_response(
                 cfg,
@@ -999,6 +1049,7 @@ def run_bridge_once(root: Path, overrides: dict[str, Any] | None = None) -> dict
             "imap_enabled": bool(cfg.imap_host and cfg.imap_user and cfg.imap_password),
             "state_db": str(cfg.state_db),
             "inbox_dir": str(cfg.inbox_dir),
+            "auto_detect_requests": bool(cfg.auto_detect_requests),
             "poll_sec": int(cfg.poll_sec),
         }
     finally:
@@ -1039,5 +1090,6 @@ def run_bridge_loop(
         "imap_enabled": bool(cfg.imap_host and cfg.imap_user and cfg.imap_password),
         "state_db": str(cfg.state_db),
         "inbox_dir": str(cfg.inbox_dir),
+        "auto_detect_requests": bool(cfg.auto_detect_requests),
         "poll_sec": int(cfg.poll_sec),
     }

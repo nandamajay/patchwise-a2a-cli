@@ -13,6 +13,9 @@ from .conflict_resolver import ConflictError, ConflictResolver
 
 
 _REV_RE = re.compile(r"^(?P<prefix>.*?)(?P<sep>[_-])v(?P<num>\d+)$", re.IGNORECASE)
+_SERIES_LINK_RE = re.compile(r"^(?:Link:|v\d+:)", re.IGNORECASE)
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+_LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+")
 
 
 def _utc_now() -> str:
@@ -70,16 +73,63 @@ def _find_git_root(path: Path) -> Path:
     raise RuntimeError(f"No git repository found for path: {path}")
 
 
+def _is_cover_patch(path: Path) -> bool:
+    return path.name.startswith("0000")
+
+
+def _read_series_file(series_path: Path) -> list[Path]:
+    rows: list[Path] = []
+    try:
+        lines = series_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return rows
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        patch = (series_path.parent / line).resolve()
+        if patch.is_file() and patch.suffix == ".patch":
+            rows.append(patch)
+    return rows
+
+
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path.resolve())
+    return deduped
+
+
 def _collect_patch_series(watch_path: Path) -> list[Path]:
     if watch_path.is_file():
         if watch_path.suffix != ".patch":
             raise RuntimeError(f"watch_path file is not a patch: {watch_path}")
-        return [watch_path]
+        if _is_cover_patch(watch_path):
+            raise RuntimeError(f"watch_path points to a cover-letter patch only: {watch_path}")
+        return [watch_path.resolve()]
     if not watch_path.is_dir():
         raise RuntimeError(f"watch_path not found: {watch_path}")
-    patches = sorted(watch_path.glob("*.patch"))
+
+    # Prefer explicit series ordering when present (supports nested lore layouts).
+    series_files = sorted(watch_path.rglob("series"))
+    if series_files:
+        ordered: list[Path] = []
+        for series_file in series_files:
+            ordered.extend(_read_series_file(series_file))
+        patches = [p for p in _dedupe_paths(ordered) if not _is_cover_patch(p)]
+        if patches:
+            return patches
+
+    # Fallback: recurse for all patches in lexical order.
+    patches = sorted(watch_path.rglob("*.patch"))
+    patches = [p.resolve() for p in patches if not _is_cover_patch(p)]
     if not patches:
-        raise RuntimeError(f"No patch files found in watch_path: {watch_path}")
+        raise RuntimeError(f"No non-cover patch files found in watch_path: {watch_path}")
     return patches
 
 
@@ -118,59 +168,169 @@ def _load_resolved_findings(report_dir: Path) -> list[dict]:
 def _find_cover_letter(path: Path) -> Path | None:
     if not path.is_dir():
         return None
-    for candidate in sorted(path.glob("0000*.patch")):
+
+    for candidate in sorted(path.rglob("0000*.patch")):
+        return candidate
+    for candidate in sorted(path.rglob("*.cover")):
         return candidate
     return None
+
+
+def _collect_previous_links(previous_cover: Path | None) -> list[str]:
+    links: list[str] = []
+    if previous_cover is None or not previous_cover.exists():
+        return links
+    for line in previous_cover.read_text(encoding="utf-8", errors="replace").splitlines():
+        text = line.strip()
+        if _SERIES_LINK_RE.match(text):
+            links.append(text)
+    return links
+
+
+def _clean_changelog_row(raw: str) -> str:
+    line = _MARKDOWN_LINK_RE.sub(r"\1", str(raw or "")).strip()
+    line = _LIST_PREFIX_RE.sub("", line)
+    line = re.sub(r"\s+", " ", line).strip()
+    if line.endswith((".", ":")):
+        line = line[:-1].strip()
+    return line
+
+
+def _resolved_finding_changelog_rows(resolved_findings: list[dict], limit: int = 8) -> list[str]:
+    rows: list[str] = []
+    seen: set[str] = set()
+    by_source: dict[str, str] = {}
+    for finding in resolved_findings:
+        title = _clean_changelog_row(str(finding.get("title") or finding.get("description") or ""))
+        if not title:
+            continue
+        loc = str(finding.get("location") or "").strip()
+        row = f"{title} ({loc})" if loc else title
+        source = str(finding.get("source_comment_id") or finding.get("id") or "").strip()
+        if source:
+            by_source[source] = row
+            continue
+        key = row.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(row)
+        if len(rows) >= limit:
+            break
+    merged = rows + list(by_source.values())
+    if not merged:
+        return []
+    deduped: list[str] = []
+    merged_seen: set[str] = set()
+    for row in merged:
+        key = row.lower()
+        if key in merged_seen:
+            continue
+        merged_seen.add(key)
+        deduped.append(row)
+        if len(deduped) >= limit:
+            break
+    return deduped
+
+
+def _latest_builder_change_rows(report_dir: Path, limit: int = 8) -> list[str]:
+    files = sorted(report_dir.glob("round-*-builder.md"))
+    if not files:
+        return []
+    latest = files[-1]
+    try:
+        lines = latest.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+
+    rows: list[str] = []
+    seen: set[str] = set()
+    in_changes = False
+    for line in lines:
+        heading = line.strip().lower()
+        if heading == "## changes":
+            in_changes = True
+            continue
+        if in_changes and heading.startswith("## "):
+            break
+        if not in_changes:
+            continue
+        if not _LIST_PREFIX_RE.match(line):
+            continue
+        clean = _clean_changelog_row(line)
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(clean)
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _build_cover_changelog_lines(report_dir: Path, resolved_findings: list[dict], limit: int = 8) -> list[str]:
+    rows = _latest_builder_change_rows(report_dir, limit=limit)
+    if rows:
+        return rows[:limit]
+    rows = _resolved_finding_changelog_rows(resolved_findings, limit=limit)
+    if rows:
+        return rows[:limit]
+    return [
+        "Technical delta summary unavailable from session artifacts; update this section with manual vN changes before posting"
+    ]
 
 
 def _generate_cover_letter_template(
     out_dir: Path,
     next_version: int,
-    resolved_findings: list[dict],
+    changelog_lines: list[str],
     previous_cover: Path | None,
 ) -> Path:
     cover = _find_cover_letter(out_dir)
     if cover is None:
         cover = out_dir / "0000-cover-letter.patch"
 
-    old_links: list[str] = []
-    if previous_cover and previous_cover.exists():
-        for line in previous_cover.read_text(encoding="utf-8", errors="replace").splitlines():
-            if line.strip().lower().startswith("link:"):
-                old_links.append(line.strip())
+    old_links = _collect_previous_links(previous_cover)
+    prev_version = max(1, next_version - 1)
 
     lines = [
-        f"Changes in v{next_version}:",
+        f"Changes since v{prev_version}:",
     ]
-    if resolved_findings:
-        for finding in resolved_findings:
-            title = str(finding.get("title") or finding.get("description") or "Resolved review finding")
-            loc = str(finding.get("location") or "").strip()
-            fid = str(finding.get("id") or finding.get("source_comment_id") or "").strip()
-            entry = f"- {title}"
-            if loc:
-                entry += f" ({loc})"
-            if fid:
-                entry += f" [{fid}]"
-            lines.append(entry)
+    if changelog_lines:
+        for row in changelog_lines:
+            clean = _clean_changelog_row(row)
+            if not clean:
+                continue
+            lines.append(f"- {clean}")
     else:
-        lines.append("- No resolved findings recorded in session artifacts.")
+        lines.append("- Technical delta summary unavailable from session artifacts; add manual vN changelog before posting.")
 
     if old_links:
         lines.append("")
-        lines.append("Prior links preserved:")
         lines.extend(old_links)
 
     content = "\n".join(lines) + "\n"
     if cover.exists():
         existing = cover.read_text(encoding="utf-8", errors="replace")
-        if "Changes in v" not in existing:
+        if "Changes in v" not in existing and "Changes since v" not in existing:
             cover.write_text(existing + "\n" + content, encoding="utf-8")
         else:
             cover.write_text(existing, encoding="utf-8")
     else:
         cover.write_text(content, encoding="utf-8")
     return cover
+
+
+def _write_series_manifest(out_dir: Path) -> Path | None:
+    patches = sorted(p for p in out_dir.glob("*.patch") if p.is_file())
+    if not patches:
+        return None
+    series = out_dir / "series"
+    lines = [p.name for p in patches]
+    series.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return series
 
 
 def _detect_upstream_drift(repo: Path) -> dict:
@@ -251,7 +411,7 @@ def respin(
 
     source_dir = watch_path if watch_path.is_dir() else watch_path.parent
     out_dir, source_version, next_version = next_version_path(source_dir, auto_increment=auto_increment)
-    output_copy_dir = a2a_dir / "output" / session_id / f"v{next_version}"
+    output_copy_dir = a2a_dir / "patches" / session_id / f"v{next_version}"
     report_dir = a2a_dir / "reports" / session_id
     state_dir = a2a_dir / "respin_state"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -347,10 +507,12 @@ def respin(
             "--output-directory",
             str(out_dir),
         )
+        _write_series_manifest(out_dir)
 
         previous_cover = _find_cover_letter(source_dir)
         resolved_findings = _load_resolved_findings(report_dir)
-        _generate_cover_letter_template(out_dir, next_version, resolved_findings, previous_cover)
+        changelog_lines = _build_cover_changelog_lines(report_dir, resolved_findings)
+        _generate_cover_letter_template(out_dir, next_version, changelog_lines, previous_cover)
 
         if output_copy_dir.exists():
             shutil.rmtree(output_copy_dir)

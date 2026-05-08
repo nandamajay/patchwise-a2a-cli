@@ -45,7 +45,7 @@ def test_render_round_table_all_fields_present() -> None:
     assert "ARYABHATTA" in out
     assert "Findings: total=4 open=2 closed=2 new=1 resolved=2" in out
     assert "Prior Comments: received=6 open=1 closed=5" in out
-    assert "Elapsed: 92s" in out
+    assert "Elapsed: 00:01:32" in out
 
 
 def test_render_finding_card_severity_colours() -> None:

@@ -1,6 +1,7 @@
 import argparse
 import builtins
 import difflib
+import fcntl
 import hashlib
 import json
 import os
@@ -11,9 +12,12 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
+from html import escape
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 from urllib.parse import unquote, urlparse
+from contextlib import contextmanager
+from uuid import uuid4
 
 from .adapters.shell_adapter import run_shell_command
 from .config import A2A_DIRNAME, default_config, default_state, dump_json, load_json
@@ -72,6 +76,11 @@ _REV_PREFIX_RE = re.compile(r"^v(?P<num>\d+)-(?P<rest>.+)$", re.IGNORECASE)
 _VOLATILE_SOURCE_ID_RE = re.compile(r"^(?:new|round\d+-new|issue-temp)[-:]", re.IGNORECASE)
 _PATCH_SUBJECT_LINE_RE = re.compile(r"^(Subject:\s*\[PATCH)(?P<body>[^\]]*)(\].*)$", re.IGNORECASE)
 _PATCH_VERSION_TOKEN_RE = re.compile(r"\bv(?P<num>\d+)\b", re.IGNORECASE)
+_PATCH_INDEX_TOKEN_RE = re.compile(r"^\d+/\d+$")
+_REV_TOKEN_LOOSE_RE = re.compile(r"(?<![A-Za-z0-9])v(?P<num>\d+)(?![A-Za-z0-9])", re.IGNORECASE)
+_PATCHSET_VERSION_DIR_RE = re.compile(r"^v(?P<num>\d+)$", re.IGNORECASE)
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+_LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+")
 _CONSOLE = Console() if Console else None
 
 
@@ -197,6 +206,60 @@ def _elapsed_seconds(started_at: str | None, ended_at: str | None) -> int | None
         return None
     elapsed = int((end_dt - start_dt).total_seconds())
     return max(0, elapsed)
+
+
+def _format_elapsed_hms(value: object) -> str | None:
+    try:
+        total = int(value) if value is not None else None
+    except (TypeError, ValueError):
+        total = None
+    if total is None or total < 0:
+        return None
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    seconds = total % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def _normalize_path_for_report(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "://" in text:
+        return text
+    return str(Path(text).expanduser().resolve())
+
+
+def _lore_link_from_session(session: dict) -> str:
+    lore = session.get("lore")
+    if isinstance(lore, dict):
+        msgid = str(lore.get("message_id") or "").strip()
+        if msgid:
+            return f"https://lore.kernel.org/r/{msgid}"
+    return ""
+
+
+def _collect_patch_versions_for_session(root: Path, session_id: str) -> list[dict]:
+    base = (root / A2A_DIRNAME / "patches" / session_id).resolve()
+    if not base.is_dir():
+        return []
+
+    rows: list[dict] = []
+    for child in base.iterdir():
+        if not child.is_dir():
+            continue
+        m = _PATCHSET_VERSION_DIR_RE.match(child.name)
+        ver = int(m.group("num")) if m else None
+        rows.append(
+            {
+                "name": child.name,
+                "version": ver,
+                "path": str(child.resolve()),
+            }
+        )
+
+    rows.sort(key=lambda item: (item.get("version") is None, int(item.get("version") or 0), str(item.get("name") or "")))
+    return rows
 
 
 def _extract_lore_message_id(value: str) -> str:
@@ -364,9 +427,24 @@ def _report_dir(root: Path, session_id: str) -> Path:
     return root / A2A_DIRNAME / "reports" / session_id
 
 
-def _next_session_id() -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
-    return f"sess-{stamp}"
+def _task_slug(task: str | None, max_len: int = 24) -> str:
+    text = str(task or "").strip().lower()
+    if not text:
+        return ""
+    slug = re.sub(r"[^a-z0-9]+", "-", text)
+    slug = re.sub(r"-{2,}", "-", slug).strip("-")
+    if not slug:
+        return ""
+    return slug[:max_len].rstrip("-")
+
+
+def _next_session_id(task: str | None = None) -> str:
+    day = datetime.now(timezone.utc).strftime("%Y%m%d")
+    token = uuid4().hex[:6]
+    slug = _task_slug(task, max_len=36)
+    if slug:
+        return f"sess-{slug}-{day}-{token}"
+    return f"sess-{day}-{token}"
 
 
 def _resolve_builder_display_name(session: dict | None = None, cfg: dict | None = None) -> str:
@@ -394,37 +472,80 @@ def _resolve_reviewer_display_name(session: dict | None = None, cfg: dict | None
 
 
 def _increment_revision_stem(stem: str) -> str:
-    prefix_match = _REV_PREFIX_RE.match(stem)
-    if prefix_match:
-        num = int(prefix_match.group("num"))
-        return f"v{num + 1}-{prefix_match.group('rest')}"
-
-    trailing_match = _REV_TRAILING_RE.match(stem)
-    if trailing_match:
-        num = int(trailing_match.group("num"))
-        return (
-            f"{trailing_match.group('prefix')}"
-            f"{trailing_match.group('sep')}v{num + 1}"
-        )
-
+    current = _extract_revision_from_name(stem)
+    if current > 0:
+        return _set_revision_stem(stem, current + 1)
     return f"v2-{stem}"
 
 
-def _default_respin_output_path(source: Path) -> Path:
+def _extract_revision_from_name(name: str) -> int:
+    detected = 0
+    prefix_match = _REV_PREFIX_RE.match(name)
+    if prefix_match:
+        detected = max(detected, int(prefix_match.group("num")))
+
+    trailing_match = _REV_TRAILING_RE.match(name)
+    if trailing_match:
+        detected = max(detected, int(trailing_match.group("num")))
+
+    for token in _REV_TOKEN_LOOSE_RE.finditer(name):
+        try:
+            detected = max(detected, int(token.group("num")))
+        except ValueError:
+            continue
+    return detected
+
+
+def _set_revision_stem(stem: str, target_version: int) -> str:
+    prefix_match = _REV_PREFIX_RE.match(stem)
+    if prefix_match:
+        return f"v{target_version}-{prefix_match.group('rest')}"
+
+    trailing_match = _REV_TRAILING_RE.match(stem)
+    if trailing_match:
+        return (
+            f"{trailing_match.group('prefix')}"
+            f"{trailing_match.group('sep')}v{target_version}"
+        )
+
+    loose_match = _REV_TOKEN_LOOSE_RE.search(stem)
+    if loose_match:
+        return (
+            f"{stem[:loose_match.start()]}"
+            f"v{target_version}"
+            f"{stem[loose_match.end():]}"
+        )
+
+    return f"v{target_version}-{stem}"
+
+
+def _default_respin_output_path(source: Path, *, next_version: int | None = None) -> Path:
     if source.is_dir():
-        name_match = _REV_TRAILING_RE.match(source.name)
+        name = source.name
+        target = next_version if next_version is not None else _extract_revision_from_name(name) + 1
+        if target < 2:
+            target = 2
+
+        name_match = _REV_TRAILING_RE.match(name)
         if name_match:
-            num = int(name_match.group("num"))
-            next_name = (
-                f"{name_match.group('prefix')}"
-                f"{name_match.group('sep')}v{num + 1}"
-            )
+            next_name = f"{name_match.group('prefix')}{name_match.group('sep')}v{target}"
         else:
-            next_name = f"{source.name}_v2"
+            prefix_match = _REV_PREFIX_RE.match(name)
+            if prefix_match:
+                next_name = f"v{target}-{prefix_match.group('rest')}"
+            else:
+                loose_match = _REV_TOKEN_LOOSE_RE.search(name)
+                if loose_match:
+                    next_name = f"{name[:loose_match.start()]}v{target}{name[loose_match.end():]}"
+                else:
+                    next_name = f"{name}_v{target}"
         return source.parent / next_name
 
     if source.is_file():
-        next_stem = _increment_revision_stem(source.stem)
+        if next_version is not None:
+            next_stem = _set_revision_stem(source.stem, next_version)
+        else:
+            next_stem = _increment_revision_stem(source.stem)
         return source.with_name(f"{next_stem}{source.suffix}")
 
     raise RuntimeError(f"Source path does not exist: {source}")
@@ -451,9 +572,302 @@ def _copy_respin_source(source: Path, output: Path, force: bool) -> None:
     raise RuntimeError(f"Respin source path does not exist: {source}")
 
 
-def _bump_patch_subject_versions(patch_files: list[Path]) -> int:
-    detected_max = 1
+def _read_series_patch_files(series_file: Path) -> list[Path]:
+    try:
+        lines = series_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+
+    patch_files: list[Path] = []
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        patch_path = (series_file.parent / line).resolve()
+        if patch_path.is_file() and patch_path.suffix == ".patch":
+            patch_files.append(patch_path)
+    return patch_files
+
+
+def _read_series_entries(series_file: Path) -> list[str]:
+    try:
+        lines = series_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    out: list[str] = []
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        out.append(line)
+    return out
+
+
+def _is_cover_patch_file(path: Path) -> bool:
+    name = path.name.lower()
+    return name.endswith(".patch") and name.startswith("0000")
+
+
+def _canonical_series_patch_entries(patch_dir: Path) -> list[str]:
+    series_file = patch_dir / "series"
+    entries: list[str] = []
+    if series_file.exists():
+        for entry in _read_series_entries(series_file):
+            candidate = (patch_dir / entry).resolve()
+            if not candidate.is_file() or candidate.suffix != ".patch":
+                continue
+            if _is_cover_patch_file(candidate):
+                continue
+            entries.append(entry)
+    if not entries:
+        entries = [p.name for p in sorted(patch_dir.glob("*.patch")) if not _is_cover_patch_file(p)]
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if entry in seen:
+            continue
+        seen.add(entry)
+        deduped.append(entry)
+    return deduped
+
+
+def _collect_active_patch_files(path: Path) -> list[Path]:
+    if path.is_file():
+        if path.suffix != ".patch":
+            raise RuntimeError(f"Patch file expected, got: {path}")
+        return [path]
+    if not path.is_dir():
+        raise RuntimeError(f"Patch path not found: {path}")
+
+    series_resolved: list[Path] = []
+    for series_file in sorted(path.rglob("series")):
+        series_resolved.extend(_read_series_patch_files(series_file))
+    if series_resolved:
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for patch in series_resolved:
+            key = str(patch)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(patch)
+        return deduped
+
+    return sorted(p for p in path.rglob("*.patch") if p.is_file())
+
+
+def _materialize_cover_patch(output: Path) -> Path | None:
+    if not output.is_dir():
+        return None
+    cover_candidates = sorted(p for p in output.rglob("*.cover") if p.is_file())
+    patch_dirs = sorted(p for p in output.rglob("*.patches") if p.is_dir())
+    if not cover_candidates or not patch_dirs:
+        return None
+
+    cover_src = cover_candidates[0]
+    patch_dir = patch_dirs[0]
+    cover_patch = patch_dir / "0000-cover-letter.patch"
+    cover_patch.write_text(cover_src.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+
+    series_path = patch_dir / "series"
+    series_entries = _canonical_series_patch_entries(patch_dir)
+    _rewrite_series_file(series_path, series_entries, include_cover=True)
+    return cover_patch
+
+
+def _patchset_name_for_path(path: Path) -> str:
+    name = path.name
+    if name.endswith(".patches"):
+        return name[: -len(".patches")]
+    if name.endswith(".cover"):
+        return name[: -len(".cover")]
+    if name.endswith(".mbx"):
+        return name[: -len(".mbx")]
+    return path.stem
+
+
+def _normalize_subject_body(body: str, *, version: int, index: int, total: int) -> str:
+    tokens = [tok for tok in body.strip().split() if tok]
+    kept: list[str] = []
+    for tok in tokens:
+        if _PATCH_VERSION_TOKEN_RE.fullmatch(tok):
+            continue
+        if _PATCH_INDEX_TOKEN_RE.fullmatch(tok):
+            continue
+        kept.append(tok)
+    kept.extend([f"v{version}", f"{index}/{total}"])
+    return " " + " ".join(kept)
+
+
+def _rewrite_subject_header(path: Path, *, version: int, index: int, total: int) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+
+    changed = False
+    out_lines: list[str] = []
+    updated = False
+    for line in lines:
+        if updated:
+            out_lines.append(line)
+            continue
+        m = _PATCH_SUBJECT_LINE_RE.match(line)
+        if m:
+            new_body = _normalize_subject_body(m.group("body") or "", version=version, index=index, total=total)
+            new_line = f"{m.group(1)}{new_body}{m.group(3)}"
+            out_lines.append(new_line)
+            updated = True
+            changed = changed or (new_line != line)
+            continue
+        if line.lower().startswith("subject:"):
+            subject_text = line.split(":", 1)[1].strip()
+            new_line = f"Subject: [PATCH v{version} {index}/{total}] {subject_text}".rstrip()
+            out_lines.append(new_line)
+            updated = True
+            changed = changed or (new_line != line)
+            continue
+        out_lines.append(line)
+    if changed:
+        path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+    return changed
+
+
+def _render_mbox_from_patch_files(patch_files: list[Path]) -> str:
+    chunks: list[str] = []
     for patch in patch_files:
+        text = patch.read_text(encoding="utf-8", errors="replace").rstrip("\n")
+        chunks.append("From git@z Thu Jan  1 00:00:00 1970\n" + text + "\n")
+    return "\n".join(chunks) + ("\n" if chunks else "")
+
+
+def _rewrite_series_file(series_path: Path, entries: list[str], include_cover: bool) -> None:
+    lines: list[str] = []
+    if include_cover:
+        lines.append("0000-cover-letter.patch")
+    lines.extend(entries)
+    series_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _synchronize_patchset_artifacts(output: Path, next_version: int) -> int:
+    if output.is_file():
+        _rewrite_subject_header(output, version=next_version, index=1, total=1)
+        return 1
+    if not output.is_dir():
+        return 0
+
+    patch_dirs = sorted(p for p in output.rglob("*.patches") if p.is_dir())
+    patch_map: dict[Path, list[Path]] = {}
+    non_cover_total = 0
+    for patch_dir in patch_dirs:
+        entries = _canonical_series_patch_entries(patch_dir)
+        patch_paths = [(patch_dir / entry).resolve() for entry in entries]
+        patch_paths = [p for p in patch_paths if p.is_file() and p.suffix == ".patch" and not _is_cover_patch_file(p)]
+        if not patch_paths:
+            continue
+        patch_map[patch_dir] = patch_paths
+        total = len(patch_paths)
+        non_cover_total += total
+        for idx, patch_path in enumerate(patch_paths, start=1):
+            _rewrite_subject_header(patch_path, version=next_version, index=idx, total=total)
+        cover_patch = patch_dir / "0000-cover-letter.patch"
+        if cover_patch.exists():
+            _rewrite_subject_header(cover_patch, version=next_version, index=0, total=total)
+        _rewrite_series_file(patch_dir / "series", [p.name for p in patch_paths], include_cover=cover_patch.exists())
+
+    loose_patches = sorted(
+        p for p in output.glob("*.patch") if p.is_file() and not _is_cover_patch_file(p)
+    )
+    if not patch_map and loose_patches:
+        total = len(loose_patches)
+        non_cover_total += total
+        for idx, patch_path in enumerate(loose_patches, start=1):
+            _rewrite_subject_header(patch_path, version=next_version, index=idx, total=total)
+        cover_patch = output / "0000-cover-letter.patch"
+        if cover_patch.exists():
+            _rewrite_subject_header(cover_patch, version=next_version, index=0, total=total)
+        _rewrite_series_file(output / "series", [p.name for p in loose_patches], include_cover=cover_patch.exists())
+
+    named_patchsets: dict[str, list[Path]] = {}
+    for patch_dir, patch_paths in patch_map.items():
+        named_patchsets[_patchset_name_for_path(patch_dir)] = patch_paths
+
+    default_patchset: list[Path] = []
+    if named_patchsets:
+        default_patchset = next(iter(named_patchsets.values()))
+    elif loose_patches:
+        default_patchset = loose_patches
+
+    for cover_path in sorted(output.rglob("*.cover")):
+        patch_paths = named_patchsets.get(_patchset_name_for_path(cover_path), default_patchset)
+        if not patch_paths:
+            continue
+        _rewrite_subject_header(cover_path, version=next_version, index=0, total=len(patch_paths))
+
+    for mbx_path in sorted(output.rglob("*.mbx")):
+        patch_paths = named_patchsets.get(_patchset_name_for_path(mbx_path), default_patchset)
+        if not patch_paths:
+            continue
+        mbx_path.write_text(_render_mbox_from_patch_files(patch_paths), encoding="utf-8")
+
+    return non_cover_total
+
+
+def _augment_cover_letter_history(
+    path: Path,
+    next_version: int,
+    lore_link: str | None,
+    changelog_lines: list[str] | None = None,
+) -> None:
+    if not path.is_file():
+        return
+    prev = max(1, next_version - 1)
+    marker = f"Changes since v{prev}:"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    if marker in text:
+        return
+
+    lines = text.splitlines()
+    sep_idx = -1
+    for idx, line in enumerate(lines):
+        if line.strip() == "---":
+            sep_idx = idx
+            break
+
+    block: list[str] = []
+    link = (lore_link or "").strip()
+    if link:
+        vline = f"v{prev}: {link}"
+        if not any(x.strip().lower().startswith(f"v{prev}:") for x in lines):
+            block.append(vline)
+        if not any(x.strip().lower().startswith("link:") for x in lines):
+            block.append(f"Link: {link}")
+    if block:
+        block.append("")
+    block.append(marker)
+    change_rows = [str(x).strip() for x in (changelog_lines or []) if str(x).strip()]
+    if change_rows:
+        for line in change_rows:
+            block.append(line if line.startswith("- ") else f"- {line}")
+    else:
+        block.append("- Technical delta summary unavailable from session artifacts; add manual vN changelog before posting.")
+    block.append("")
+    if sep_idx < 0:
+        out_lines = lines + ["", "---", *block]
+    else:
+        out_lines = lines[: sep_idx + 1] + block + lines[sep_idx + 1 :]
+    path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+
+
+def _detect_max_subject_version(paths: Iterable[Path]) -> int:
+    detected_max = 0
+    for patch in paths:
         try:
             text = patch.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -468,8 +882,40 @@ def _bump_patch_subject_versions(patch_files: list[Path]) -> int:
                     detected_max = max(detected_max, int(vm.group("num")))
                 except ValueError:
                     pass
-            break
-    target = detected_max + 1
+    return detected_max
+
+
+def _detect_current_patchset_version(source: Path, patch_files: list[Path]) -> int:
+    candidates: list[int] = [1, _extract_revision_from_name(source.name)]
+    subject_files: list[Path] = list(patch_files)
+    name_tokens: list[str] = [source.name]
+
+    if source.is_dir():
+        cover_files = sorted(source.rglob("*.cover"))
+        mbx_files = sorted(source.rglob("*.mbx"))
+        subject_files.extend(cover_files)
+        subject_files.extend(mbx_files)
+        for candidate in [*patch_files, *cover_files, *mbx_files]:
+            try:
+                rel_parts = candidate.relative_to(source).parts
+            except ValueError:
+                rel_parts = (candidate.name,)
+            name_tokens.extend(rel_parts)
+    else:
+        name_tokens.append(source.stem)
+
+    candidates.append(_detect_max_subject_version(subject_files))
+    for token in name_tokens:
+        candidates.append(_extract_revision_from_name(token))
+
+    return max(candidates)
+
+
+def _bump_patch_subject_versions(patch_files: list[Path], target_version: int | None = None) -> int:
+    detected_max = _detect_max_subject_version(patch_files)
+    target = int(target_version) if target_version is not None else detected_max + 1
+    if target < 2:
+        target = 2
 
     for patch in patch_files:
         try:
@@ -477,12 +923,9 @@ def _bump_patch_subject_versions(patch_files: list[Path]) -> int:
         except OSError:
             continue
 
-        replaced = False
+        changed = False
         out_lines: list[str] = []
         for line in text.splitlines():
-            if replaced:
-                out_lines.append(line)
-                continue
             m = _PATCH_SUBJECT_LINE_RE.match(line)
             if not m:
                 out_lines.append(line)
@@ -497,9 +940,9 @@ def _bump_patch_subject_versions(patch_files: list[Path]) -> int:
                 else:
                     new_body = f"{body} v{target}"
             out_lines.append(f"{m.group(1)}{new_body}{m.group(3)}")
-            replaced = True
+            changed = True
 
-        if replaced:
+        if changed:
             patch.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
 
     return target
@@ -581,6 +1024,104 @@ def _write_round_suggested_replies(
     return out_path
 
 
+def _resolved_finding_changelog_lines(root: Path, session_id: str, limit: int = 8) -> list[str]:
+    report_dir = _report_dir(root, session_id)
+    rows: list[str] = []
+    seen: set[str] = set()
+    by_source: dict[str, str] = {}
+
+    def _clean_row(raw: str) -> str:
+        line = _MARKDOWN_LINK_RE.sub(r"\1", str(raw or "")).strip()
+        line = _LIST_PREFIX_RE.sub("", line)
+        line = re.sub(r"\s+", " ", line).strip()
+        if line.endswith((".", ":")):
+            line = line[:-1].strip()
+        return line
+
+    builder_reports = sorted(report_dir.glob("round-*-builder.md"))
+    if builder_reports:
+        latest_builder = builder_reports[-1]
+        try:
+            lines = latest_builder.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            lines = []
+        in_changes = False
+        for line in lines:
+            heading = line.strip().lower()
+            if heading == "## changes":
+                in_changes = True
+                continue
+            if in_changes and heading.startswith("## "):
+                break
+            if not in_changes:
+                continue
+            if not _LIST_PREFIX_RE.match(line):
+                continue
+            clean = _clean_row(line)
+            if not clean:
+                continue
+            key = clean.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(clean)
+            if len(rows) >= limit:
+                break
+        if rows:
+            return rows[:limit]
+
+    rows = []
+    seen = set()
+
+    for path in sorted(report_dir.glob("round-*-findings.json")):
+        try:
+            payload = load_json(path)
+        except Exception:
+            continue
+        findings = payload.get("findings", [])
+        if not isinstance(findings, list):
+            continue
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            if str(finding.get("status", "open")).lower() != "closed":
+                continue
+            title = _clean_row(str(finding.get("title") or finding.get("description") or ""))
+            if not title:
+                continue
+            loc = str(finding.get("location") or "").strip()
+            source = str(finding.get("source_comment_id") or "").strip()
+            row = title
+            if loc:
+                row += f" ({loc})"
+            if source:
+                by_source[source] = row
+                continue
+            key = row.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
+
+    combined = rows + list(by_source.values())
+    if combined:
+        deduped: list[str] = []
+        dedupe_seen: set[str] = set()
+        for row in combined:
+            key = row.lower()
+            if key in dedupe_seen:
+                continue
+            dedupe_seen.add(key)
+            deduped.append(row)
+        combined = deduped
+
+    if combined:
+        return combined[:limit]
+    return [
+        "Technical delta summary unavailable from session artifacts; update this section with manual vN changes before posting"
+    ]
+
+
 def _generate_lore_next_version(root: Path, session: dict) -> dict:
     session_id = str(session.get("id") or "")
     watch_raw = str(session.get("watch_path") or "").strip()
@@ -590,25 +1131,58 @@ def _generate_lore_next_version(root: Path, session: dict) -> dict:
     if not source.exists():
         raise RuntimeError(f"Cannot generate next version: watch_path not found: {source}")
 
-    output = _default_respin_output_path(source)
-    _copy_respin_source(source, output, force=False)
+    source_patch_files = _collect_active_patch_files(source)
+    if not source_patch_files:
+        raise RuntimeError(f"No patch files found in source watch path: {source}")
 
-    patch_files: list[Path] = []
-    if output.is_file() and output.suffix == ".patch":
-        patch_files = [output]
-    elif output.is_dir():
-        patch_files = sorted(p for p in output.rglob("*.patch") if p.is_file())
+    current_version = _detect_current_patchset_version(source, source_patch_files)
+    next_version = max(2, current_version + 1)
+    output = root / A2A_DIRNAME / "patches" / session_id / f"v{next_version}"
+    while output.exists():
+        next_version += 1
+        output = root / A2A_DIRNAME / "patches" / session_id / f"v{next_version}"
+    _copy_respin_source(source, output, force=False)
+    _materialize_cover_patch(output)
+
+    patch_files = _collect_active_patch_files(output)
     if not patch_files:
         raise RuntimeError(f"No patch files found in generated output path: {output}")
 
-    next_version = _bump_patch_subject_versions(patch_files)
+    non_cover_patch_count = _synchronize_patchset_artifacts(output, next_version)
+    if non_cover_patch_count <= 0:
+        non_cover_patch_count = len([p for p in patch_files if not _is_cover_patch_file(p)])
+    if non_cover_patch_count <= 0:
+        non_cover_patch_count = len(patch_files)
+
+    lore_link = ""
+    lore_meta = session.get("lore")
+    if isinstance(lore_meta, dict):
+        msgid = str(lore_meta.get("message_id") or "").strip()
+        if msgid:
+            lore_link = f"https://lore.kernel.org/r/{msgid}"
+    changelog_lines = _resolved_finding_changelog_lines(root, session_id)
+    for cover_path in sorted(output.rglob("0000-cover-letter.patch")):
+        _augment_cover_letter_history(
+            cover_path,
+            next_version=next_version,
+            lore_link=lore_link or None,
+            changelog_lines=changelog_lines,
+        )
+    for cover_path in sorted(output.rglob("*.cover")):
+        _augment_cover_letter_history(
+            cover_path,
+            next_version=next_version,
+            lore_link=lore_link or None,
+            changelog_lines=changelog_lines,
+        )
+
     payload = {
         "status": "ok",
         "kind": "lore_copy",
         "session_id": session_id,
         "source_watch_path": str(source),
         "output_path": str(output),
-        "patch_count": len(patch_files),
+        "patch_count": int(non_cover_patch_count),
         "next_version": next_version,
         "generated_at": _now_utc(),
     }
@@ -633,6 +1207,601 @@ def _auto_generate_next_version(root: Path, session: dict) -> dict:
             fallback["fallback_reason"] = str(exc)
             return fallback
         raise
+
+
+def _subject_line(path: Path) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    for line in lines[:80]:
+        if line.lower().startswith("subject:"):
+            return line.strip()
+    return ""
+
+
+def _subject_index_total(path: Path) -> tuple[int | None, int | None]:
+    subject = _subject_line(path)
+    if not subject:
+        return None, None
+    m = _PATCH_SUBJECT_LINE_RE.match(subject)
+    if not m:
+        return None, None
+    for token in (m.group("body") or "").split():
+        if not _PATCH_INDEX_TOKEN_RE.fullmatch(token):
+            continue
+        try:
+            idx_text, total_text = token.split("/", 1)
+            return int(idx_text), int(total_text)
+        except ValueError:
+            return None, None
+    return None, None
+
+
+def _subject_core(path: Path) -> str:
+    subject = _subject_line(path)
+    if not subject:
+        return ""
+    core = re.sub(r"^\s*Subject:\s*", "", subject, flags=re.IGNORECASE).strip()
+    core = re.sub(r"^\[PATCH[^\]]*\]\s*", "", core, flags=re.IGNORECASE).strip()
+    core = re.sub(r"\s+", " ", core)
+    return core.lower()
+
+
+def _patch_touched_files(path: Path) -> set[str]:
+    touched: set[str] = set()
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return touched
+    for line in lines:
+        m = re.match(r"^diff --git a/(.+?) b/(.+)$", line.strip())
+        if not m:
+            continue
+        touched.add(m.group(2))
+    return touched
+
+
+def _mbx_subject_rows(path: Path) -> list[tuple[int | None, int | None]]:
+    rows: list[tuple[int | None, int | None]] = []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return rows
+    for line in lines:
+        if not line.lower().startswith("subject:"):
+            continue
+        if "[PATCH" not in line and "[patch" not in line:
+            continue
+        m = _PATCH_SUBJECT_LINE_RE.match(line.strip())
+        if not m:
+            continue
+        idx: int | None = None
+        total: int | None = None
+        for token in (m.group("body") or "").split():
+            if not _PATCH_INDEX_TOKEN_RE.fullmatch(token):
+                continue
+            try:
+                idx_text, total_text = token.split("/", 1)
+                idx = int(idx_text)
+                total = int(total_text)
+            except ValueError:
+                idx = None
+                total = None
+            break
+        rows.append((idx, total))
+    return rows
+
+
+def _validate_patchset_artifact_coherence(output_path: Path) -> list[str]:
+    issues: list[str] = []
+    if not output_path.exists():
+        return [f"output path missing: {output_path}"]
+
+    patch_dirs = sorted(p for p in output_path.rglob("*.patches") if p.is_dir())
+    if not patch_dirs:
+        patch_dirs = [output_path] if output_path.is_dir() else []
+
+    patchset_totals: dict[str, int] = {}
+    for patch_dir in patch_dirs:
+        patch_files = sorted(p for p in patch_dir.glob("*.patch") if p.is_file())
+        if not patch_files:
+            continue
+
+        series_path = patch_dir / "series"
+        series_entries = _read_series_entries(series_path) if series_path.exists() else [p.name for p in patch_files]
+        ordered_entries = [entry for entry in series_entries if (patch_dir / entry).is_file()]
+        if not ordered_entries:
+            ordered_entries = [p.name for p in patch_files]
+
+        cover_entries = [entry for entry in ordered_entries if _is_cover_patch_file(patch_dir / entry)]
+        non_cover_entries = [entry for entry in ordered_entries if not _is_cover_patch_file(patch_dir / entry)]
+        if not non_cover_entries:
+            issues.append(f"{patch_dir}: no non-cover patch entries found")
+            continue
+
+        if cover_entries and ordered_entries[0] not in cover_entries:
+            issues.append(f"{series_path}: cover patch is not first entry")
+
+        total = len(non_cover_entries)
+        patchset_totals[_patchset_name_for_path(patch_dir)] = total
+
+        for index, entry in enumerate(non_cover_entries, start=1):
+            patch_path = patch_dir / entry
+            idx, declared_total = _subject_index_total(patch_path)
+            if idx is None or declared_total is None:
+                issues.append(f"{patch_path}: missing subject index/total token")
+                continue
+            if idx != index or declared_total != total:
+                issues.append(
+                    f"{patch_path}: subject index/total {idx}/{declared_total} does not match expected {index}/{total}"
+                )
+
+        for entry in cover_entries[:1]:
+            cover_path = patch_dir / entry
+            idx, declared_total = _subject_index_total(cover_path)
+            if idx is None or declared_total is None:
+                issues.append(f"{cover_path}: missing cover subject index/total token")
+                continue
+            if idx != 0 or declared_total != total:
+                issues.append(
+                    f"{cover_path}: cover subject index/total {idx}/{declared_total} does not match expected 0/{total}"
+                )
+
+    for cover_path in sorted(output_path.rglob("*.cover")):
+        key = _patchset_name_for_path(cover_path)
+        if key not in patchset_totals:
+            continue
+        expected_total = patchset_totals[key]
+        idx, declared_total = _subject_index_total(cover_path)
+        if idx is None or declared_total is None:
+            issues.append(f"{cover_path}: missing cover subject index/total token")
+            continue
+        if idx != 0 or declared_total != expected_total:
+            issues.append(
+                f"{cover_path}: cover subject index/total {idx}/{declared_total} does not match expected 0/{expected_total}"
+            )
+
+    for mbx_path in sorted(output_path.rglob("*.mbx")):
+        key = _patchset_name_for_path(mbx_path)
+        if key not in patchset_totals:
+            continue
+        expected_total = patchset_totals[key]
+        rows = _mbx_subject_rows(mbx_path)
+        if not rows:
+            issues.append(f"{mbx_path}: no patch subject rows found")
+            continue
+        if len(rows) != expected_total:
+            issues.append(f"{mbx_path}: subject row count {len(rows)} does not match expected {expected_total}")
+            continue
+        for index, (idx, declared_total) in enumerate(rows, start=1):
+            if idx != index or declared_total != expected_total:
+                issues.append(
+                    f"{mbx_path}: row {index} has {idx}/{declared_total}, expected {index}/{expected_total}"
+                )
+
+    return issues
+
+
+def _validate_cover_changelog_quality(output_path: Path) -> list[str]:
+    issues: list[str] = []
+    cover_files = sorted(output_path.rglob("0000-cover-letter.patch"))
+    cover_files.extend(sorted(output_path.rglob("*.cover")))
+    seen: set[str] = set()
+    deduped_cover_files: list[Path] = []
+    for path in cover_files:
+        key = str(path.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped_cover_files.append(path)
+
+    banned_phrases = [
+        "automated respin",
+        "generated by a2a",
+        "auto-generated",
+        "generated by tool",
+    ]
+    for cover in deduped_cover_files:
+        try:
+            lines = cover.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            issues.append(f"{cover}: cannot read cover letter")
+            continue
+
+        marker_indexes = [idx for idx, line in enumerate(lines) if re.match(r"^\s*Changes since v\d+:\s*$", line)]
+        if not marker_indexes:
+            issues.append(f"{cover}: missing 'Changes since vN' section")
+            continue
+
+        for marker_idx in marker_indexes:
+            bullets: list[str] = []
+            for line in lines[marker_idx + 1 :]:
+                text = line.strip()
+                if not text and bullets:
+                    break
+                if not text:
+                    continue
+                if re.match(r"^\s*Changes since v\d+:\s*$", line):
+                    break
+                if re.match(r"^\s*v\d+:\s*", line):
+                    break
+                if text.startswith("- "):
+                    bullets.append(text)
+                    continue
+                if bullets and (line.startswith(" ") or line.startswith("\t")):
+                    continue
+            if not bullets:
+                issues.append(f"{cover}: empty changelog bullets under '{lines[marker_idx].strip()}'")
+                continue
+            for bullet in bullets:
+                lower = bullet.lower()
+                if any(phrase in lower for phrase in banned_phrases):
+                    issues.append(f"{cover}: non-technical/tool-meta changelog bullet '{bullet}'")
+                if "prior-msg:" in lower or "subsys-scan:" in lower:
+                    issues.append(f"{cover}: internal source id leaked in changelog bullet '{bullet}'")
+
+    return issues
+
+
+def _validate_respin_delta(source_watch_path: Path, output_path: Path) -> list[str]:
+    issues: list[str] = []
+    try:
+        source_patches = [p for p in _collect_active_patch_files(source_watch_path) if not _is_cover_patch_file(p)]
+    except Exception as exc:
+        return [f"cannot collect source patch files: {exc}"]
+    try:
+        output_patches = [p for p in _collect_active_patch_files(output_path) if not _is_cover_patch_file(p)]
+    except Exception as exc:
+        return [f"cannot collect generated patch files: {exc}"]
+
+    if len(source_patches) != len(output_patches):
+        issues.append(
+            f"patch count drift: source has {len(source_patches)} non-cover patches, output has {len(output_patches)}"
+        )
+
+    pair_count = min(len(source_patches), len(output_patches))
+    for idx in range(pair_count):
+        src = source_patches[idx]
+        out = output_patches[idx]
+        src_core = _subject_core(src)
+        out_core = _subject_core(out)
+        if src_core and out_core and src_core != out_core:
+            issues.append(
+                f"subject drift at patch index {idx + 1}: source='{src_core}' output='{out_core}'"
+            )
+        src_touched = _patch_touched_files(src)
+        out_touched = _patch_touched_files(out)
+        if src_touched and out_touched and src_touched != out_touched:
+            issues.append(
+                f"touched-file drift at patch index {idx + 1}: source={sorted(src_touched)} output={sorted(out_touched)}"
+            )
+
+    return issues
+
+
+def _extract_findings_from_agent_output(text: str) -> list[dict] | None:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+        if isinstance(payload, dict) and isinstance(payload.get("findings"), list):
+            return payload.get("findings")
+    except Exception:
+        pass
+
+    matches = list(re.finditer(r'(\{"findings"\s*:\s*\[.*?\]\})', raw, flags=re.S))
+    for match in reversed(matches):
+        candidate = match.group(1)
+        try:
+            payload = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(payload, dict) and isinstance(payload.get("findings"), list):
+            return payload.get("findings")
+    return None
+
+
+def _run_post_respin_reviewer_validation(
+    root: Path,
+    session: dict,
+    reviewer_cmd: str,
+    output_path: Path,
+) -> dict:
+    sid = str(session.get("id") or "")
+    cfg = _load_config_or_defaults(root)
+    reviewer_name = str(session.get("reviewer_name", "aryabhatta"))
+    report_dir = _report_dir(root, sid)
+    review_path = report_dir / "post-respin-review.md"
+    findings_path = report_dir / "post-respin-findings.json"
+    builder_placeholder = report_dir / "post-respin-builder.md"
+    logs_dir = root / A2A_DIRNAME / "logs" / sid
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    log_path = logs_dir / "post-respin-reviewer.log"
+
+    round_no = int(session.get("current_round", 1) or 1)
+    files = {
+        "report_dir": report_dir,
+        "builder": builder_placeholder,
+        "reviewer": review_path,
+        "findings": findings_path,
+    }
+    if not builder_placeholder.exists():
+        builder_placeholder.write_text("# post-respin placeholder\n", encoding="utf-8")
+
+    session_for_validation = dict(session)
+    session_for_validation["watch_path"] = str(output_path)
+    env = _agent_env(session_for_validation, round_no, files, "reviewer", cfg)
+    env["A2A_WATCH_PATH"] = str(output_path)
+    env["A2A_ROUND"] = f"{round_no}-post-respin"
+
+    worktrees = session.get("worktrees", {}) if isinstance(session.get("worktrees"), dict) else {}
+    cwd = Path(worktrees.get(reviewer_name, session.get("repo_path") or root))
+    result = run_shell_command(reviewer_cmd, cwd=cwd, env=env)
+
+    extracted_findings = None
+    if int(result.get("returncode", 1)) != 0 and not findings_path.exists():
+        extracted_findings = _extract_findings_from_agent_output(str(result.get("stdout") or ""))
+        if extracted_findings is None:
+            extracted_findings = _extract_findings_from_agent_output(str(result.get("stderr") or ""))
+        if extracted_findings is not None:
+            dump_json(findings_path, {"findings": extracted_findings})
+            open_count = len(
+                [
+                    row
+                    for row in extracted_findings
+                    if isinstance(row, dict) and str(row.get("status", "")).lower() != "closed"
+                ]
+            )
+            verdict = "LGTM" if open_count == 0 else "REJECT"
+            review_path.write_text(
+                "\n".join(
+                    [
+                        f"# Round {round_no}-post-respin: Aryabhatta Review",
+                        "",
+                        "## Verdict",
+                        "",
+                        f"- {verdict}",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+    fallback_result: dict | None = None
+    fallback_cmd = str(env.get("A2A_FALLBACK_REVIEWER_CMD") or "").strip()
+    fallback_used = False
+    if int(result.get("returncode", 1)) != 0 and not findings_path.exists() and fallback_cmd:
+        fallback_result = run_shell_command(fallback_cmd, cwd=cwd, env=env)
+        fallback_used = True
+
+    with log_path.open("w", encoding="utf-8") as fp:
+        fp.write("role=reviewer\n")
+        fp.write(f"round={round_no}-post-respin\n")
+        fp.write(f"cwd={cwd}\n")
+        fp.write(f"command={reviewer_cmd}\n")
+        fp.write(f"returncode={result.get('returncode')}\n\n")
+        fp.write("stdout:\n")
+        fp.write(result.get("stdout") or "")
+        fp.write("\n\nstderr:\n")
+        fp.write(result.get("stderr") or "")
+        if fallback_used and fallback_result is not None:
+            fp.write("\n\nfallback_command:\n")
+            fp.write(f"{fallback_cmd}\n")
+            fp.write(f"fallback_returncode={fallback_result.get('returncode')}\n\n")
+            fp.write("fallback_stdout:\n")
+            fp.write(fallback_result.get("stdout") or "")
+            fp.write("\n\nfallback_stderr:\n")
+            fp.write(fallback_result.get("stderr") or "")
+        fp.write("\n")
+
+    payload: dict = {
+        "ran": True,
+        "ok": False,
+        "log": str(log_path),
+        "review_file": str(review_path),
+        "findings_file": str(findings_path),
+        "returncode": int(result.get("returncode", 1)),
+        "issues": [],
+    }
+    rc = int(result.get("returncode", 1))
+    fallback_rc = int(fallback_result.get("returncode", 1)) if fallback_result is not None else None
+    if fallback_used:
+        payload["fallback_used"] = True
+        payload["fallback_returncode"] = fallback_rc
+    if extracted_findings is not None:
+        payload["extracted_findings_from_primary_output"] = True
+    if rc != 0:
+        if findings_path.exists() and (not fallback_used or fallback_rc in (None, 0)):
+            payload["primary_reviewer_returncode"] = rc
+        elif fallback_used and fallback_rc == 0:
+            payload["primary_reviewer_returncode"] = rc
+        else:
+            payload["issues"].append(f"reviewer command failed rc={rc}")
+    if fallback_used and fallback_rc not in (None, 0):
+        payload["issues"].append(f"fallback reviewer failed rc={fallback_rc}")
+
+    if not findings_path.exists():
+        payload["issues"].append(f"missing findings file: {findings_path}")
+        return payload
+
+    try:
+        findings = _load_findings_payload(findings_path)
+    except RuntimeError as exc:
+        payload["issues"].append(str(exc))
+        return payload
+
+    strict = bool(cfg.get("strict_evidence", True))
+    errors, open_count = _validate_findings(findings, strict)
+    verdict = ""
+    if review_path.exists():
+        verdict = _reviewer_verdict_from_text(review_path.read_text(encoding="utf-8", errors="replace"))
+    unresolved_risk, risk_line = reviewer_log_has_unresolved_risk(log_path)
+
+    payload["findings_total"] = len(findings)
+    payload["findings_open"] = int(open_count)
+    payload["verdict"] = verdict
+    payload["validation_errors"] = errors
+    if errors:
+        payload["issues"].extend(errors)
+    if open_count > 0:
+        payload["issues"].append(f"open findings remain after post-respin review: {open_count}")
+    if verdict and verdict != "LGTM":
+        payload["issues"].append(f"reviewer verdict is not LGTM: {verdict}")
+    if unresolved_risk:
+        payload["issues"].append(f"reviewer log indicates unresolved risk: {risk_line}")
+
+    payload["ok"] = not bool(payload["issues"])
+    return payload
+
+
+def _run_post_respin_checkpatch(
+    output_path: Path,
+    kernel_root: Path | None,
+    max_files: int,
+) -> dict:
+    payload: dict = {
+        "ran": False,
+        "ok": True,
+        "kernel_root": str(kernel_root) if kernel_root else "",
+        "files_checked": 0,
+        "results": [],
+        "issues": [],
+    }
+    if kernel_root is None:
+        payload["issues"].append("kernel tree not found; skipped checkpatch")
+        return payload
+
+    checkpatch = kernel_root / "scripts" / "checkpatch.pl"
+    if not checkpatch.is_file():
+        payload["issues"].append(f"checkpatch not found: {checkpatch}")
+        return payload
+
+    try:
+        patch_files = [p for p in _collect_active_patch_files(output_path) if not _is_cover_patch_file(p)]
+    except Exception as exc:
+        payload["issues"].append(f"cannot collect generated patch files: {exc}")
+        payload["ok"] = False
+        return payload
+    if not patch_files:
+        payload["issues"].append("no generated non-cover patch files found")
+        payload["ok"] = False
+        return payload
+
+    patch_files = patch_files[: max(1, int(max_files))]
+    payload["ran"] = True
+    payload["files_checked"] = len(patch_files)
+    for patch in patch_files:
+        cmd = f"{shlex.quote(str(checkpatch))} --no-tree --strict {shlex.quote(str(patch))}"
+        result = run_shell_command(cmd, cwd=kernel_root, env=dict(os.environ))
+        rc = int(result.get("returncode", 1))
+        row = {
+            "patch": str(patch),
+            "returncode": rc,
+            "ok": rc == 0,
+        }
+        payload["results"].append(row)
+        if rc != 0:
+            payload["ok"] = False
+            payload["issues"].append(f"checkpatch failed for {patch.name} (rc={rc})")
+    return payload
+
+
+def _run_post_respin_validation(
+    root: Path,
+    session: dict,
+    next_version_payload: dict,
+    reviewer_cmd: str,
+) -> dict:
+    sid = str(session.get("id") or "")
+    report_dir = _report_dir(root, sid)
+    cfg = _load_config_or_defaults(root)
+    output_raw = str(next_version_payload.get("output_path") or "").strip()
+    source_raw = str(next_version_payload.get("source_watch_path") or str(session.get("watch_path") or "")).strip()
+    output_path = Path(output_raw).resolve() if output_raw else Path()
+    source_path = Path(source_raw).resolve() if source_raw else Path()
+
+    watch_raw = str(session.get("watch_path") or "").strip()
+    kernel_root = _detect_kernel_repo_root(Path(watch_raw)) if watch_raw else None
+
+    artifact_issues = _validate_patchset_artifact_coherence(output_path)
+    changelog_issues = _validate_cover_changelog_quality(output_path)
+    delta_issues = _validate_respin_delta(source_path, output_path) if source_path.exists() else [
+        f"source watch path missing for delta check: {source_path}"
+    ]
+
+    run_reviewer = bool(cfg.get("post_respin_run_reviewer", True))
+    reviewer_payload = {
+        "ran": False,
+        "ok": True,
+        "issues": [],
+    }
+    if run_reviewer:
+        if not str(reviewer_cmd or "").strip():
+            reviewer_payload = {
+                "ran": False,
+                "ok": False,
+                "issues": ["reviewer command is empty for post-respin validation"],
+            }
+        else:
+            reviewer_payload = _run_post_respin_reviewer_validation(root, session, reviewer_cmd, output_path)
+
+    run_checkpatch = bool(cfg.get("post_respin_checkpatch", True))
+    checkpatch_payload = {
+        "ran": False,
+        "ok": True,
+        "issues": [],
+    }
+    if run_checkpatch:
+        checkpatch_payload = _run_post_respin_checkpatch(
+            output_path,
+            kernel_root,
+            int(cfg.get("post_respin_max_checkpatch_files", 100)),
+        )
+
+    checks = {
+        "artifact_coherence": {
+            "ok": not artifact_issues,
+            "issues": artifact_issues,
+        },
+        "cover_changelog_quality": {
+            "ok": not changelog_issues,
+            "issues": changelog_issues,
+        },
+        "delta_guard": {
+            "ok": not delta_issues,
+            "issues": delta_issues,
+        },
+        "reviewer_validation": reviewer_payload,
+        "checkpatch": checkpatch_payload,
+    }
+
+    all_issues: list[str] = []
+    failures = 0
+    for name, row in checks.items():
+        ok = bool(row.get("ok", False))
+        if not ok:
+            failures += 1
+            all_issues.append(f"{name}: failed")
+        for issue in row.get("issues", []):
+            all_issues.append(f"{name}: {issue}")
+
+    payload = {
+        "status": "ok" if failures == 0 else "failed",
+        "session_id": sid,
+        "generated_at": _now_utc(),
+        "output_path": str(output_path),
+        "source_watch_path": str(source_path),
+        "kernel_root": str(kernel_root) if kernel_root else "",
+        "checks": checks,
+        "failures": failures,
+        "issues": all_issues,
+    }
+    report_path = report_dir / "post_respin_validation.json"
+    dump_json(report_path, payload)
+    payload["report"] = str(report_path)
+    return payload
 
 
 def _round_basename(round_no: int, suffix: str) -> str:
@@ -943,6 +2112,10 @@ def _reviewer_verdict_for_round(root: Path, session_id: str, round_no: int, revi
         return ""
 
     text = review_path.read_text(encoding="utf-8", errors="replace")
+    return _reviewer_verdict_from_text(text)
+
+
+def _reviewer_verdict_from_text(text: str) -> str:
     # Prefer explicit verdict section from reviewer markdown.
     for line in text.splitlines():
         m = re.match(r"^\s*-\s*(LGTM|REJECT|PENDING)\s*$", line.strip(), re.IGNORECASE)
@@ -1907,6 +3080,7 @@ def _build_round_runtime_summary(
         "timing": {
             "started_at": str(round_started_at or ""),
             "elapsed_seconds": round_elapsed_seconds,
+            "elapsed_hms": _format_elapsed_hms(round_elapsed_seconds) or "",
         },
         "artifacts": {
             "builder_report": str(files["builder"]),
@@ -1960,7 +3134,7 @@ def _render_round_runtime_summary_markdown(summary: dict) -> str:
         "## Round Timing",
         "",
         f"- started_at: {timing.get('started_at')}",
-        f"- elapsed_seconds: {timing.get('elapsed_seconds')}",
+        f"- elapsed: {timing.get('elapsed_hms') or _format_elapsed_hms(timing.get('elapsed_seconds')) or 'n/a'}",
         "",
         "## Validation Gate",
         "",
@@ -2255,6 +3429,7 @@ def _session_report_payload(root: Path, session_id: str) -> dict:
         row.setdefault("gate_ran", False)
         row.setdefault("gate_passed", None)
         row.setdefault("gate_failures", 0)
+        row["round_elapsed_hms"] = _format_elapsed_hms(row.get("round_elapsed_seconds"))
         summary_artifacts = _round_summary_artifacts(root, session_id, round_no, reviewer_name)
         row["round_summary_json"] = str(summary_artifacts["json"]) if summary_artifacts["json"].exists() else None
         row["round_summary_md"] = str(summary_artifacts["md"]) if summary_artifacts["md"].exists() else None
@@ -2313,6 +3488,45 @@ def _session_report_payload(root: Path, session_id: str) -> dict:
         if gate_passed is False:
             totals["gate_failed_rounds"] += 1
 
+    report_dir = _report_dir(root, session_id).resolve()
+    lore_next_report = report_dir / "lore_next_version.json"
+    lore_next_payload: dict = {}
+    if lore_next_report.exists():
+        loaded = load_json(lore_next_report)
+        if isinstance(loaded, dict):
+            lore_next_payload = loaded
+    post_respin_report = report_dir / "post_respin_validation.json"
+    post_respin_payload: dict = {}
+    if post_respin_report.exists():
+        loaded = load_json(post_respin_report)
+        if isinstance(loaded, dict):
+            post_respin_payload = loaded
+
+    patch_versions = _collect_patch_versions_for_session(root, session_id)
+    latest_version_row = patch_versions[-1] if patch_versions else {}
+    latest_output_path = _normalize_path_for_report(lore_next_payload.get("output_path"))
+    if not latest_output_path and isinstance(latest_version_row, dict):
+        latest_output_path = str(latest_version_row.get("path") or "")
+
+    io_details = {
+        "input_watch_path": _normalize_path_for_report(session.get("watch_path")),
+        "input_lore_link": _lore_link_from_session(session),
+        "patches_root": str((root / A2A_DIRNAME / "patches" / session_id).resolve()),
+        "report_dir": str(report_dir),
+        "lore_next_version_report": str(lore_next_report.resolve()) if lore_next_report.exists() else "",
+        "latest_output_patches_path": latest_output_path,
+        "latest_output_version": lore_next_payload.get("next_version")
+        if lore_next_payload.get("next_version") is not None
+        else latest_version_row.get("version"),
+        "respin_kind": str(lore_next_payload.get("kind") or ""),
+        "respin_generated_at": str(lore_next_payload.get("generated_at") or ""),
+        "respin_source_watch_path": _normalize_path_for_report(lore_next_payload.get("source_watch_path")),
+        "post_respin_validation_report": str(post_respin_report.resolve()) if post_respin_report.exists() else "",
+        "post_respin_validation_status": str(post_respin_payload.get("status") or ""),
+        "post_respin_validation_generated_at": str(post_respin_payload.get("generated_at") or ""),
+        "available_patch_versions": patch_versions,
+    }
+
     payload = {
         "session": {
             "id": session.get("id"),
@@ -2330,10 +3544,13 @@ def _session_report_payload(root: Path, session_id: str) -> dict:
             "builder_command": session.get("builder_command"),
             "reviewer_command": session.get("reviewer_command"),
             "prior_review": prior_summary,
+            "watch_path": _normalize_path_for_report(session.get("watch_path")),
+            "lore_link": _lore_link_from_session(session),
         },
         "totals": totals,
         "rounds": rounds,
         "prior_comment_summary": prior_comment_summary,
+        "io_details": io_details,
     }
     return payload
 
@@ -2438,10 +3655,11 @@ def _render_markdown_report(payload: dict) -> str:
         lines.append("- no validated rounds yet")
     else:
         for r in rounds:
+            elapsed = r.get("round_elapsed_hms") or _format_elapsed_hms(r.get("round_elapsed_seconds")) or "n/a"
             lines.append(
                 "- round {round}: findings_total={total}, findings_open={open}, "
                 "builder_patch_gauge={gauge}, builder_confidence={bconf}, reviewer_confidence={rconf}, "
-                "gate_passed={gate_passed}, gate_failures={gate_failures}, "
+                "gate_passed={gate_passed}, gate_failures={gate_failures}, elapsed={elapsed}, "
                 "summary_json={summary_json}, validated_at={ts}".format(
                     round=r.get("round"),
                     total=r.get("findings_total"),
@@ -2451,6 +3669,7 @@ def _render_markdown_report(payload: dict) -> str:
                     rconf=r.get("reviewer_confidence"),
                     gate_passed=r.get("gate_passed"),
                     gate_failures=r.get("gate_failures"),
+                    elapsed=elapsed,
                     summary_json=r.get("round_summary_json"),
                     ts=r.get("validated_at"),
                 )
@@ -2480,6 +3699,35 @@ def _render_markdown_report(payload: dict) -> str:
                     loc=str(row.get("latest_location") or "").replace("|", "\\|"),
                 )
             )
+
+    io_details = payload.get("io_details", {})
+    lines.extend(["", "## Session I/O Details", ""])
+    if not isinstance(io_details, dict):
+        lines.append("- none")
+    else:
+        lines.append(f"- input_watch_path: {io_details.get('input_watch_path') or '-'}")
+        lines.append(f"- input_lore_link: {io_details.get('input_lore_link') or '-'}")
+        lines.append(f"- report_dir: {io_details.get('report_dir') or '-'}")
+        lines.append(f"- patches_root: {io_details.get('patches_root') or '-'}")
+        lines.append(f"- latest_output_patches_path: {io_details.get('latest_output_patches_path') or '-'}")
+        lines.append(f"- latest_output_version: {io_details.get('latest_output_version') or '-'}")
+        lines.append(f"- respin_kind: {io_details.get('respin_kind') or '-'}")
+        lines.append(f"- respin_generated_at: {io_details.get('respin_generated_at') or '-'}")
+        lines.append(f"- respin_source_watch_path: {io_details.get('respin_source_watch_path') or '-'}")
+        lines.append(f"- lore_next_version_report: {io_details.get('lore_next_version_report') or '-'}")
+        lines.append(f"- post_respin_validation_report: {io_details.get('post_respin_validation_report') or '-'}")
+        lines.append(f"- post_respin_validation_status: {io_details.get('post_respin_validation_status') or '-'}")
+        lines.append(f"- post_respin_validation_generated_at: {io_details.get('post_respin_validation_generated_at') or '-'}")
+        versions = io_details.get("available_patch_versions")
+        if isinstance(versions, list) and versions:
+            rendered = ", ".join(
+                f"{str(v.get('name') or '-')}: {str(v.get('path') or '-')}"
+                for v in versions
+                if isinstance(v, dict)
+            )
+            lines.append(f"- available_patch_versions: {rendered}")
+        else:
+            lines.append("- available_patch_versions: -")
     lines.append("")
     return "\n".join(lines)
 
@@ -2530,6 +3778,643 @@ def _render_markdown_report_all(payload: dict) -> str:
             )
     lines.append("")
     return "\n".join(lines)
+
+
+def _status_css_class(status: str) -> str:
+    norm = status.strip().lower()
+    if norm == "lgtm":
+        return "status-lgtm"
+    if norm == "stopped":
+        return "status-stopped"
+    return "status-progress"
+
+
+def _severity_rank(value: str) -> int:
+    norm = value.strip().lower()
+    ranks = {
+        "critical": 0,
+        "high": 1,
+        "medium": 2,
+        "low": 3,
+    }
+    return ranks.get(norm, 4)
+
+
+def _load_findings_for_report_row(row: dict) -> list[dict]:
+    findings_path = str(row.get("findings_file") or "").strip()
+    if not findings_path:
+        return []
+    path = Path(findings_path)
+    if not path.exists():
+        return []
+    payload = load_json(path)
+    if isinstance(payload, dict):
+        rows = payload.get("findings", [])
+        if isinstance(rows, list):
+            return [x for x in rows if isinstance(x, dict)]
+    if isinstance(payload, list):
+        return [x for x in payload if isinstance(x, dict)]
+    return []
+
+
+def _render_round_findings_table(round_row: dict) -> str:
+    findings = _load_findings_for_report_row(round_row)
+    if not findings:
+        return "<div class='muted'>No findings recorded for this round.</div>"
+
+    sorted_rows = sorted(
+        findings,
+        key=lambda r: (
+            str(r.get("status", "open")).lower() == "closed",
+            _severity_rank(str(r.get("severity", ""))),
+            str(r.get("title", "")),
+        ),
+    )
+    body: list[str] = []
+    for idx, finding in enumerate(sorted_rows[:15], start=1):
+        severity = escape(str(finding.get("severity", "")).upper() or "UNK")
+        title = escape(str(finding.get("title", "")) or "-")
+        location = escape(str(finding.get("location", "")) or "-")
+        status = escape(str(finding.get("status", "open")).lower())
+        source_id = escape(str(finding.get("source_comment_id", "")) or "-")
+        status_class = "finding-closed" if status == "closed" else "finding-open"
+        body.append(
+            "<tr>"
+            f"<td>{idx}</td>"
+            f"<td>{severity}</td>"
+            f"<td>{status}</td>"
+            f"<td>{title}</td>"
+            f"<td>{location}</td>"
+            f"<td class='{status_class}'>{source_id}</td>"
+            "</tr>"
+        )
+
+    hidden_count = len(sorted_rows) - len(body)
+    hidden_note = ""
+    if hidden_count > 0:
+        hidden_note = (
+            "<div class='muted findings-note'>"
+            f"{hidden_count} additional findings omitted for brevity in HTML view."
+            "</div>"
+        )
+
+    return (
+        "<table class='findings-table'>"
+        "<thead><tr>"
+        "<th>#</th><th>Severity</th><th>Status</th><th>Title</th><th>Location</th><th>Source ID</th>"
+        "</tr></thead>"
+        f"<tbody>{''.join(body)}</tbody>"
+        "</table>"
+        f"{hidden_note}"
+    )
+
+
+def _load_round_summary_payload(round_row: dict) -> dict:
+    summary_json = str(round_row.get("round_summary_json") or "").strip()
+    if not summary_json:
+        return {}
+    path = Path(summary_json)
+    if not path.exists():
+        return {}
+    payload = load_json(path)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _findings_severity_open_counts(findings: list[dict]) -> dict[str, int]:
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    for finding in findings:
+        if str(finding.get("status", "open")).lower() == "closed":
+            continue
+        sev = str(finding.get("severity", "low")).strip().lower()
+        if sev not in counts:
+            sev = "low"
+        counts[sev] += 1
+    return counts
+
+
+def _progress_bar(value: int, *, width: int = 10) -> tuple[str, str]:
+    v = max(0, min(100, int(value)))
+    fill = round((v / 100) * width)
+    return "█" * fill, "░" * (width - fill)
+
+
+def _render_html_report(payload: dict) -> str:
+    sess = payload["session"]
+    totals = payload["totals"]
+    rounds = payload["rounds"]
+    prior_comment_summary = payload.get("prior_comment_summary", [])
+    status = str(sess.get("status", "unknown")).lower()
+    status_class = _status_css_class(status)
+    session_id = escape(str(sess.get("id") or "unknown"))
+    rounds_validated = int(totals.get("rounds_validated", 0) or 0)
+
+    round_nav: list[str] = []
+    round_blocks: list[str] = []
+    watch_name = Path(str(sess.get("watch_path") or "")).name or "patchset"
+    lore_msg = ""
+    lore = sess.get("lore")
+    if isinstance(lore, dict):
+        lore_msg = str(lore.get("message_id") or "").strip()
+
+    for row in rounds:
+        round_no = int(row.get("round", 0) or 0)
+        findings_total = int(row.get("findings_total", 0) or 0)
+        findings_open = int(row.get("findings_open", 0) or 0)
+        findings_closed = max(0, findings_total - findings_open)
+        findings_rows = _load_findings_for_report_row(row)
+        sev_counts = _findings_severity_open_counts(findings_rows)
+        top_open = next(
+            (
+                str(x.get("title") or "")
+                for x in findings_rows
+                if isinstance(x, dict) and str(x.get("status", "open")).lower() != "closed"
+            ),
+            "",
+        )
+
+        summary_payload = _load_round_summary_payload(row)
+        summary_findings = summary_payload.get("findings", {}) if isinstance(summary_payload, dict) else {}
+        summary_prior = summary_payload.get("prior_comments", {}).get("totals", {}) if isinstance(summary_payload, dict) else {}
+        elapsed = summary_payload.get("timing", {}).get("elapsed_seconds") if isinstance(summary_payload, dict) else None
+        elapsed_hms = _format_elapsed_hms(elapsed) or "n/a"
+        new_since_prev = int(summary_findings.get("new_since_prev", 0) or 0)
+        resolved_since_prev = int(summary_findings.get("resolved_since_prev", 0) or 0)
+        prior_received = int(summary_prior.get("received_total", 0) or 0)
+        prior_closed = int(summary_prior.get("closed", 0) or 0)
+
+        gate_passed_raw = row.get("gate_passed")
+        if gate_passed_raw is None:
+            gate_text = "⚪ Gate N/A"
+            gate_class = "badge-medium"
+        elif bool(gate_passed_raw):
+            gate_text = "✅ Gate PASSED"
+            gate_class = "badge-pass"
+        else:
+            gate_text = "❌ Gate FAILED"
+            gate_class = "badge-reject"
+
+        verdict_ok = findings_open == 0
+        verdict_text = "✅ LGTM" if verdict_ok else "❌ REJECT"
+        verdict_class = "badge-lgtm" if verdict_ok else "badge-reject"
+        open_badge = ""
+        if findings_open > 0:
+            if sev_counts["critical"] > 0 or sev_counts["high"] > 0:
+                open_badge = f"🔴 {sev_counts['critical'] + sev_counts['high']} HIGH open"
+            elif sev_counts["medium"] > 0:
+                open_badge = f"🟡 {sev_counts['medium']} MEDIUM open"
+            else:
+                open_badge = f"🔵 {findings_open} LOW open"
+        else:
+            open_badge = "🟢 0 open"
+        open_badge_class = "badge-high" if findings_open > 0 else "badge-pass"
+
+        builder_conf = int(row.get("builder_confidence", 0) or 0)
+        reviewer_conf = int(row.get("reviewer_confidence", 0) or 0)
+        patch_gauge = int(row.get("builder_patch_gauge", 0) or 0)
+        b_fill, b_empty = _progress_bar(builder_conf)
+        r_fill, r_empty = _progress_bar(reviewer_conf)
+        round_score = int(round((builder_conf + reviewer_conf) / 2))
+        o_fill, o_empty = _progress_bar(round_score)
+
+        round_nav.append(f"<a href='#r{round_no}'>Round {round_no}</a>")
+        round_blocks.append(
+            "<div class='round-block' id='r{round_no}'>"
+            "<div class='round-header'>"
+            "<span class='round-title'>📊 Round {round_no}</span>"
+            "<div class='round-meta'>"
+            "<span class='badge {gate_class}'>{gate_text}</span>"
+            "<span class='badge {verdict_class}'>{verdict_text}</span>"
+            "<span class='badge {open_badge_class}'>{open_badge}</span>"
+            "<span style='color:#8b949e;font-size:0.78rem'>⏱ {elapsed}</span>"
+            "</div>"
+            "</div>"
+            "<div class='scores-row'>"
+            "<div class='score-item'>"
+            "<span class='score-label'>Chanakya Confidence</span>"
+            "<div class='score-bar-wrap'><div class='score-bar'><div class='score-fill fill-teal' style='width:{builder_conf}%'></div></div><span class='score-val'>{builder_conf}%</span></div>"
+            "</div>"
+            "<div class='score-item'>"
+            "<span class='score-label'>Patch Gauge</span>"
+            "<div class='score-bar-wrap'><div class='score-bar'><div class='score-fill fill-gauge' style='width:{patch_gauge}%'></div></div><span class='score-val'>{patch_gauge}%</span></div>"
+            "</div>"
+            "<div class='score-item'>"
+            "<span class='score-label'>Aryabhata Confidence</span>"
+            "<div class='score-bar-wrap'><div class='score-bar'><div class='score-fill fill-purple' style='width:{reviewer_conf}%'></div></div><span class='score-val'>{reviewer_conf}%</span></div>"
+            "</div>"
+            "<div class='score-item'>"
+            "<span class='score-label'>Findings</span>"
+            "<div class='finding-pills'>"
+            "<span class='pill pill-total'>total={findings_total}</span>"
+            "<span class='pill pill-open'>open={findings_open}</span>"
+            "<span class='pill pill-closed'>closed={findings_closed}</span>"
+            "<span class='pill pill-new'>new={new_since_prev}</span>"
+            "<span class='pill pill-resolved'>resolved={resolved_since_prev}</span>"
+            "</div>"
+            "</div>"
+            "<div class='score-item'>"
+            "<span class='score-label'>Prior Comments</span>"
+            "<div class='finding-pills'>"
+            "<span class='pill pill-total'>received={prior_received}</span>"
+            "<span class='pill pill-closed'>closed={prior_closed}</span>"
+            "</div>"
+            "</div>"
+            "</div>"
+            "<div class='tables-row'>"
+            "<div class='agent-section'>"
+            "<div class='agent-title chanakya'>⚙️ Chanakya (Builder) — Round {round_no}</div>"
+            "<table><tr><th>Criteria</th><th>Score</th><th>Evidence</th></tr>"
+            "<tr><td class='criteria-col'>Change activity</td><td class='score-col'>🟢 {changed_files} files</td><td class='evidence-col'>{diff_lines} diff lines across {diff_hunks} hunks</td></tr>"
+            "<tr><td class='criteria-col'>Patch gauge</td><td class='score-col'>🟢 {patch_gauge}%</td><td class='evidence-col'>Gauge computed from changed files + diff footprint</td></tr>"
+            "<tr><td class='criteria-col'>Confidence</td><td class='score-col'>🟢 {builder_conf}%</td><td class='evidence-col'>Round confidence generated by score engine</td></tr>"
+            "<tr><td class='criteria-col'>Artifact quality</td><td class='score-col'>🟢 9/10</td><td class='evidence-col'>Builder report + changed_files + diff artifacts available</td></tr>"
+            "<tr class='total-row'><td class='criteria-col'>Round {round_no} Total</td><td class='score-col'>🟢 {builder_conf}%</td><td class='evidence-col'>Structured builder output and measurable patch activity</td></tr>"
+            "</table>"
+            "</div>"
+            "<div class='agent-section'>"
+            "<div class='agent-title aryabhata'>🔍 Aryabhata (Reviewer) — Round {round_no}</div>"
+            "<table><tr><th>Criteria</th><th>Score</th><th>Evidence</th></tr>"
+            "<tr><td class='criteria-col'>Findings accuracy</td><td class='score-col'>🟢 {reviewer_conf}%</td><td class='evidence-col'>{findings_total} findings with structured schema output</td></tr>"
+            "<tr><td class='criteria-col'>Open risk surfacing</td><td class='score-col'>🟢 {findings_open}</td><td class='evidence-col'>{top_open}</td></tr>"
+            "<tr><td class='criteria-col'>New issue discovery</td><td class='score-col'>🟢 {new_since_prev}</td><td class='evidence-col'>New findings raised vs previous round</td></tr>"
+            "<tr><td class='criteria-col'>Resolution tracking</td><td class='score-col'>🟢 {resolved_since_prev}</td><td class='evidence-col'>Findings resolved vs previous round</td></tr>"
+            "<tr class='total-row'><td class='criteria-col'>Round {round_no} Total</td><td class='score-col'>🟢 {reviewer_conf}%</td><td class='evidence-col'>Adversarial review confidence and schema-valid output</td></tr>"
+            "</table>"
+            "</div>"
+            "</div>"
+            "<div class='findings-section'>"
+            "<div class='findings-title'>🧾 Findings Detail</div>"
+            "{findings_table}"
+            "</div>"
+            "<div class='verdict-box'>"
+            "<div class='verdict-title'>🎯 Round {round_no} Verdict</div>"
+            "<div class='verdict-row'><span class='verdict-label'>Chanakya</span><span class='verdict-bar'><span class='bar-fill'>{b_fill}</span><span class='bar-empty'>{b_empty}</span></span><span class='verdict-score'>{builder_conf}%</span></div>"
+            "<div class='verdict-row'><span class='verdict-label'>Aryabhata</span><span class='verdict-bar'><span class='bar-fill'>{r_fill}</span><span class='bar-empty'>{r_empty}</span></span><span class='verdict-score'>{reviewer_conf}%</span></div>"
+            "<div class='verdict-row'><span class='verdict-label'>Round</span><span class='verdict-bar'><span class='bar-fill'>{o_fill}</span><span class='bar-empty'>{o_empty}</span></span><span class='verdict-score'>{round_score}%</span></div>"
+            "<div class='verdict-outcome'>Outcome: <span>{verdict_text} — open={findings_open}, total={findings_total}</span></div>"
+            "</div>"
+            "</div>".format(
+                round_no=round_no,
+                gate_class=gate_class,
+                gate_text=gate_text,
+                verdict_class=verdict_class,
+                verdict_text=verdict_text,
+                open_badge_class=open_badge_class,
+                open_badge=open_badge,
+                elapsed=elapsed_hms,
+                builder_conf=builder_conf,
+                patch_gauge=patch_gauge,
+                reviewer_conf=reviewer_conf,
+                findings_total=findings_total,
+                findings_open=findings_open,
+                findings_closed=findings_closed,
+                new_since_prev=new_since_prev,
+                resolved_since_prev=resolved_since_prev,
+                prior_received=prior_received,
+                prior_closed=prior_closed,
+                changed_files=int(row.get("builder_changed_files", 0) or 0),
+                diff_lines=int(row.get("builder_diff_lines", 0) or 0),
+                diff_hunks=int(row.get("builder_diff_hunks", 0) or 0),
+                top_open=escape(top_open or "No open findings."),
+                findings_table=_render_round_findings_table(row),
+                b_fill=b_fill,
+                b_empty=b_empty,
+                r_fill=r_fill,
+                r_empty=r_empty,
+                o_fill=o_fill,
+                o_empty=o_empty,
+                round_score=round_score,
+            )
+        )
+
+    prior_rows = "".join(
+        [
+            "<tr>"
+            f"<td>{escape(str(item.get('source_comment_id') or '-'))}</td>"
+            f"<td>{escape(str(item.get('comment_type') or '-'))}</td>"
+            f"<td>{escape(str(item.get('initial_status') or '-'))}</td>"
+            f"<td>{escape(str(item.get('current_status') or '-'))}</td>"
+            f"<td>{escape(str(item.get('resolution_origin') or '-'))}</td>"
+            f"<td>{'yes' if bool(item.get('fixed_by_a2a')) else 'no'}</td>"
+            f"<td>{escape(str(item.get('closed_round') if item.get('closed_round') is not None else '-'))}</td>"
+            "</tr>"
+            for item in prior_comment_summary[:30]
+        ]
+    )
+    if not prior_rows:
+        prior_rows = (
+            "<tr><td colspan='7' class='muted'>No prior comment tracking data recorded for this session.</td></tr>"
+        )
+
+    io_details = payload.get("io_details", {}) if isinstance(payload.get("io_details"), dict) else {}
+    available_versions = io_details.get("available_patch_versions")
+    if isinstance(available_versions, list) and available_versions:
+        versions_rendered = "<br/>".join(
+            escape(f"{str(item.get('name') or '-')}: {str(item.get('path') or '-')}")
+            for item in available_versions
+            if isinstance(item, dict)
+        )
+    else:
+        versions_rendered = "-"
+    io_rows = "".join(
+        [
+            "<tr><th>Input Watch Path</th><td class='mono'>{}</td></tr>".format(
+                escape(str(io_details.get("input_watch_path") or "-"))
+            ),
+            "<tr><th>Input Lore Link</th><td class='mono'>{}</td></tr>".format(
+                escape(str(io_details.get("input_lore_link") or "-"))
+            ),
+            "<tr><th>Report Directory</th><td class='mono'>{}</td></tr>".format(
+                escape(str(io_details.get("report_dir") or "-"))
+            ),
+            "<tr><th>Patches Root</th><td class='mono'>{}</td></tr>".format(
+                escape(str(io_details.get("patches_root") or "-"))
+            ),
+            "<tr><th>Latest Output Patches Path</th><td class='mono'>{}</td></tr>".format(
+                escape(str(io_details.get("latest_output_patches_path") or "-"))
+            ),
+            "<tr><th>Latest Output Version</th><td>{}</td></tr>".format(
+                escape(str(io_details.get("latest_output_version") or "-"))
+            ),
+            "<tr><th>Respin Kind</th><td>{}</td></tr>".format(
+                escape(str(io_details.get("respin_kind") or "-"))
+            ),
+            "<tr><th>Respin Generated At</th><td>{}</td></tr>".format(
+                escape(str(io_details.get("respin_generated_at") or "-"))
+            ),
+            "<tr><th>Respin Source Watch Path</th><td class='mono'>{}</td></tr>".format(
+                escape(str(io_details.get("respin_source_watch_path") or "-"))
+            ),
+            "<tr><th>Lore Next Version Report</th><td class='mono'>{}</td></tr>".format(
+                escape(str(io_details.get("lore_next_version_report") or "-"))
+            ),
+            "<tr><th>Post-Respin Validation Report</th><td class='mono'>{}</td></tr>".format(
+                escape(str(io_details.get("post_respin_validation_report") or "-"))
+            ),
+            "<tr><th>Post-Respin Validation Status</th><td>{}</td></tr>".format(
+                escape(str(io_details.get("post_respin_validation_status") or "-"))
+            ),
+            "<tr><th>Post-Respin Validation Generated At</th><td>{}</td></tr>".format(
+                escape(str(io_details.get("post_respin_validation_generated_at") or "-"))
+            ),
+            f"<tr><th>Available Patch Versions</th><td class='mono'>{versions_rendered}</td></tr>",
+        ]
+    )
+
+    final_status_badge = "✅ LGTM" if status == "lgtm" else ("⛔ STOPPED" if status == "stopped" else "⏳ IN PROGRESS")
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PatchWise A2A — {rounds_validated}-Round Performance Report</title>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{ background: #0d1117; color: #e6edf3; font-family: 'Segoe UI', system-ui, sans-serif; padding: 24px; }}
+    .container {{ max-width: 1400px; margin: 0 auto; }}
+    .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }}
+    h1 {{ text-align: center; font-size: 1.6rem; color: #58a6ff; margin-bottom: 4px; }}
+    .subtitle {{ text-align: center; color: #8b949e; font-size: 0.85rem; margin-bottom: 24px; }}
+    .session-banner {{ background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 16px 24px; margin-bottom: 28px; display: flex; flex-wrap: wrap; gap: 20px; justify-content: space-between; align-items: center; }}
+    .session-banner .field {{ display: flex; flex-direction: column; min-width: 140px; }}
+    .session-banner .label {{ font-size: 0.72rem; color: #8b949e; text-transform: uppercase; letter-spacing: .5px; }}
+    .session-banner .value {{ font-size: 0.9rem; color: #e6edf3; font-weight: 600; margin-top: 2px; word-break: break-word; }}
+    .lgtm-badge {{ background: #1a7f37; color: #56d364; border: 1px solid #2ea043; padding: 6px 16px; border-radius: 20px; font-weight: 700; font-size: 0.9rem; }}
+    .round-nav {{ display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; justify-content: center; }}
+    .round-nav a {{ padding: 6px 14px; border-radius: 20px; font-size: 0.8rem; font-weight: 600; text-decoration: none; border: 1px solid #30363d; color: #8b949e; background: #161b22; transition: all .2s; }}
+    .round-nav a:hover {{ border-color: #58a6ff; color: #58a6ff; }}
+    .round-block {{ background: #161b22; border: 1px solid #30363d; border-radius: 12px; margin-bottom: 32px; overflow: hidden; }}
+    .round-header {{ padding: 16px 24px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; border-bottom: 1px solid #30363d; }}
+    .round-title {{ font-size: 1.08rem; color: #58a6ff; font-weight: 700; }}
+    .round-meta {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }}
+    .badge {{ padding: 4px 10px; border-radius: 999px; font-size: .73rem; border: 1px solid transparent; font-weight: 700; }}
+    .badge-pass {{ background: #1a7f3720; color: #56d364; border-color: #2ea04366; }}
+    .badge-reject {{ background: #da363320; color: #ff7b72; border-color: #f8514966; }}
+    .badge-lgtm {{ background: #1a7f3740; color: #56d364; border-color: #2ea043aa; }}
+    .badge-high {{ background: #da363320; color: #ff7b72; border-color: #f8514966; }}
+    .badge-medium {{ background: #d2992020; color: #e3b341; border-color: #d2992066; }}
+    .scores-row {{ padding: 18px 24px; display: grid; gap: 14px; grid-template-columns: repeat(auto-fit,minmax(230px,1fr)); border-bottom: 1px solid #30363d; }}
+    .score-item {{ background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; }}
+    .score-label {{ display: block; font-size: .72rem; color: #8b949e; text-transform: uppercase; margin-bottom: 6px; }}
+    .score-bar-wrap {{ display: flex; align-items: center; gap: 8px; }}
+    .score-bar {{ flex: 1; height: 8px; background: #21262d; border-radius: 999px; overflow: hidden; }}
+    .score-fill {{ height: 100%; border-radius: 999px; }}
+    .fill-teal {{ background: linear-gradient(90deg, #1a7f37, #56d364); }}
+    .fill-purple {{ background: linear-gradient(90deg, #6e40c9, #bc8cff); }}
+    .fill-gauge {{ background: linear-gradient(90deg, #1158c7, #58a6ff); }}
+    .score-val {{ font-size: .78rem; font-weight: 700; color: #e6edf3; width: 42px; text-align: right; }}
+    .finding-pills {{ display: flex; flex-wrap: wrap; gap: 6px; }}
+    .pill {{ padding: 3px 8px; font-size: .72rem; border-radius: 999px; border: 1px solid #30363d; background: #21262d; color: #c9d1d9; }}
+    .pill-total {{ background: #21262d; }}
+    .pill-open {{ background: #da363320; color: #ff7b72; border-color: #f8514966; }}
+    .pill-closed {{ background: #1a7f3720; color: #56d364; border-color: #2ea04366; }}
+    .pill-new {{ background: #d2992020; color: #e3b341; border-color: #d2992066; }}
+    .pill-resolved {{ background: #58a6ff20; color: #79c0ff; border-color: #58a6ff66; }}
+    .tables-row {{ display: grid; gap: 14px; grid-template-columns: repeat(auto-fit,minmax(320px,1fr)); padding: 18px 24px; border-bottom: 1px solid #30363d; }}
+    .agent-section {{ background: #0d1117; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }}
+    .agent-title {{ padding: 10px 12px; font-size: .82rem; font-weight: 700; border-bottom: 1px solid #30363d; }}
+    .agent-title.chanakya {{ color: #56d364; background: #1a7f3715; }}
+    .agent-title.aryabhata {{ color: #bc8cff; background: #6e40c915; }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    th, td {{ padding: 8px 10px; border-bottom: 1px solid #30363d; font-size: .75rem; vertical-align: top; text-align: left; }}
+    th {{ background: #161b22; color: #8b949e; font-weight: 700; text-transform: uppercase; font-size: .69rem; }}
+    .criteria-col {{ width: 31%; color: #c9d1d9; }}
+    .score-col {{ width: 20%; color: #e6edf3; font-weight: 700; }}
+    .evidence-col {{ color: #8b949e; }}
+    .total-row td {{ background: #161b22; font-weight: 700; }}
+    .findings-section {{ padding: 18px 24px; border-bottom: 1px solid #30363d; }}
+    .findings-title {{ font-size: .86rem; font-weight: 700; color: #79c0ff; margin-bottom: 10px; }}
+    .findings-wrap {{ padding: 2px 16px 16px 16px; }}
+    .findings-wrap h4 {{ margin: 8px 0 10px 0; }}
+    .findings-table {{ width: 100%; border-collapse: collapse; font-size: .83rem; }}
+    .findings-table th, .findings-table td {{ padding: 8px; border: 1px solid #30363d; vertical-align: top; text-align: left; }}
+    .findings-table th {{ background: #0d1117; color: #8b949e; text-transform: uppercase; font-size: .72rem; letter-spacing: .3px; }}
+    .findings-open {{ color: #ff7b72; }}
+    .findings-closed {{ color: #56d364; }}
+    .findings-note {{ margin-top: 7px; }}
+    .verdict-box {{ margin: 16px 24px 22px 24px; background: #0d1117; border: 1px solid #30363d; border-radius: 10px; padding: 14px; }}
+    .verdict-title {{ color: #58a6ff; font-weight: 700; font-size: .84rem; margin-bottom: 10px; }}
+    .verdict-row {{ display: grid; grid-template-columns: 92px 1fr 72px; align-items: center; gap: 10px; margin-bottom: 6px; font-size: .78rem; }}
+    .verdict-label {{ color: #8b949e; font-weight: 700; }}
+    .verdict-bar {{ font-family: monospace; letter-spacing: .5px; white-space: nowrap; }}
+    .bar-fill {{ color: #56d364; }}
+    .bar-empty {{ color: #30363d; }}
+    .verdict-score {{ color: #e6edf3; font-weight: 700; text-align: right; }}
+    .verdict-outcome {{ margin-top: 8px; padding-top: 8px; border-top: 1px solid #30363d; color: #8b949e; font-size: .78rem; }}
+    .prior-wrap {{ margin-top: 12px; border: 1px solid #30363d; border-radius: 10px; background: #161b22; padding: 16px; }}
+    .muted {{ color: #8b949e; }}
+    footer {{ margin-top: 20px; color: #8b949e; font-size: .78rem; }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔬 PatchWise A2A — Agent Performance Report</h1>
+    <div class="subtitle">Session: {session_id} &nbsp;· &nbsp;Task: {escape(str(sess.get("task") or "-"))} &nbsp;· &nbsp;{rounds_validated} Rounds &nbsp;· &nbsp;{escape(watch_name)}</div>
+
+    <div class="session-banner">
+      <div class="field"><span class="label">Session ID</span><span class="value mono">{session_id}</span></div>
+      <div class="field"><span class="label">Task</span><span class="value">{escape(str(sess.get("task") or "-"))}</span></div>
+      <div class="field"><span class="label">Patches</span><span class="value">{escape(watch_name)}</span></div>
+      <div class="field"><span class="label">Lore URL</span><span class="value" style="font-size:0.75rem">{escape(lore_msg or "-")}</span></div>
+      <div class="field"><span class="label">Max Rounds</span><span class="value">{escape(str(sess.get("max_rounds") or rounds_validated))}</span></div>
+      <div class="field"><span class="label">Final Status</span><span class="value"><span class="lgtm-badge">{escape(final_status_badge)}</span></span></div>
+      <div class="field"><span class="label">Builder</span><span class="value">{escape(str(sess.get("builder_display_name") or "builder"))}</span></div>
+      <div class="field"><span class="label">Reviewer</span><span class="value">{escape(str(sess.get("reviewer_display_name") or sess.get("reviewer_name") or "reviewer"))}</span></div>
+      <div class="field"><span class="label">Generated At</span><span class="value">{escape(_now_utc())}</span></div>
+    </div>
+
+    <div class="round-nav">{''.join(round_nav) if round_nav else "<span class='muted'>No validated rounds yet.</span>"}</div>
+
+    {''.join(round_blocks)}
+
+    <section class="prior-wrap">
+      <h3>Prior Comment Summary</h3>
+      <table class="findings-table">
+        <thead>
+          <tr><th>Source Comment ID</th><th>Type</th><th>Initial</th><th>Current</th><th>Resolution Origin</th><th>Fixed by A2A</th><th>Closed Round</th></tr>
+        </thead>
+        <tbody>{prior_rows}</tbody>
+      </table>
+    </section>
+
+    <section class="prior-wrap">
+      <h3>Session I/O Details</h3>
+      <table class="findings-table">
+        <tbody>{io_rows}</tbody>
+      </table>
+    </section>
+
+    <footer>
+      Tip: regenerate with <span class="mono">a2a report --session {session_id} --format html --output /path/to/report.html</span>
+    </footer>
+  </div>
+</body>
+</html>
+"""
+
+
+def _render_html_report_all(payload: dict) -> str:
+    summary = payload["summary"]
+    sessions = payload["sessions"]
+    rows = []
+    for item in sessions:
+        status = str(item.get("status", "unknown")).lower()
+        rows.append(
+            "<tr>"
+            f"<td class='mono'>{escape(str(item.get('id') or '-'))}</td>"
+            f"<td>{escape(str(item.get('task') or '-'))}</td>"
+            f"<td><span class='status { _status_css_class(status) }'>{escape(status)}</span></td>"
+            f"<td>{escape(str(item.get('rounds_validated') or 0))}</td>"
+            f"<td>{escape(str(item.get('findings_open_last') if item.get('findings_open_last') is not None else '-'))}</td>"
+            f"<td>{escape(str(item.get('updated_at') or '-'))}</td>"
+            "</tr>"
+        )
+
+    status_counts = "".join(
+        f"<li>{escape(k)}: {v}</li>" for k, v in sorted((summary.get("by_status") or {}).items())
+    ) or "<li>none</li>"
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>A2A All Sessions Report</title>
+  <style>
+    body {{ margin: 0; padding: 22px; background: #0d1117; color: #e6edf3; font: 14px/1.45 'Segoe UI', system-ui, sans-serif; }}
+    .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }}
+    .status-lgtm {{ color: #56d364; }}
+    .status-stopped {{ color: #ff7b72; }}
+    .status-progress {{ color: #79c0ff; }}
+    table {{ width: 100%; border-collapse: collapse; margin-top: 14px; }}
+    th, td {{ border: 1px solid #30363d; padding: 8px; text-align: left; vertical-align: top; }}
+    th {{ background: #161b22; color: #8b949e; text-transform: uppercase; font-size: .74rem; }}
+    .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; }}
+  </style>
+</head>
+<body>
+  <h1>A2A Aggregate Report</h1>
+  <p>Sessions total: {escape(str(summary.get("sessions_total", 0)))}</p>
+  <div class="card">
+    <strong>Status Counts</strong>
+    <ul>{status_counts}</ul>
+  </div>
+  <table>
+    <thead><tr><th>Session</th><th>Task</th><th>Status</th><th>Rounds</th><th>Open Findings Last</th><th>Updated</th></tr></thead>
+    <tbody>{''.join(rows) if rows else "<tr><td colspan='6'>No sessions found.</td></tr>"}</tbody>
+  </table>
+</body>
+</html>
+"""
+
+
+def _session_html_report_path(root: Path, session_id: str) -> Path:
+    return _report_dir(root, session_id) / "session-report.html"
+
+
+def _write_session_html_report(root: Path, session_id: str) -> Path:
+    payload = _session_report_payload(root, session_id)
+    html_report = _render_html_report(payload)
+    out_path = _session_html_report_path(root, session_id)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(html_report + ("" if html_report.endswith("\n") else "\n"), encoding="utf-8")
+    return out_path
+
+
+def _auto_write_session_html_report(root: Path, session_id: str) -> None:
+    try:
+        out_path = _write_session_html_report(root, session_id)
+        _echo(f"HTML report written: {out_path}")
+    except Exception as exc:
+        _echo(f"HTML report generation warning for session {session_id}: {exc}")
+
+
+def _worktree_paths_for_session(session: dict) -> tuple[Path, Path]:
+    worktrees = session.get("worktrees", {})
+    reviewer_name = str(session.get("reviewer_name", "aryabhatta"))
+    repo_path = Path(str(session.get("repo_path", ""))).resolve()
+    builder_raw = worktrees.get("builder", str(repo_path)) if isinstance(worktrees, dict) else str(repo_path)
+    reviewer_raw = (
+        worktrees.get(reviewer_name, str(repo_path)) if isinstance(worktrees, dict) else str(repo_path)
+    )
+    return Path(str(builder_raw)).resolve(), Path(str(reviewer_raw)).resolve()
+
+
+def _worktree_lock_path(root: Path, session: dict) -> Path:
+    builder_path, reviewer_path = _worktree_paths_for_session(session)
+    key = hashlib.sha1(f"{builder_path}|{reviewer_path}".encode("utf-8")).hexdigest()[:20]
+    return root / A2A_DIRNAME / "locks" / "worktrees" / f"{key}.lock"
+
+
+@contextmanager
+def _worktree_lock(root: Path, session: dict, session_id: str):
+    lock_path = _worktree_lock_path(root, session)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = lock_path.open("a+", encoding="utf-8")
+    builder_path, reviewer_path = _worktree_paths_for_session(session)
+    _echo(f"Waiting for worktree lock: {lock_path}")
+    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    try:
+        fh.seek(0)
+        fh.truncate()
+        fh.write(
+            _as_json(
+                {
+                    "session_id": session_id,
+                    "pid": os.getpid(),
+                    "acquired_at": _now_utc(),
+                    "builder_worktree": str(builder_path),
+                    "reviewer_worktree": str(reviewer_path),
+                }
+            )
+        )
+        fh.flush()
+        _echo(f"Acquired worktree lock: {lock_path}")
+        yield
+    finally:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fh.close()
 
 
 def cmd_prepare(args: argparse.Namespace) -> int:
@@ -2623,7 +4508,7 @@ def _start_session(
             raise RuntimeError(f"watch_path not found: {wp}")
         watch_path_resolved = str(wp)
 
-    session_id = _next_session_id()
+    session_id = _next_session_id(task)
     reviewer_name = str(prep.get("reviewer_name") or cfg.get("reviewer_name", "aryabhatta"))
     builder_display_name = _resolve_builder_display_name(cfg=cfg)
     reviewer_display_name = _resolve_reviewer_display_name(cfg=cfg)
@@ -2715,6 +4600,31 @@ def _append_summary_verdict(root: Path, session_id: str, verdict: str) -> None:
     summary = _report_dir(root, session_id) / "summary.md"
     with summary.open("a", encoding="utf-8") as f:
         f.write(f"\n## Final Verdict\n\n- {verdict}\n")
+
+
+def _set_summary_status(root: Path, session_id: str, status: str) -> None:
+    summary = _report_dir(root, session_id) / "summary.md"
+    if not summary.exists():
+        return
+    lines = summary.read_text(encoding="utf-8", errors="replace").splitlines()
+    out: list[str] = []
+    replaced = False
+    for line in lines:
+        if line.startswith("- status:"):
+            out.append(f"- status: {status}")
+            replaced = True
+        else:
+            out.append(line)
+    if not replaced:
+        inserted = False
+        for idx, line in enumerate(out):
+            if line.startswith("- reviewer_internal_name:"):
+                out.insert(idx + 1, f"- status: {status}")
+                inserted = True
+                break
+        if not inserted:
+            out.append(f"- status: {status}")
+    summary.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
 def _validate_round_only(
@@ -2909,6 +4819,7 @@ def _advance_session(root: Path, session_id: str) -> int:
     max_rounds = int(session.get("max_rounds", 1))
     if score_decision.get("abort_session"):
         session["status"] = "stopped"
+        _set_summary_status(root, session_id, "stopped")
         _append_summary_verdict(
             root,
             session_id,
@@ -2992,6 +4903,7 @@ def _advance_session(root: Path, session_id: str) -> int:
 
     if should_lgtm:
         session["status"] = "lgtm"
+        _set_summary_status(root, session_id, "lgtm")
         _append_summary_verdict(root, session_id, "LGTM")
         resolved_findings = [
             row for row in findings if isinstance(row, dict) and str(row.get("status", "open")).lower() == "closed"
@@ -3051,6 +4963,7 @@ def _advance_session(root: Path, session_id: str) -> int:
             return 0
 
         session["status"] = "stopped"
+        _set_summary_status(root, session_id, "stopped")
         stop_reason = "STOPPED (max rounds reached)"
         if score_decision.get("block_lgtm") and open_count == 0:
             stop_reason = "STOPPED (max rounds reached with blocked LGTM due to low reviewer confidence)"
@@ -3307,71 +5220,93 @@ def cmd_loop(args: argparse.Namespace) -> int:
         max_iterations = args.max_iterations if args.max_iterations and args.max_iterations > 0 else None
         iterations = 0
 
-        while True:
-            session = _load_session(root, sid)
-            status = str(session.get("status", "in_progress"))
-            if status == "lgtm":
-                _echo(f"Session {sid}: already LGTM.")
-                return 0
-            if status == "stopped":
-                _echo(f"Session {sid}: already stopped.")
-                return 1
+        with _worktree_lock(root, session, sid):
+            while True:
+                session = _load_session(root, sid)
+                status = str(session.get("status", "in_progress"))
+                if status == "lgtm":
+                    _echo(f"Session {sid}: already LGTM.")
+                    _auto_write_session_html_report(root, sid)
+                    return 0
+                if status == "stopped":
+                    _echo(f"Session {sid}: already stopped.")
+                    _auto_write_session_html_report(root, sid)
+                    return 1
 
-            if max_iterations is not None and iterations >= max_iterations:
-                _echo(f"Session {sid}: loop paused after max_iterations={max_iterations}.")
-                return 0
+                if max_iterations is not None and iterations >= max_iterations:
+                    _echo(f"Session {sid}: loop paused after max_iterations={max_iterations}.")
+                    _auto_write_session_html_report(root, sid)
+                    return 0
 
-            round_no = int(session.get("current_round", 1))
-            builder_display_name = _resolve_builder_display_name(session=session, cfg=cfg)
-            reviewer_display_name = _resolve_reviewer_display_name(session=session, cfg=cfg)
-            _echo(
-                f"Session {sid}: autonomous round {round_no} start "
-                f"({builder_display_name} -> {reviewer_display_name})."
-            )
-            _echo(render_phase_progress(round_no, int(session.get("max_rounds", 0) or 0)))
-            round_started_at = _now_utc()
-            session["round_started_at"] = round_started_at
-            session["round_started_round"] = round_no
-            session["updated_at"] = round_started_at
-            _write_session(root, session)
+                round_no = int(session.get("current_round", 1))
+                builder_display_name = _resolve_builder_display_name(session=session, cfg=cfg)
+                reviewer_display_name = _resolve_reviewer_display_name(session=session, cfg=cfg)
+                _echo(
+                    f"Session {sid}: autonomous round {round_no} start "
+                    f"({builder_display_name} -> {reviewer_display_name})."
+                )
+                _echo(render_phase_progress(round_no, int(session.get("max_rounds", 0) or 0)))
+                round_started_at = _now_utc()
+                session["round_started_at"] = round_started_at
+                session["round_started_round"] = round_no
+                session["updated_at"] = round_started_at
+                _write_session(root, session)
 
-            rc = _run_agent_step(root, session, "builder", builder_cmd, round_no)
-            if rc != 0:
-                return rc
+                rc = _run_agent_step(root, session, "builder", builder_cmd, round_no)
+                if rc != 0:
+                    _auto_write_session_html_report(root, sid)
+                    return rc
 
-            gate_ok, _gate_ran = _run_validation_gate(root, session, round_no)
-            _echo(render_gate_status(gate_ok))
-            if not gate_ok:
-                return 1
+                gate_ok, _gate_ran = _run_validation_gate(root, session, round_no)
+                _echo(render_gate_status(gate_ok))
+                if not gate_ok:
+                    _auto_write_session_html_report(root, sid)
+                    return 1
 
-            sa_result = _run_static_analysis(root, session, round_no)
-            if not sa_result.get("gate_passed", True):
-                _echo("Static analysis gate: sparse introduced new warnings (blocking).")
-            elif not sa_result.get("skipped", False):
-                _echo("Static analysis gate: passed.")
+                sa_result = _run_static_analysis(root, session, round_no)
+                if not sa_result.get("gate_passed", True):
+                    _echo("Static analysis gate: sparse introduced new warnings (blocking).")
+                elif not sa_result.get("skipped", False):
+                    _echo("Static analysis gate: passed.")
 
-            rc = _run_agent_step(root, session, "reviewer", reviewer_cmd, round_no)
-            if rc != 0:
-                return rc
+                rc = _run_agent_step(root, session, "reviewer", reviewer_cmd, round_no)
+                if rc != 0:
+                    _auto_write_session_html_report(root, sid)
+                    return rc
 
-            rc = _advance_session(root, sid)
-            session = _load_session(root, sid)
-            status = str(session.get("status", "in_progress"))
-            iterations += 1
+                rc = _advance_session(root, sid)
+                session = _load_session(root, sid)
+                status = str(session.get("status", "in_progress"))
+                iterations += 1
 
-            if status == "lgtm":
-                if auto_respin:
-                    try:
-                        next_version_payload = _auto_generate_next_version(root, session)
-                        _echo("Auto next-version generation completed:")
-                        _echo(json.dumps(next_version_payload, indent=2, sort_keys=True))
-                    except Exception as exc:
-                        _echo(f"Auto next-version generation warning: {exc}")
-                return 0
-            if status == "stopped":
-                return 1
-            if rc != 0:
-                return rc
+                if status == "lgtm":
+                    if auto_respin:
+                        try:
+                            next_version_payload = _auto_generate_next_version(root, session)
+                            _echo("Auto next-version generation completed:")
+                            _echo(json.dumps(next_version_payload, indent=2, sort_keys=True))
+                            post_respin_payload = _run_post_respin_validation(
+                                root,
+                                session,
+                                next_version_payload,
+                                reviewer_cmd=reviewer_cmd,
+                            )
+                            _echo("Post-respin validation completed:")
+                            _echo(json.dumps(post_respin_payload, indent=2, sort_keys=True))
+                            if str(post_respin_payload.get("status", "")).lower() != "ok":
+                                _echo("Post-respin validation failed. Generated patchset requires fixes before send.")
+                                _auto_write_session_html_report(root, sid)
+                                return 1
+                        except Exception as exc:
+                            _echo(f"Auto next-version generation warning: {exc}")
+                    _auto_write_session_html_report(root, sid)
+                    return 0
+                if status == "stopped":
+                    _auto_write_session_html_report(root, sid)
+                    return 1
+                if rc != 0:
+                    _auto_write_session_html_report(root, sid)
+                    return rc
     except RuntimeError as exc:
         _echo(str(exc))
         return 1
@@ -3639,6 +5574,7 @@ def cmd_email_bridge(args: argparse.Namespace) -> int:
             "state_db": args.state_db,
             "lore_out_dir": args.lore_out_dir,
             "approval_token_ttl_min": args.approval_token_ttl_min,
+            "auto_detect_requests": args.auto_detect_requests,
             "poll_sec": args.poll_sec,
             "python_bin": args.python_bin,
         }
@@ -3741,15 +5677,19 @@ def cmd_report(args: argparse.Namespace) -> int:
             payload = _all_sessions_report_payload(root, status_filters=status_filters, since_dt=since_dt)
             if args.format == "json":
                 out = json.dumps(payload, indent=2, sort_keys=True)
-            else:
+            elif args.format == "markdown":
                 out = _render_markdown_report_all(payload)
+            else:
+                out = _render_html_report_all(payload)
         else:
             sid = _resolve_session_for_report(root, args.session, latest=args.latest)
             payload = _session_report_payload(root, sid)
             if args.format == "json":
                 out = json.dumps(payload, indent=2, sort_keys=True)
-            else:
+            elif args.format == "markdown":
                 out = _render_markdown_report(payload)
+            else:
+                out = _render_html_report(payload)
 
         if args.output:
             out_path = Path(args.output).resolve()
@@ -4182,6 +6122,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Approval token lifetime in minutes for EXTEND actions.",
     )
+    p_email_detect = p_email.add_mutually_exclusive_group()
+    p_email_detect.add_argument(
+        "--auto-detect-requests",
+        dest="auto_detect_requests",
+        action="store_true",
+        help="Auto-trigger review when an allowed email contains a lore link or patch attachment even without explicit A2A command.",
+    )
+    p_email_detect.add_argument(
+        "--no-auto-detect-requests",
+        dest="auto_detect_requests",
+        action="store_false",
+        help="Disable implicit email request detection (explicit A2A commands only).",
+    )
+    p_email.set_defaults(auto_detect_requests=None)
     p_email.add_argument("--python-bin", help="Python executable used for spawned loop commands.")
     p_email.set_defaults(func=cmd_email_bridge)
 
@@ -4199,7 +6153,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_submit.set_defaults(func=cmd_submit)
 
-    p_report = sub.add_parser("report", help="Render session report (markdown/json).")
+    p_report = sub.add_parser("report", help="Render session report (markdown/json/html).")
     p_report.add_argument("--session", help="Session id. Defaults to active or latest.")
     p_report.add_argument(
         "--latest",
@@ -4222,7 +6176,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_report.add_argument(
         "--format",
-        choices=["markdown", "json"],
+        choices=["markdown", "json", "html"],
         default="markdown",
         help="Output format.",
     )

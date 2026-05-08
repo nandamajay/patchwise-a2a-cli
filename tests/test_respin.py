@@ -7,6 +7,7 @@ from unittest import mock
 
 from a2a_cli.conflict_resolver import ConflictError, ConflictResolver
 from a2a_cli.respin import (
+    _collect_patch_series,
     _generate_cover_letter_template,
     detect_version_number,
     next_version_path,
@@ -87,16 +88,30 @@ class RespinTests(unittest.TestCase):
             cover = _generate_cover_letter_template(
                 out_dir,
                 3,
-                [
-                    {"title": "Fix runtime pm", "location": "a.patch:10", "id": "F-1"},
-                    {"title": "Fix error path", "location": "b.patch:44", "id": "F-2"},
-                ],
+                ["Fix runtime pm (a.patch:10)", "Fix error path (b.patch:44)"],
                 previous_cover=None,
             )
             text = cover.read_text(encoding="utf-8")
-            self.assertIn("Changes in v3:", text)
+            self.assertIn("Changes since v2:", text)
             self.assertIn("Fix runtime pm", text)
-            self.assertIn("F-1", text)
+            self.assertNotIn("F-1", text)
+
+    def test_collect_patch_series_prefers_nested_series_and_skips_cover(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "watch"
+            series_dir = root / "thread.patches"
+            series_dir.mkdir(parents=True, exist_ok=True)
+            (series_dir / "0000-cover-letter.patch").write_text("cover\n", encoding="utf-8")
+            (series_dir / "0001-a.patch").write_text("a\n", encoding="utf-8")
+            (series_dir / "0002-b.patch").write_text("b\n", encoding="utf-8")
+            (series_dir / "obsolete_0003-c.patch").write_text("c\n", encoding="utf-8")
+            (series_dir / "series").write_text(
+                "\n".join(["0000-cover-letter.patch", "0001-a.patch", "0002-b.patch"]) + "\n",
+                encoding="utf-8",
+            )
+            patches = _collect_patch_series(root)
+            names = [p.name for p in patches]
+            self.assertEqual(names, ["0001-a.patch", "0002-b.patch"])
 
     def test_patch_applied_in_series_order(self) -> None:
         with tempfile.TemporaryDirectory() as td:

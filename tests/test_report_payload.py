@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from a2a_cli.main import _session_report_payload
+from a2a_cli.main import _render_html_report, _render_markdown_report, _session_report_payload, _write_session_html_report
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -12,6 +12,171 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 class ReportPayloadTests(unittest.TestCase):
+    def test_write_session_html_report_generates_html_file(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            a2a = root / ".a2a"
+            sessions = a2a / "sessions"
+            reports = a2a / "reports" / "sess-html"
+            patches_root = a2a / "patches" / "sess-html"
+            sessions.mkdir(parents=True, exist_ok=True)
+            reports.mkdir(parents=True, exist_ok=True)
+            (patches_root / "v3").mkdir(parents=True, exist_ok=True)
+
+            _write_json(
+                reports / "lore_next_version.json",
+                {
+                    "kind": "lore_copy",
+                    "next_version": 3,
+                    "output_path": str((patches_root / "v3").resolve()),
+                    "source_watch_path": "/tmp/input-series",
+                    "generated_at": "2026-01-01T00:02:00+00:00",
+                },
+            )
+
+            _write_json(
+                reports / "round-01-findings.json",
+                {
+                    "findings": [
+                        {
+                            "severity": "high",
+                            "title": "<unsafe-title>",
+                            "location": "x.patch:10",
+                            "evidence": ["test"],
+                            "required_action": "fix",
+                            "status": "open",
+                            "source_comment_id": "source-1",
+                        }
+                    ]
+                },
+            )
+            _write_json(
+                reports / "round-01-gate.json",
+                {"ran": True, "passed": True, "failures": 0},
+            )
+
+            session = {
+                "id": "sess-html",
+                "task": "html-report-test",
+                "status": "in_progress",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:01:00+00:00",
+                "max_rounds": 3,
+                "current_round": 2,
+                "open_findings": 1,
+                "builder_display_name": "chanakya",
+                "reviewer_display_name": "aryabhatta",
+                "reviewer_name": "aryabhatta",
+                "repo_path": "/tmp/repo",
+                "branch": "a2a/test",
+                "builder_command": "builder",
+                "reviewer_command": "reviewer",
+                "watch_path": "/tmp/input-series",
+                "lore": {
+                    "message_id": "20260101000000.1-ajay.nandam@oss.qualcomm.com",
+                },
+                "rounds": [
+                    {
+                        "round": 1,
+                        "validated_at": "2026-01-01T00:01:00+00:00",
+                        "findings_total": 1,
+                        "findings_open": 1,
+                        "findings_file": str(reports / "round-01-findings.json"),
+                    }
+                ],
+            }
+            _write_json(sessions / "sess-html.json", session)
+
+            out = _write_session_html_report(root, "sess-html")
+            self.assertEqual(out, reports / "session-report.html")
+            self.assertTrue(out.exists())
+
+            html = out.read_text(encoding="utf-8")
+            self.assertIn("<html", html)
+            self.assertIn("PatchWise A2A — Agent Performance Report", html)
+            self.assertIn("Round 1", html)
+            self.assertIn("&lt;unsafe-title&gt;", html)
+            self.assertIn("Session I/O Details", html)
+            self.assertIn(str((patches_root / "v3").resolve()), html)
+            self.assertIn("https://lore.kernel.org/r/20260101000000.1-ajay.nandam@oss.qualcomm.com", html)
+
+    def test_render_html_report_allows_in_memory_render(self) -> None:
+        payload = {
+            "session": {
+                "id": "sess-inline",
+                "task": "inline-html",
+                "status": "lgtm",
+                "builder_display_name": "chanakya",
+                "reviewer_display_name": "aryabhatta",
+                "reviewer_name": "aryabhatta",
+                "branch": "a2a/test",
+                "repo_path": "/tmp/repo",
+                "updated_at": "2026-01-01T00:01:00+00:00",
+            },
+            "totals": {
+                "rounds_validated": 0,
+                "findings_total": 0,
+                "findings_open_last": 0,
+                "gate_failures_total": 0,
+                "gate_failed_rounds": 0,
+            },
+            "rounds": [],
+            "prior_comment_summary": [],
+        }
+        html = _render_html_report(payload)
+        self.assertIn("sess-inline", html)
+        self.assertIn("No validated rounds yet.", html)
+
+    def test_markdown_report_includes_absolute_io_details(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            a2a = root / ".a2a"
+            sessions = a2a / "sessions"
+            reports = a2a / "reports" / "sess-md"
+            patches_root = a2a / "patches" / "sess-md"
+            sessions.mkdir(parents=True, exist_ok=True)
+            reports.mkdir(parents=True, exist_ok=True)
+            (patches_root / "v2").mkdir(parents=True, exist_ok=True)
+
+            _write_json(
+                reports / "lore_next_version.json",
+                {
+                    "kind": "lore_copy",
+                    "next_version": 2,
+                    "output_path": str((patches_root / "v2").resolve()),
+                    "source_watch_path": "/tmp/md-watch",
+                },
+            )
+
+            session = {
+                "id": "sess-md",
+                "task": "markdown-details-test",
+                "status": "lgtm",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:01:00+00:00",
+                "max_rounds": 1,
+                "current_round": 1,
+                "open_findings": 0,
+                "builder_display_name": "chanakya",
+                "reviewer_display_name": "aryabhatta",
+                "reviewer_name": "aryabhatta",
+                "repo_path": "/tmp/repo",
+                "branch": "a2a/test",
+                "builder_command": "builder",
+                "reviewer_command": "reviewer",
+                "watch_path": "/tmp/md-watch",
+                "lore": {"message_id": "20260101001010.2-ajay.nandam@oss.qualcomm.com"},
+                "rounds": [],
+            }
+            _write_json(sessions / "sess-md.json", session)
+
+            payload = _session_report_payload(root, "sess-md")
+            md = _render_markdown_report(payload)
+            self.assertIn("## Session I/O Details", md)
+            self.assertIn(f"- input_watch_path: {str(Path('/tmp/md-watch').resolve())}", md)
+            self.assertIn("- input_lore_link: https://lore.kernel.org/r/20260101001010.2-ajay.nandam@oss.qualcomm.com", md)
+            self.assertIn(f"- latest_output_patches_path: {str((patches_root / 'v2').resolve())}", md)
+
     def test_prior_comment_summary_tracks_fixed_by_a2a(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

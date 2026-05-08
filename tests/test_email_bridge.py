@@ -5,6 +5,7 @@ from pathlib import Path
 
 from a2a_cli.email_bridge import (
     BridgeStore,
+    _infer_auto_run_request,
     extend_stopped_session_once,
     handle_command,
     load_bridge_config,
@@ -23,6 +24,34 @@ def _write_session(root: Path, session_id: str, payload: dict) -> None:
 
 
 class EmailBridgeTests(unittest.TestCase):
+    def test_auto_infer_lore_request_without_explicit_command(self) -> None:
+        inferred = _infer_auto_run_request(
+            "Review request",
+            "Please review: https://lore.kernel.org/all/20260413121824.375473-1-ajay.nandam@oss.qualcomm.com/.",
+            [],
+        )
+        self.assertIsNotNone(inferred)
+        self.assertEqual(inferred["command"], "run")
+        self.assertEqual(inferred["mode"], "lore")
+        self.assertIn("URL", inferred["params"])
+        self.assertEqual(
+            inferred["params"]["URL"],
+            "https://lore.kernel.org/all/20260413121824.375473-1-ajay.nandam@oss.qualcomm.com/",
+        )
+
+    def test_auto_infer_attachment_precedence_over_lore(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            patch = Path(td) / "0001-demo.patch"
+            patch.write_text("Subject: [PATCH] demo\n", encoding="utf-8")
+            inferred = _infer_auto_run_request(
+                "Review request",
+                "Link: https://lore.kernel.org/r/20260413.1@foo",
+                [patch],
+            )
+            self.assertIsNotNone(inferred)
+            self.assertEqual(inferred["command"], "run")
+            self.assertEqual(inferred["mode"], "attachment")
+
     def test_parse_command_from_subject_with_body_params(self) -> None:
         parsed = parse_a2a_command(
             "A2A RUN LORE URL=https://lore.kernel.org/all/123@example.com/",
@@ -166,9 +195,11 @@ class EmailBridgeTests(unittest.TestCase):
                     "imap_host": "",
                     "imap_user": "",
                     "imap_password": "",
+                    "auto_detect_requests": True,
                 },
             )
             self.assertFalse(result["imap_enabled"])
+            self.assertTrue(result["auto_detect_requests"])
             self.assertIn("incoming_processed", result)
             self.assertIn("notifications_sent", result)
 

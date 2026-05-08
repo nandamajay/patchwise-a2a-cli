@@ -128,13 +128,14 @@ class RoundSummaryTests(unittest.TestCase):
             self.assertEqual(summary["prior_comments"]["totals"]["fixed_by_a2a"], 1)
             self.assertEqual(summary["timing"]["started_at"], "2026-05-04T06:00:00+00:00")
             self.assertEqual(summary["timing"]["elapsed_seconds"], 95)
+            self.assertEqual(summary["timing"]["elapsed_hms"], "00:01:35")
 
             md = _render_round_runtime_summary_markdown(summary)
             self.assertIn("Round 2 Summary", md)
             self.assertIn("- builder: chanakya", md)
             self.assertIn("- reviewer: aryabhatta", md)
             self.assertIn("## Round Timing", md)
-            self.assertIn("- elapsed_seconds: 95", md)
+            self.assertIn("- elapsed: 00:01:35", md)
             self.assertIn("Top Open Findings", md)
 
 

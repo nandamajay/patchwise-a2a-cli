@@ -77,6 +77,9 @@ Strict requirements:
    - Pre-existing/out-of-scope concern -> emit low-severity advisory finding with explicit follow-up.
 8) If your own reasoning mentions uncertainty/risk, do not return an empty findings list unless resolved with concrete evidence.
 9) If prior comments exist and independent scan is required, include at least one non-prior finding with source_comment_id like subsys-scan:<topic>.
+10) Enforce logical patch split and bisect-safe ordering across the full series, not only per-file syntax.
+11) If patchset artifacts exist (*.patches/series, *.cover, *.mbx), verify subject counts/order consistency and emit open finding(s) on mismatch.
+12) Cover letter "Changes since vN" must describe technical delta; tool/meta-only changelog text is a finding.
 EOF
 
 set +e
