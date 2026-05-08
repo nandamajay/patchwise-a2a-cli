@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" role="img" aria-label="Terminal babysitting meme">
+  <rect width="960" height="540" fill="#0d1117"/>
+  <rect x="70" y="70" width="820" height="340" rx="18" fill="#111827" stroke="#30363d" stroke-width="3"/>
+  <circle cx="95" cy="95" r="8" fill="#ff6b6b"/>
+  <circle cx="122" cy="95" r="8" fill="#ffd700"/>
+  <circle cx="149" cy="95" r="8" fill="#00d4aa"/>
+  <text x="190" y="102" fill="#8b949e" font-size="16" font-family="monospace">qgenie review --patch series-v2.patch</text>
+
+  <text x="95" y="150" fill="#7ee787" font-size="22" font-family="monospace">$ validating patch set...</text>
+  <text x="95" y="190" fill="#f4c430" font-size="20" font-family="monospace">...still thinking...</text>
+  <text x="95" y="230" fill="#f4c430" font-size="20" font-family="monospace">...need more context...</text>
+  <text x="95" y="270" fill="#f4c430" font-size="20" font-family="monospace">...one more round...</text>
+  <text x="95" y="320" fill="#7ee787" font-size="20" font-family="monospace">Engineer mental RAM: 98%</text>
+
+  <rect x="560" y="140" width="280" height="220" rx="14" fill="#1f2937" stroke="#ff6b6b" stroke-width="3"/>
+  <text x="592" y="190" fill="#ff6b6b" font-size="24" font-family="Segoe UI, sans-serif" font-weight="800">BABYSITTING MODE</text>
+  <text x="592" y="230" fill="#e5e7eb" font-size="18" font-family="Segoe UI, sans-serif">Chai: getting cold</text>
+  <text x="592" y="266" fill="#e5e7eb" font-size="18" font-family="Segoe UI, sans-serif">Focus: context switching</text>
+  <text x="592" y="302" fill="#e5e7eb" font-size="18" font-family="Segoe UI, sans-serif">Status: waiting...</text>
+
+  <rect x="70" y="440" width="820" height="54" rx="27" fill="#2a1020" stroke="#ff6b6b" stroke-width="2"/>
+  <text x="95" y="475" fill="#ffd7d7" font-size="24" font-family="Segoe UI, sans-serif" font-weight="700">At this point, who is assistant and who is babysitter?</text>
+</svg>

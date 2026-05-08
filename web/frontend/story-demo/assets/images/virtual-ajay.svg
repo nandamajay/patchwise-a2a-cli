@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" role="img" aria-label="Virtual Ajay intro comic panel">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1a1040"/>
+      <stop offset="100%" stop-color="#0a0a14"/>
+    </linearGradient>
+    <linearGradient id="badge" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#6c63ff"/>
+      <stop offset="100%" stop-color="#00d4aa"/>
+    </linearGradient>
+  </defs>
+  <rect width="960" height="540" fill="url(#bg)"/>
+  <circle cx="760" cy="120" r="90" fill="#6c63ff" opacity="0.25"/>
+  <circle cx="190" cy="430" r="120" fill="#00d4aa" opacity="0.18"/>
+
+  <rect x="80" y="90" width="420" height="360" rx="28" fill="#151527" stroke="#303050" stroke-width="4"/>
+  <circle cx="290" cy="220" r="74" fill="#ffd9b3" stroke="#2a2a45" stroke-width="4"/>
+  <rect x="230" y="280" width="120" height="120" rx="28" fill="#6c63ff"/>
+  <rect x="220" y="405" width="140" height="20" rx="10" fill="#00d4aa"/>
+  <path d="M248 212 q42 -54 84 0" stroke="#2a2a45" stroke-width="5" fill="none"/>
+  <circle cx="268" cy="230" r="6" fill="#2a2a45"/>
+  <circle cx="312" cy="230" r="6" fill="#2a2a45"/>
+  <path d="M264 250 q26 24 52 0" stroke="#2a2a45" stroke-width="4" fill="none"/>
+
+  <rect x="540" y="130" width="340" height="160" rx="20" fill="#20183c" stroke="#6c63ff" stroke-width="3"/>
+  <text x="566" y="178" fill="#f2f2ff" font-size="28" font-family="Segoe UI, sans-serif" font-weight="700">Hey team, this is</text>
+  <text x="566" y="220" fill="#00d4aa" font-size="36" font-family="Segoe UI, sans-serif" font-weight="800">Virtual Ajay</text>
+  <text x="566" y="260" fill="#ffd700" font-size="22" font-family="Segoe UI, sans-serif">"AI presents. Salary stays human."</text>
+
+  <rect x="230" y="40" width="500" height="42" rx="21" fill="url(#badge)"/>
+  <text x="250" y="68" fill="#04040a" font-size="22" font-family="Segoe UI, sans-serif" font-weight="900">A2A PATCH REVIEW SHOWTIME</text>
+</svg>

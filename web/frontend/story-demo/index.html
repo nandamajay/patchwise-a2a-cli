@@ -1,0 +1,1161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Virtual Ajay - A2A Patch Review Story</title>
+<style>
+  :root {
+    --bg: #0a0a14;
+    --card: #1a1a2e;
+    --border: #2a2a45;
+    --accent: #6c63ff;
+    --accent2: #00d4aa;
+    --accent3: #ff6b6b;
+    --gold: #ffd700;
+    --text: #e8e8f0;
+    --muted: #a8afcc;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: radial-gradient(1100px 700px at 18% 12%, #1d1840 0%, var(--bg) 50%);
+    color: var(--text);
+    font-family: "Segoe UI", "Trebuchet MS", sans-serif;
+    overflow: hidden;
+    width: 100vw;
+    height: 100vh;
+  }
+
+  #stage {
+    position: relative;
+    width: 100vw;
+    height: calc(100vh - 96px);
+    overflow: hidden;
+    padding: 14px;
+  }
+
+  .scene-shell {
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    background: linear-gradient(160deg, rgba(26, 26, 46, 0.95), rgba(16, 20, 36, 0.95));
+    width: 100%;
+    height: 100%;
+    display: grid;
+    grid-template-rows: auto auto 1fr auto;
+    gap: 14px;
+    padding: 14px;
+    transform: translateY(6px) scale(0.995);
+    opacity: 0;
+  }
+
+  .scene-shell.ready {
+    animation: sceneIn 380ms ease forwards;
+  }
+
+  @keyframes sceneIn {
+    from { opacity: 0; transform: translateY(8px) scale(0.99); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  .scene-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .badge {
+    border-radius: 999px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: #05060d;
+    padding: 6px 12px;
+    font-size: 11px;
+    font-weight: 900;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+  }
+
+  #sceneTitle {
+    font-size: clamp(1.2rem, 2.5vw, 2rem);
+    font-weight: 900;
+    letter-spacing: 0.2px;
+  }
+
+  #sceneSub {
+    color: var(--muted);
+    font-size: clamp(0.9rem, 1.55vw, 1.03rem);
+  }
+
+  .scene-main {
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 1.12fr 1fr;
+    gap: 12px;
+  }
+
+  .panel {
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+    background: linear-gradient(155deg, rgba(18, 20, 35, 0.9), rgba(23, 28, 48, 0.9));
+    padding: 12px;
+    display: grid;
+    gap: 10px;
+    min-height: 0;
+  }
+
+  #panelTitle {
+    font-size: 1rem;
+    font-weight: 800;
+    color: #f5f6ff;
+  }
+
+  #points {
+    list-style: none;
+    display: grid;
+    gap: 7px;
+  }
+
+  #points li {
+    font-size: 0.91rem;
+    color: #e7e9f8;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 10px;
+    padding: 8px 10px;
+    line-height: 1.35;
+  }
+
+  #meme {
+    border: 1px solid rgba(255, 215, 0, 0.34);
+    border-radius: 12px;
+    background: rgba(32, 28, 15, 0.55);
+    color: #ffd778;
+    font-size: 0.9rem;
+    font-weight: 700;
+    padding: 9px 10px;
+  }
+
+  .doodle-stage {
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 14px;
+    background: radial-gradient(520px 320px at 20% 20%, rgba(108, 99, 255, 0.24), rgba(12, 14, 26, 0.94));
+    padding: 8px;
+    display: grid;
+    grid-template-rows: 1fr auto;
+    min-height: 0;
+  }
+
+  #comicImg {
+    width: 100%;
+    height: 100%;
+    min-height: 220px;
+    max-height: 320px;
+    object-fit: cover;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    transform: scale(1);
+    transition: transform 800ms ease;
+  }
+
+  .scene-shell.ready #comicImg {
+    animation: floatZoom 5.2s ease-in-out infinite;
+  }
+
+  @keyframes floatZoom {
+    0%, 100% { transform: translateY(0) scale(1); }
+    50% { transform: translateY(-4px) scale(1.02); }
+  }
+
+  .speaker-row {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 10px;
+    padding-top: 6px;
+  }
+
+  .avatar {
+    width: 88px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 12px;
+    background: rgba(0, 0, 0, 0.18);
+    padding: 6px;
+    display: grid;
+    gap: 4px;
+    justify-items: center;
+    transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+  }
+
+  .avatar svg {
+    width: 44px;
+    height: 44px;
+    display: block;
+  }
+
+  .avatar .label {
+    font-size: 0.69rem;
+    color: #d0d5f0;
+    font-weight: 700;
+  }
+
+  .avatar.speaking {
+    transform: translateY(-3px) scale(1.03);
+    border-color: var(--accent2);
+    box-shadow: 0 0 0 2px rgba(0, 212, 170, 0.35), 0 10px 28px rgba(0, 0, 0, 0.34);
+  }
+
+  .avatar.speaking svg {
+    animation: nod 550ms ease;
+  }
+
+  @keyframes nod {
+    0% { transform: translateY(0); }
+    30% { transform: translateY(2px); }
+    60% { transform: translateY(-3px); }
+    100% { transform: translateY(0); }
+  }
+
+  .dialogue {
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.93);
+    color: #0a0f1d;
+    padding: 8px 10px;
+    min-height: 70px;
+    display: grid;
+    gap: 4px;
+  }
+
+  #dlgWho {
+    font-size: 0.68rem;
+    font-weight: 900;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    opacity: 0.72;
+  }
+
+  #dlgMsg {
+    font-size: 0.9rem;
+    font-weight: 700;
+    line-height: 1.25;
+    min-height: 36px;
+  }
+
+  .scene-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .tag {
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: rgba(108, 99, 255, 0.13);
+    color: #d6dbff;
+    padding: 5px 10px;
+    font-size: 0.78rem;
+    font-weight: 700;
+  }
+
+  #subtitleBar {
+    position: absolute;
+    left: 50%;
+    bottom: 12px;
+    transform: translateX(-50%);
+    width: min(94vw, 1160px);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 13px;
+    padding: 10px 14px;
+    background: rgba(0, 0, 0, 0.72);
+    color: #f7f8fd;
+    font-size: 0.95rem;
+    backdrop-filter: blur(8px);
+    opacity: 0;
+    transition: opacity 180ms ease;
+    z-index: 12;
+  }
+
+  #subtitleBar.show { opacity: 1; }
+
+  #controls {
+    height: 96px;
+    border-top: 1px solid var(--border);
+    background: #0c0d18;
+    display: grid;
+    grid-template-columns: auto 1fr auto auto;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+  }
+
+  .btn-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+  }
+
+  button {
+    appearance: none;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--card);
+    color: var(--text);
+    font-size: 0.84rem;
+    font-weight: 800;
+    padding: 8px 11px;
+    cursor: pointer;
+  }
+
+  button:hover { border-color: var(--accent); }
+  button.active { border-color: var(--accent2); background: #2a2852; }
+
+  #seekBar {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    min-width: 0;
+  }
+
+  .scene-dot {
+    flex: 1;
+    min-width: 12px;
+    height: 8px;
+    border-radius: 999px;
+    background: #2a2a45;
+    position: relative;
+    cursor: pointer;
+  }
+
+  .scene-dot.done { background: var(--accent2); }
+  .scene-dot.active { background: var(--accent); }
+
+  .scene-dot .tip {
+    position: absolute;
+    left: 50%;
+    bottom: 13px;
+    transform: translateX(-50%);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    background: rgba(0, 0, 0, 0.86);
+    border-radius: 6px;
+    padding: 2px 6px;
+    color: #e9ebfb;
+    font-size: 10px;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .scene-dot:hover .tip { opacity: 1; }
+
+  #sceneLabel {
+    font-size: 0.83rem;
+    color: #ced3ef;
+    min-width: 240px;
+  }
+
+  #timer {
+    font-size: 0.83rem;
+    color: var(--muted);
+    text-align: right;
+    min-width: 88px;
+  }
+
+  #voiceStatus {
+    font-size: 0.74rem;
+    color: #9dcdd7;
+    text-align: right;
+    min-width: 210px;
+  }
+
+  #progressBar {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    height: 3px;
+    width: 0%;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    z-index: 20;
+  }
+
+  @media (max-width: 980px) {
+    #stage { padding: 8px; }
+    .scene-main { grid-template-columns: 1fr; }
+    #comicImg { max-height: 250px; }
+    #controls {
+      height: auto;
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }
+    #sceneLabel, #timer, #voiceStatus { min-width: 0; text-align: left; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .scene-shell,
+    .scene-shell.ready,
+    #comicImg,
+    .avatar,
+    .avatar svg,
+    #subtitleBar {
+      animation: none !important;
+      transition: none !important;
+    }
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="progressBar"></div>
+
+  <article id="sceneShell" class="scene-shell">
+    <header class="scene-header">
+      <span class="badge" id="sceneBadge">Scene 1</span>
+      <h1 id="sceneTitle">Loading story...</h1>
+    </header>
+
+    <p id="sceneSub"></p>
+
+    <section class="scene-main">
+      <div class="panel">
+        <h3 id="panelTitle">Loading...</h3>
+        <ul id="points"></ul>
+        <div id="meme"></div>
+
+        <div class="dialogue">
+          <div id="dlgWho">Speaker</div>
+          <div id="dlgMsg"></div>
+        </div>
+      </div>
+
+      <div class="doodle-stage">
+        <img id="comicImg" src="" alt="Scene comic"/>
+        <div class="speaker-row">
+          <div class="avatar" id="avAjay">
+            <svg viewBox="0 0 64 64" aria-hidden="true">
+              <circle cx="32" cy="22" r="12" fill="#ffd9b3" stroke="#0b1020" stroke-width="2"/>
+              <rect x="18" y="36" width="28" height="18" rx="8" fill="#6c63ff" stroke="#0b1020" stroke-width="2"/>
+              <circle cx="27" cy="21" r="1.7" fill="#0b1020"/>
+              <circle cx="37" cy="21" r="1.7" fill="#0b1020"/>
+              <path d="M27 27 q5 4 10 0" fill="none" stroke="#0b1020" stroke-width="2"/>
+            </svg>
+            <span class="label">Ajay</span>
+          </div>
+          <div class="avatar" id="avVirtual">
+            <svg viewBox="0 0 64 64" aria-hidden="true">
+              <rect x="20" y="10" width="24" height="24" rx="6" fill="#c8f8f2" stroke="#0b1020" stroke-width="2"/>
+              <rect x="17" y="36" width="30" height="18" rx="8" fill="#00d4aa" stroke="#0b1020" stroke-width="2"/>
+              <circle cx="27" cy="22" r="2" fill="#0b1020"/>
+              <circle cx="37" cy="22" r="2" fill="#0b1020"/>
+              <path d="M26 28 h12" stroke="#0b1020" stroke-width="2"/>
+              <rect x="30" y="5" width="4" height="5" rx="2" fill="#ffd700"/>
+            </svg>
+            <span class="label">Virtual Ajay</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <footer class="scene-footer">
+      <span class="tag" id="tagTone">Tone</span>
+      <span class="tag" id="tagTheme">Theme</span>
+    </footer>
+  </article>
+
+  <div id="subtitleBar"></div>
+</div>
+
+<div id="controls">
+  <div class="btn-row">
+    <button id="btnPrev">Prev</button>
+    <button id="btnPlay">Pause</button>
+    <button id="btnNext">Next</button>
+    <button id="btnVoice" class="active">Voice On</button>
+    <button id="btnMode" class="active">Mode: Browser TTS</button>
+  </div>
+
+  <div id="seekBar"></div>
+  <div id="sceneLabel">Scene 1 / 9</div>
+  <div>
+    <div id="timer">0:00 / 0:00</div>
+    <div id="voiceStatus">Initializing voice...</div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canTTS = ("speechSynthesis" in window) && ("SpeechSynthesisUtterance" in window);
+
+  const scenes = [
+    {
+      id: "s1",
+      name: "Virtual Ajay Intro",
+      dur: 34,
+      badge: "Opening",
+      title: "Hey hello team, this is Virtual Ajay",
+      sub: "If AI is doing everything, why should I present? Let AI present also.",
+      panelTitle: "Personal Intro + Salary Meme",
+      points: [
+        "Virtual Ajay starts the demo: AI presenting about AI.",
+        "Humor hook: 'Slide I do, salary you take, bhai.'",
+        "Sets Indian-English and story-driven tone."
+      ],
+      meme: "Meme: AI does execution. Human gets payroll.",
+      speaker: "virtual",
+      voiceKind: "male",
+      line: "Hey hello team. This is Virtual Ajay. If AI is doing everything, why should I give presentation? AI told me, slide I do, salary you take.",
+      tts: "Hey hello team. This is Virtual Ajay. If AI is doing everything, why should I give presentation? AI told me, slide I do, salary you take.",
+      audio: "./assets/audio/s1.mp3",
+      img: "./assets/images/virtual-ajay.svg",
+      imgAlt: "Virtual Ajay intro comic",
+      tone: "Hero + Comic",
+      theme: "Virtual intro"
+    },
+    {
+      id: "s2",
+      name: "Babysitting Problem",
+      dur: 42,
+      badge: "Problem",
+      title: "Terminal was running. My brain was buffering.",
+      sub: "You had to watch the CLI continuously and keep guessing if it needed intervention.",
+      panelTitle: "Why A2A Was Needed",
+      points: [
+        "Constant monitoring consumed attention bandwidth.",
+        "Frequent context checks reduced productivity.",
+        "CPU was idle; engineer focus was not."
+      ],
+      meme: "Punchline: At this point, who is the assistant?",
+      speaker: "ajay",
+      voiceKind: "male",
+      line: "When I started with QGenie, I gave one task and kept watching every minute. Is it stuck? Is it asking input? CPU was free, but my mental RAM was full.",
+      tts: "When I started with QGenie, I gave one task and kept watching every minute. Is it stuck? Is it asking input? CPU was free, but my mental RAM was full.",
+      audio: "./assets/audio/s2.mp3",
+      img: "./assets/images/babysitting-terminal.svg",
+      imgAlt: "Babysitting terminal meme",
+      tone: "Relatable",
+      theme: "Bandwidth drain"
+    },
+    {
+      id: "s3",
+      name: "Birth of A2A",
+      dur: 35,
+      badge: "Idea",
+      title: "What if I create a virtual me?",
+      sub: "One agent should build, another should challenge, and human should supervise outcomes.",
+      panelTitle: "From Friction to Framework",
+      points: [
+        "Virtual me concept evolved into role-based automation.",
+        "Builder + reviewer separation reduced ambiguity.",
+        "A2A became a workflow, not just a prompt."
+      ],
+      meme: "Meme: Clone your discipline, not your stress.",
+      speaker: "ajay",
+      voiceKind: "male",
+      line: "Then one thought came. Why not create a virtual me to supervise continuously? One agent builds, one agent reviews. That was the birth of Agent to Agent.",
+      tts: "Then one thought came. Why not create a virtual me to supervise continuously? One agent builds, one agent reviews. That was the birth of Agent to Agent.",
+      audio: "./assets/audio/s3.mp3",
+      img: "./assets/images/a2a-roles.svg",
+      imgAlt: "A2A role split",
+      tone: "Discovery",
+      theme: "Virtual me"
+    },
+    {
+      id: "s4",
+      name: "A2A Architecture",
+      dur: 52,
+      badge: "Architecture",
+      title: "Builder, Reviewer, and Validation Gate",
+      sub: "Chanakya builds patches, Aryabhatta reviews claims, gate blocks weak closure.",
+      panelTitle: "How Patch Review Flow Works",
+      points: [
+        "Chanakya: patch generation and fixes.",
+        "Aryabhatta: evidence-backed review and findings.",
+        "LGTM allowed only when open findings are zero."
+      ],
+      meme: "No trust-me-bro closure. Prove-it closure.",
+      speaker: "virtual",
+      voiceKind: "male",
+      line: "A2A patch review has role separation. Chanakya builds and fixes patches. Aryabhatta reviews and challenges claims. LGTM is blocked until open findings are zero.",
+      tts: "A2A patch review has role separation. Chanakya builds and fixes patches. Aryabhatta reviews and challenges claims. LGTM is blocked until open findings are zero.",
+      audio: "./assets/audio/s4.mp3",
+      img: "./assets/images/pipeline.svg",
+      imgAlt: "A2A pipeline",
+      tone: "Technical",
+      theme: "Evidence gate"
+    },
+    {
+      id: "s5",
+      name: "Humor Break",
+      dur: 36,
+      badge: "Comedy",
+      title: "Embedded jobs safe? Keep chai-samosa plan B",
+      sub: "Mid-story comic break with Indian office humor.",
+      panelTitle: "Chai and Samosa Startup",
+      points: [
+        "Fear joke: AI speed changed assumptions.",
+        "Backup joke: chai and samosa shop outside office.",
+        "Tagline: low latency chai, deterministic samosa."
+      ],
+      meme: "SLA: chai hot, packet loss zero.",
+      speaker: "ajay",
+      voiceKind: "male",
+      line: "We thought embedded jobs are safe for some time. After seeing this speed, we need a backup plan. Chai and samosa shop outside Qualcomm office. Low latency chai, deterministic samosa.",
+      tts: "We thought embedded jobs are safe for some time. After seeing this speed, we need a backup plan. Chai and samosa shop outside Qualcomm office. Low latency chai, deterministic samosa.",
+      audio: "./assets/audio/s5.mp3",
+      img: "./assets/images/chai-samosa.svg",
+      imgAlt: "Chai and samosa humor panel",
+      tone: "Comic",
+      theme: "Plan B meme"
+    },
+    {
+      id: "s6",
+      name: "Why A2A Works",
+      dur: 48,
+      badge: "Impact",
+      title: "Less babysitting, more verified output",
+      sub: "A2A improved consistency by making closure criteria explicit.",
+      panelTitle: "Observed Improvements",
+      points: [
+        "Structured rounds instead of ad-hoc prompt loops.",
+        "Traceability via reports, logs, and artifact paths.",
+        "Quality gate avoids false LGTM drift."
+      ],
+      meme: "From panic refresh to predictable pipeline.",
+      speaker: "virtual",
+      voiceKind: "male",
+      line: "Why A2A works better? Less babysitting, better verification, full traceability. Reports, logs, and patch paths are captured. No trust me bro closure.",
+      tts: "Why A2A works better? Less babysitting, better verification, full traceability. Reports, logs, and patch paths are captured. No trust me bro closure.",
+      audio: "./assets/audio/s6.mp3",
+      img: "./assets/images/pipeline.svg",
+      imgAlt: "Reliability panel",
+      tone: "Confident",
+      theme: "Outcome quality"
+    },
+    {
+      id: "s7",
+      name: "Capabilities",
+      dur: 42,
+      badge: "Capabilities",
+      title: "Local files, lore links, email attachments",
+      sub: "A2A can normalize varied patch-review inputs into one review pipeline.",
+      panelTitle: "Input to Output",
+      points: [
+        "Accepts local paths, lore URLs, and email patch input.",
+        "Runs autonomous rounds and supports auto-respin.",
+        "Generates versioned outputs with path traceability."
+      ],
+      meme: "One inbox, many patch flows.",
+      speaker: "ajay",
+      voiceKind: "male",
+      line: "Inputs can come from local patch files, lore links, and email attachments. A2A runs review rounds and supports auto respin after closure.",
+      tts: "Inputs can come from local patch files, lore links, and email attachments. A2A runs review rounds and supports auto respin after closure.",
+      audio: "./assets/audio/s7.mp3",
+      img: "./assets/images/pipeline.svg",
+      imgAlt: "Capabilities panel",
+      tone: "Practical",
+      theme: "Operational"
+    },
+    {
+      id: "s8",
+      name: "Beyond Patch Review",
+      dur: 36,
+      badge: "Vision",
+      title: "Reusable A2A pattern for more workflows",
+      sub: "Builder-verifier loop can scale to PR checks, triage, and compliance automation.",
+      panelTitle: "Framework Potential",
+      points: [
+        "Reusable for engineering quality gates.",
+        "Extensible for bug triage and release notes.",
+        "Same pattern: build, challenge, validate, close."
+      ],
+      meme: "Build agent + Verify agent = team multiplier.",
+      speaker: "virtual",
+      voiceKind: "male",
+      line: "The same builder verifier pattern can extend to pull request quality gates, bug triage, compliance checks, and release notes.",
+      tts: "The same builder verifier pattern can extend to pull request quality gates, bug triage, compliance checks, and release notes.",
+      audio: "./assets/audio/s8.mp3",
+      img: "./assets/images/a2a-roles.svg",
+      imgAlt: "Reusable pattern panel",
+      tone: "Strategic",
+      theme: "Scalability"
+    },
+    {
+      id: "s9",
+      name: "Closing",
+      dur: 30,
+      badge: "Closing",
+      title: "Less firefighting. More engineering.",
+      sub: "Virtual Ajay handles repetitive loops so Real Ajay can focus on decisions.",
+      panelTitle: "Final Note",
+      points: [
+        "A2A reduces cognitive overhead in iterative review.",
+        "Evidence-backed closure strengthens trust.",
+        "Team keeps speed without losing review rigor."
+      ],
+      meme: "Chai stays hot, patch series stays clean.",
+      speaker: "ajay",
+      voiceKind: "male",
+      line: "Agent to Agent is my answer to AI babysitting. Less firefighting, more engineering, and yes, chai stays hot.",
+      tts: "Agent to Agent is my answer to AI babysitting. Less firefighting, more engineering, and yes, chai stays hot.",
+      audio: "./assets/audio/s9.mp3",
+      img: "./assets/images/closing.svg",
+      imgAlt: "Closing panel",
+      tone: "Warm close",
+      theme: "Takeaway"
+    }
+  ];
+
+  const state = {
+    sceneIndex: 0,
+    sceneTime: 0,
+    globalTime: 0,
+    playing: true,
+    voiceEnabled: true,
+    voiceMode: "tts",
+    lastTs: 0,
+    rafId: 0,
+    subtitleTimer: null,
+    typeTimer: null,
+    spokenScene: -1,
+    currentAudio: null,
+    voiceToken: 0,
+    dialogueToken: 0,
+    voices: { male: null, female: null }
+  };
+
+  const nodes = {
+    shell: document.getElementById("sceneShell"),
+    badge: document.getElementById("sceneBadge"),
+    title: document.getElementById("sceneTitle"),
+    sub: document.getElementById("sceneSub"),
+    panelTitle: document.getElementById("panelTitle"),
+    points: document.getElementById("points"),
+    meme: document.getElementById("meme"),
+    comic: document.getElementById("comicImg"),
+    dlgWho: document.getElementById("dlgWho"),
+    dlgMsg: document.getElementById("dlgMsg"),
+    avAjay: document.getElementById("avAjay"),
+    avVirtual: document.getElementById("avVirtual"),
+    tagTone: document.getElementById("tagTone"),
+    tagTheme: document.getElementById("tagTheme"),
+    subtitle: document.getElementById("subtitleBar"),
+    seekBar: document.getElementById("seekBar"),
+    sceneLabel: document.getElementById("sceneLabel"),
+    timer: document.getElementById("timer"),
+    voiceStatus: document.getElementById("voiceStatus"),
+    progress: document.getElementById("progressBar"),
+    btnPrev: document.getElementById("btnPrev"),
+    btnPlay: document.getElementById("btnPlay"),
+    btnNext: document.getElementById("btnNext"),
+    btnVoice: document.getElementById("btnVoice"),
+    btnMode: document.getElementById("btnMode")
+  };
+
+  function fmt(sec) {
+    const s = Math.max(0, Math.floor(sec));
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}:${String(r).padStart(2, "0")}`;
+  }
+
+  function totalDuration() {
+    return scenes.reduce((a, s) => a + s.dur, 0);
+  }
+
+  function elapsedBeforeScene(index) {
+    let t = 0;
+    for (let i = 0; i < index; i++) t += scenes[i].dur;
+    return t;
+  }
+
+  function normalize(text) {
+    return (text || "").toLowerCase();
+  }
+
+  function pickVoices() {
+    if (!canTTS) return;
+
+    const voices = window.speechSynthesis.getVoices ? window.speechSynthesis.getVoices() : [];
+    const english = voices.filter(v => normalize(v.lang).startsWith("en"));
+    const enIN = english.filter(v => normalize(v.lang) === "en-in");
+    const pool = enIN.length ? enIN : english;
+
+    const femaleHints = ["zira", "susan", "heera", "female", "woman", "sonia", "priya", "kavya", "neerja"];
+    const maleHints = ["david", "mark", "ravi", "male", "man", "arjun", "rahul", "aditya", "prabhat"];
+
+    const findByHints = (hints) => {
+      return pool.find(v => hints.some(h => normalize(v.name).includes(h))) ||
+             pool.find(v => hints.some(h => normalize(v.voiceURI).includes(h)));
+    };
+
+    let female = findByHints(femaleHints);
+    let male = findByHints(maleHints);
+
+    if (!female && pool.length) female = pool[0];
+    if (!male && pool.length > 1) {
+      male = pool.find(v => !female || v.name !== female.name) || pool[0];
+    }
+    if (!male && pool.length) male = pool[0];
+
+    state.voices = { male, female };
+
+    if (pool.length) {
+      const vname = male ? `${male.name}` : pool[0].name;
+      nodes.voiceStatus.textContent = `TTS ready (${pool.length} voices). Using: ${vname}`;
+    }
+  }
+
+  function initVoices() {
+    if (!canTTS) {
+      nodes.voiceStatus.textContent = "SpeechSynthesis unavailable. Use recorded mode.";
+      return;
+    }
+    pickVoices();
+    if (window.speechSynthesis) {
+      window.speechSynthesis.onvoiceschanged = () => pickVoices();
+      window.speechSynthesis.getVoices();
+    }
+  }
+
+  function stopVoiceOutputs() {
+    state.voiceToken += 1;
+
+    if (state.currentAudio) {
+      try {
+        state.currentAudio.pause();
+        state.currentAudio.currentTime = 0;
+      } catch (err) {
+        // Ignore browser audio exceptions.
+      }
+      state.currentAudio = null;
+    }
+
+    if (canTTS) {
+      window.speechSynthesis.cancel();
+    }
+  }
+
+  function splitUtterances(text) {
+    return text
+      .split(/(?<=[.!?])\s+/)
+      .map(t => t.trim())
+      .filter(Boolean);
+  }
+
+  function speakChunk(text, voiceKind, token) {
+    return new Promise((resolve) => {
+      if (!canTTS || token !== state.voiceToken || !state.voiceEnabled) {
+        resolve();
+        return;
+      }
+
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = "en-IN";
+      u.rate = 1.07;
+      u.pitch = voiceKind === "female" ? 1.08 : 1.02;
+      u.volume = 1.0;
+
+      const chosen = voiceKind === "female" ? state.voices.female : state.voices.male;
+      if (chosen) u.voice = chosen;
+
+      u.onend = () => resolve();
+      u.onerror = () => resolve();
+      window.speechSynthesis.speak(u);
+    });
+  }
+
+  async function speakWithBrowser(text, voiceKind) {
+    if (!canTTS || !state.voiceEnabled) return;
+
+    window.speechSynthesis.cancel();
+    const token = state.voiceToken;
+
+    const chunks = splitUtterances(text);
+    if (!chunks.length) return;
+
+    nodes.voiceStatus.textContent = "Speaking via browser TTS...";
+
+    for (const chunk of chunks) {
+      if (token !== state.voiceToken || !state.playing || !state.voiceEnabled) {
+        return;
+      }
+      await speakChunk(chunk, voiceKind, token);
+    }
+
+    if (token === state.voiceToken) {
+      nodes.voiceStatus.textContent = "TTS line complete.";
+    }
+  }
+
+  function playRecorded(scene) {
+    stopVoiceOutputs();
+
+    const audio = new Audio(scene.audio);
+    audio.preload = "auto";
+
+    audio.onplaying = () => {
+      nodes.voiceStatus.textContent = `Playing recorded voice (${scene.id}).`;
+    };
+
+    audio.onerror = () => {
+      nodes.voiceStatus.textContent = `Recorded voice missing for ${scene.id}. Switching to TTS.`;
+      state.voiceMode = "tts";
+      nodes.btnMode.textContent = "Mode: Browser TTS";
+      nodes.btnMode.classList.add("active");
+      state.spokenScene = -1;
+      playVoiceForScene(scene);
+    };
+
+    const p = audio.play();
+    if (p && typeof p.catch === "function") {
+      p.catch(() => {
+        nodes.voiceStatus.textContent = "Recorded audio blocked by browser. Click Play once.";
+      });
+    }
+
+    state.currentAudio = audio;
+  }
+
+  function highlightSpeaker(kind) {
+    nodes.avAjay.classList.toggle("speaking", kind === "ajay");
+    nodes.avVirtual.classList.toggle("speaking", kind === "virtual");
+  }
+
+  function typeDialogue(text, token) {
+    clearTimeout(state.typeTimer);
+    nodes.dlgMsg.textContent = "";
+
+    let i = 0;
+    const speed = 13;
+
+    function tick() {
+      if (token !== state.dialogueToken) return;
+      if (i < text.length) {
+        nodes.dlgMsg.textContent += text[i++];
+        state.typeTimer = setTimeout(tick, speed);
+      }
+    }
+    tick();
+  }
+
+  function showSubtitle(text, durationSec) {
+    clearTimeout(state.subtitleTimer);
+    nodes.subtitle.textContent = text;
+    nodes.subtitle.classList.add("show");
+    state.subtitleTimer = setTimeout(() => {
+      nodes.subtitle.classList.remove("show");
+    }, Math.max(1200, durationSec * 1000));
+  }
+
+  function playVoiceForScene(scene) {
+    if (!state.playing || !state.voiceEnabled) return;
+    if (state.spokenScene === state.sceneIndex) return;
+
+    state.spokenScene = state.sceneIndex;
+
+    if (state.voiceMode === "recorded") {
+      playRecorded(scene);
+      return;
+    }
+
+    stopVoiceOutputs();
+    speakWithBrowser(scene.tts || scene.line, scene.voiceKind || "male");
+  }
+
+  function updateDots() {
+    const dots = nodes.seekBar.querySelectorAll(".scene-dot");
+    dots.forEach((dot, idx) => {
+      dot.className = "scene-dot";
+      if (idx < state.sceneIndex) dot.classList.add("done");
+      if (idx === state.sceneIndex) dot.classList.add("active");
+    });
+  }
+
+  function renderScene(index, resetSceneTime = true) {
+    const safe = Math.max(0, Math.min(scenes.length - 1, index));
+    state.sceneIndex = safe;
+    if (resetSceneTime) state.sceneTime = 0;
+
+    const scene = scenes[safe];
+
+    nodes.badge.textContent = `${scene.badge} - ${safe + 1}/${scenes.length}`;
+    nodes.title.textContent = scene.title;
+    nodes.sub.textContent = scene.sub;
+    nodes.panelTitle.textContent = scene.panelTitle;
+    nodes.meme.textContent = scene.meme;
+    nodes.comic.src = scene.img;
+    nodes.comic.alt = scene.imgAlt;
+    nodes.tagTone.textContent = `Tone: ${scene.tone}`;
+    nodes.tagTheme.textContent = `Theme: ${scene.theme}`;
+
+    nodes.points.innerHTML = "";
+    for (const item of scene.points) {
+      const li = document.createElement("li");
+      li.textContent = item;
+      nodes.points.appendChild(li);
+    }
+
+    nodes.sceneLabel.textContent = `Scene ${safe + 1} / ${scenes.length} - ${scene.name}`;
+
+    nodes.shell.classList.remove("ready");
+    void nodes.shell.offsetWidth;
+    nodes.shell.classList.add("ready");
+
+    nodes.dlgWho.textContent = scene.speaker === "virtual" ? "Virtual Ajay" : "Ajay";
+    state.dialogueToken += 1;
+    typeDialogue(scene.line, state.dialogueToken);
+    highlightSpeaker(scene.speaker);
+
+    showSubtitle(scene.sub, scene.dur * 0.45);
+    updateDots();
+
+    state.spokenScene = -1;
+    playVoiceForScene(scene);
+  }
+
+  function updateTimeUI() {
+    state.globalTime = elapsedBeforeScene(state.sceneIndex) + state.sceneTime;
+    nodes.timer.textContent = `${fmt(state.globalTime)} / ${fmt(totalDuration())}`;
+
+    const scene = scenes[state.sceneIndex];
+    const pct = (state.sceneTime / scene.dur) * 100;
+    nodes.progress.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+  }
+
+  function frame(ts) {
+    if (!state.playing) return;
+    if (!state.lastTs) state.lastTs = ts;
+
+    const dt = (ts - state.lastTs) / 1000;
+    state.lastTs = ts;
+    state.sceneTime += dt;
+
+    const scene = scenes[state.sceneIndex];
+    if (state.sceneTime >= scene.dur) {
+      if (state.sceneIndex < scenes.length - 1) {
+        renderScene(state.sceneIndex + 1, true);
+      } else {
+        renderScene(0, true);
+        state.globalTime = 0;
+      }
+    }
+
+    updateTimeUI();
+    state.rafId = requestAnimationFrame(frame);
+  }
+
+  function play() {
+    if (state.playing) return;
+    state.playing = true;
+    state.lastTs = 0;
+    nodes.btnPlay.textContent = "Pause";
+    playVoiceForScene(scenes[state.sceneIndex]);
+    state.rafId = requestAnimationFrame(frame);
+  }
+
+  function pause() {
+    state.playing = false;
+    cancelAnimationFrame(state.rafId);
+    state.lastTs = 0;
+    nodes.btnPlay.textContent = "Play";
+    stopVoiceOutputs();
+  }
+
+  function togglePlay() {
+    if (state.playing) pause();
+    else play();
+  }
+
+  function jump(delta) {
+    const next = Math.max(0, Math.min(scenes.length - 1, state.sceneIndex + delta));
+    renderScene(next, true);
+    updateTimeUI();
+  }
+
+  function goToScene(index) {
+    renderScene(index, true);
+    updateTimeUI();
+  }
+
+  function buildSeekDots() {
+    nodes.seekBar.innerHTML = "";
+    scenes.forEach((s, i) => {
+      const dot = document.createElement("button");
+      dot.type = "button";
+      dot.className = "scene-dot" + (i === 0 ? " active" : "");
+      dot.innerHTML = `<span class="tip">${s.name}</span>`;
+      dot.addEventListener("click", () => goToScene(i));
+      nodes.seekBar.appendChild(dot);
+    });
+  }
+
+  function bindControls() {
+    nodes.btnPrev.addEventListener("click", () => jump(-1));
+    nodes.btnNext.addEventListener("click", () => jump(1));
+    nodes.btnPlay.addEventListener("click", togglePlay);
+
+    nodes.btnVoice.addEventListener("click", () => {
+      state.voiceEnabled = !state.voiceEnabled;
+      nodes.btnVoice.textContent = state.voiceEnabled ? "Voice On" : "Voice Off";
+      nodes.btnVoice.classList.toggle("active", state.voiceEnabled);
+
+      if (!state.voiceEnabled) {
+        stopVoiceOutputs();
+        nodes.voiceStatus.textContent = "Voice muted.";
+      } else {
+        state.spokenScene = -1;
+        playVoiceForScene(scenes[state.sceneIndex]);
+      }
+    });
+
+    nodes.btnMode.addEventListener("click", () => {
+      state.voiceMode = state.voiceMode === "tts" ? "recorded" : "tts";
+      nodes.btnMode.textContent = state.voiceMode === "tts" ? "Mode: Browser TTS" : "Mode: Recorded";
+      nodes.btnMode.classList.toggle("active", state.voiceMode === "tts");
+      state.spokenScene = -1;
+      playVoiceForScene(scenes[state.sceneIndex]);
+    });
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowRight") jump(1);
+      if (e.key === "ArrowLeft") jump(-1);
+      if (e.key === " ") {
+        e.preventDefault();
+        togglePlay();
+      }
+    });
+  }
+
+  function init() {
+    initVoices();
+    buildSeekDots();
+    bindControls();
+
+    renderScene(0, true);
+    updateTimeUI();
+
+    state.rafId = requestAnimationFrame(frame);
+
+    if (!canTTS) {
+      state.voiceMode = "recorded";
+      nodes.btnMode.textContent = "Mode: Recorded";
+      nodes.btnMode.classList.remove("active");
+      nodes.voiceStatus.textContent = "Browser TTS unavailable. Using recorded mode.";
+    }
+
+    setTimeout(() => {
+      if (state.voiceEnabled && state.playing) {
+        state.spokenScene = -1;
+        playVoiceForScene(scenes[state.sceneIndex]);
+      }
+    }, 180);
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>

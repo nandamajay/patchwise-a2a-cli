@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" role="img" aria-label="A2A roles and debate loop">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1322"/>
+      <stop offset="100%" stop-color="#130f26"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6c63ff"/>
+    </marker>
+  </defs>
+  <rect width="960" height="540" fill="url(#bg)"/>
+
+  <rect x="90" y="120" width="300" height="300" rx="24" fill="#1f1a32" stroke="#ff6b6b" stroke-width="3"/>
+  <text x="130" y="170" fill="#ff6b6b" font-size="34" font-family="Segoe UI, sans-serif" font-weight="800">Chanakya</text>
+  <text x="130" y="205" fill="#a7a9be" font-size="18" font-family="Segoe UI, sans-serif">Builder Agent</text>
+  <text x="130" y="250" fill="#f1f5f9" font-size="17" font-family="Segoe UI, sans-serif">- writes patches</text>
+  <text x="130" y="282" fill="#f1f5f9" font-size="17" font-family="Segoe UI, sans-serif">- fixes findings</text>
+  <text x="130" y="314" fill="#f1f5f9" font-size="17" font-family="Segoe UI, sans-serif">- sends PATCH_READY</text>
+
+  <rect x="570" y="120" width="300" height="300" rx="24" fill="#152b2b" stroke="#00d4aa" stroke-width="3"/>
+  <text x="610" y="170" fill="#00d4aa" font-size="34" font-family="Segoe UI, sans-serif" font-weight="800">Aryabhatta</text>
+  <text x="610" y="205" fill="#a7a9be" font-size="18" font-family="Segoe UI, sans-serif">Reviewer Agent</text>
+  <text x="610" y="250" fill="#f1f5f9" font-size="17" font-family="Segoe UI, sans-serif">- challenges claims</text>
+  <text x="610" y="282" fill="#f1f5f9" font-size="17" font-family="Segoe UI, sans-serif">- verifies evidence</text>
+  <text x="610" y="314" fill="#f1f5f9" font-size="17" font-family="Segoe UI, sans-serif">- gives LGTM / RESPIN</text>
+
+  <path d="M390 240 C470 170 490 170 570 240" stroke="#6c63ff" stroke-width="4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M570 300 C490 370 470 370 390 300" stroke="#00d4aa" stroke-width="4" fill="none" marker-end="url(#arrow)"/>
+
+  <rect x="330" y="60" width="300" height="40" rx="20" fill="#6c63ff"/>
+  <text x="367" y="87" fill="#ffffff" font-size="20" font-family="Segoe UI, sans-serif" font-weight="700">DEBATE -> FIX -> VERIFY</text>
+
+  <rect x="300" y="448" width="360" height="54" rx="12" fill="#0f172a" stroke="#ffd700" stroke-width="2"/>
+  <text x="320" y="482" fill="#ffd700" font-size="24" font-family="Segoe UI, sans-serif" font-weight="800">LGTM gate: open findings must be zero</text>
+</svg>

@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" role="img" aria-label="A2A pipeline and outputs">
+  <rect width="960" height="540" fill="#0e1424"/>
+  <text x="72" y="82" fill="#dbe7ff" font-size="36" font-family="Segoe UI, sans-serif" font-weight="900">A2A Patch Review Pipeline</text>
+
+  <rect x="70" y="130" width="170" height="90" rx="14" fill="#1f2937" stroke="#6c63ff" stroke-width="3"/>
+  <text x="95" y="182" fill="#e5e7eb" font-size="22" font-family="Segoe UI, sans-serif">Input</text>
+  <text x="95" y="208" fill="#9ca3af" font-size="16" font-family="Segoe UI, sans-serif">lore / email / files</text>
+
+  <rect x="300" y="130" width="170" height="90" rx="14" fill="#1f2937" stroke="#ff6b6b" stroke-width="3"/>
+  <text x="334" y="182" fill="#e5e7eb" font-size="22" font-family="Segoe UI, sans-serif">Builder</text>
+  <text x="334" y="208" fill="#9ca3af" font-size="16" font-family="Segoe UI, sans-serif">Chanakya</text>
+
+  <rect x="530" y="130" width="170" height="90" rx="14" fill="#1f2937" stroke="#00d4aa" stroke-width="3"/>
+  <text x="558" y="182" fill="#e5e7eb" font-size="22" font-family="Segoe UI, sans-serif">Reviewer</text>
+  <text x="558" y="208" fill="#9ca3af" font-size="16" font-family="Segoe UI, sans-serif">Aryabhatta</text>
+
+  <rect x="760" y="130" width="130" height="90" rx="14" fill="#1f2937" stroke="#ffd700" stroke-width="3"/>
+  <text x="780" y="182" fill="#e5e7eb" font-size="22" font-family="Segoe UI, sans-serif">Gate</text>
+  <text x="775" y="208" fill="#9ca3af" font-size="16" font-family="Segoe UI, sans-serif">LGTM</text>
+
+  <path d="M240 176 H300 M470 176 H530 M700 176 H760" stroke="#6c63ff" stroke-width="5"/>
+  <polygon points="296,170 308,176 296,182" fill="#6c63ff"/>
+  <polygon points="526,170 538,176 526,182" fill="#6c63ff"/>
+  <polygon points="756,170 768,176 756,182" fill="#6c63ff"/>
+
+  <rect x="70" y="270" width="820" height="210" rx="18" fill="#101826" stroke="#334155" stroke-width="2"/>
+  <text x="95" y="318" fill="#c7f9ec" font-size="26" font-family="Segoe UI, sans-serif" font-weight="800">Outputs You Can Trust</text>
+  <text x="95" y="360" fill="#f1f5f9" font-size="22" font-family="Segoe UI, sans-serif">- Versioned patch series</text>
+  <text x="95" y="394" fill="#f1f5f9" font-size="22" font-family="Segoe UI, sans-serif">- Cover letter with changelog and previous link</text>
+  <text x="95" y="428" fill="#f1f5f9" font-size="22" font-family="Segoe UI, sans-serif">- Reports, logs, and absolute output paths</text>
+  <text x="95" y="462" fill="#f1f5f9" font-size="22" font-family="Segoe UI, sans-serif">- Auto-respin after review closure</text>
+</svg>

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" role="img" aria-label="Closing scene with virtual and real Ajay">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#120a30"/>
+      <stop offset="100%" stop-color="#0a0a14"/>
+    </linearGradient>
+  </defs>
+  <rect width="960" height="540" fill="url(#bg)"/>
+
+  <rect x="90" y="80" width="780" height="260" rx="24" fill="#1a1a2e" stroke="#6c63ff" stroke-width="3"/>
+  <text x="132" y="146" fill="#ffffff" font-size="44" font-family="Segoe UI, sans-serif" font-weight="900">Less firefighting. More engineering.</text>
+  <text x="132" y="198" fill="#00d4aa" font-size="38" font-family="Segoe UI, sans-serif" font-weight="800">A2A = evidence + autonomy + speed</text>
+  <text x="132" y="246" fill="#ffd700" font-size="32" font-family="Segoe UI, sans-serif" font-weight="800">Chai stays hot. Patches stay clean.</text>
+  <text x="132" y="296" fill="#9ca3af" font-size="24" font-family="Segoe UI, sans-serif">Questions? Real Ajay answers, Virtual Ajay syncs with next job.</text>
+
+  <rect x="90" y="372" width="360" height="120" rx="16" fill="#201b38" stroke="#00d4aa" stroke-width="2"/>
+  <text x="120" y="430" fill="#00d4aa" font-size="42">🤖</text>
+  <text x="190" y="430" fill="#f1f5f9" font-size="28" font-family="Segoe UI, sans-serif" font-weight="700">Virtual Ajay</text>
+
+  <rect x="500" y="372" width="370" height="120" rx="16" fill="#201b38" stroke="#ffd700" stroke-width="2"/>
+  <text x="530" y="430" fill="#ffd700" font-size="42">👨‍💻</text>
+  <text x="600" y="430" fill="#f1f5f9" font-size="28" font-family="Segoe UI, sans-serif" font-weight="700">Real Ajay</text>
+</svg>

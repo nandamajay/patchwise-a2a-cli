@@ -1,0 +1,154 @@
+{
+  "title": "Agent2Agent Story Demo",
+  "version": "v1",
+  "duration_seconds": 400,
+  "scenes": [
+    {
+      "id": "s1",
+      "start": 0,
+      "duration": 35,
+      "speaker": "virtual_ajay",
+      "tone": "hero",
+      "title": "Virtual Ajay Entry",
+      "subtitle": "If AI is doing everything, why should I present?",
+      "dialogue": [
+        "Hey hello team, this is Virtual Ajay speaking.",
+        "If AI is doing everything, why should I give presentation? Let AI present also.",
+        "But AI told me, bhai slide I will do, salary you take. At least you come and speak."
+      ],
+      "meme": "AI does task. Human gets payroll.",
+      "doodle": "hero"
+    },
+    {
+      "id": "s2",
+      "start": 35,
+      "duration": 45,
+      "speaker": "ajay",
+      "tone": "narration",
+      "title": "The Babysitting Problem",
+      "subtitle": "Terminal was running. My focus was buffering.",
+      "dialogue": [
+        "When I started with QGenie CLI, I gave one task and then kept watching every second.",
+        "Is it stuck? Is it asking input? Is it still alive?",
+        "CPU was free. But my mental RAM was full."
+      ],
+      "meme": "Progress bar moves. Chai cools down.",
+      "doodle": "terminal"
+    },
+    {
+      "id": "s3",
+      "start": 80,
+      "duration": 40,
+      "speaker": "ajay",
+      "tone": "idea",
+      "title": "Birth of A2A",
+      "subtitle": "Create a virtual me that never gets tired.",
+      "dialogue": [
+        "Then one thought came. Why not have a virtual me supervising this flow continuously?",
+        "Not one random AI output, but a reliable system with roles and checks.",
+        "That was the starting point of Agent2Agent."
+      ],
+      "meme": "Clone your discipline, not your stress.",
+      "doodle": "lightbulb"
+    },
+    {
+      "id": "s4",
+      "start": 120,
+      "duration": 60,
+      "speaker": "virtual_ajay",
+      "tone": "technical",
+      "title": "What is Agent2Agent",
+      "subtitle": "Builder, Reviewer, and Validation Gate.",
+      "dialogue": [
+        "A2A uses two specialized agents.",
+        "Chanakya builds and fixes. Aryabhatta reviews and challenges.",
+        "Validation gates block weak LGTM and force evidence-backed closure.",
+        "So this is not trust me bro engineering. This is prove it engineering."
+      ],
+      "meme": "AI reviewing AI. Human reviewing confidence.",
+      "doodle": "duel"
+    },
+    {
+      "id": "s5",
+      "start": 180,
+      "duration": 40,
+      "speaker": "ajay",
+      "tone": "comic",
+      "title": "Embedded Meme Break",
+      "subtitle": "Plan B business model activated.",
+      "dialogue": [
+        "We all thought embedded jobs are safe for some time.",
+        "After seeing this speed, we need a backup plan.",
+        "Maybe chai and samosa shop outside Qualcomm office.",
+        "Tagline: low latency chai, deterministic samosa delivery."
+      ],
+      "meme": "Real-time snacks, zero packet loss.",
+      "doodle": "samosa"
+    },
+    {
+      "id": "s6",
+      "start": 220,
+      "duration": 60,
+      "speaker": "virtual_ajay",
+      "tone": "hero",
+      "title": "Why A2A Works Better",
+      "subtitle": "Less babysitting. More verified output.",
+      "dialogue": [
+        "A2A removes constant manual babysitting.",
+        "It enforces role separation and adversarial review.",
+        "It stores logs, findings, summaries, and patch paths for traceability.",
+        "And it blocks false LGTM when open findings remain."
+      ],
+      "meme": "From panic refresh to predictable pipeline.",
+      "doodle": "scoreboard"
+    },
+    {
+      "id": "s7",
+      "start": 280,
+      "duration": 45,
+      "speaker": "ajay",
+      "tone": "technical",
+      "title": "Capabilities in Practice",
+      "subtitle": "Local patch, lore link, email attachment.",
+      "dialogue": [
+        "Input can come from local patches, lore links, or email attachments.",
+        "A2A runs rounds, resolves findings, and can auto-respin after LGTM.",
+        "Final output includes reports, cover-letter history, and versioned patch paths."
+      ],
+      "meme": "One inbox. Many patch flows.",
+      "doodle": "pipeline"
+    },
+    {
+      "id": "s8",
+      "start": 325,
+      "duration": 40,
+      "speaker": "virtual_ajay",
+      "tone": "vision",
+      "title": "Beyond Patch Review",
+      "subtitle": "Reusable pattern for engineering automation.",
+      "dialogue": [
+        "The same model can run PR quality gates, bug triage, compliance checks, and release notes.",
+        "Anywhere one agent builds and another verifies, A2A fits naturally.",
+        "This is a framework, not just one patch script."
+      ],
+      "meme": "Build agent + Verify agent = team multiplier.",
+      "doodle": "orbit"
+    },
+    {
+      "id": "s9",
+      "start": 365,
+      "duration": 35,
+      "speaker": "ajay",
+      "tone": "closing",
+      "title": "Closing",
+      "subtitle": "Less firefighting. More engineering.",
+      "dialogue": [
+        "So Agent2Agent is my answer to AI babysitting.",
+        "From constant monitoring to autonomous, evidence-driven review.",
+        "Less firefighting, more engineering, and yes, chai stays hot."
+      ],
+      "meme": "LGTM with tea-time intact.",
+      "doodle": "trophy"
+    }
+  ]
+}

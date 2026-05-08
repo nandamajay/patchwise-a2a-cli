@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" role="img" aria-label="Chai and samosa meme panel">
+  <rect width="960" height="540" fill="#1a1026"/>
+  <circle cx="760" cy="96" r="72" fill="#ff6b6b" opacity="0.22"/>
+  <circle cx="178" cy="410" r="96" fill="#ffd700" opacity="0.14"/>
+
+  <rect x="82" y="72" width="796" height="130" rx="18" fill="#2a1738" stroke="#ff6b6b" stroke-width="3"/>
+  <text x="116" y="124" fill="#ffffff" font-size="36" font-family="Segoe UI, sans-serif" font-weight="900">Embedded jobs are safe... we said.</text>
+  <text x="116" y="170" fill="#ffd700" font-size="28" font-family="Segoe UI, sans-serif" font-weight="700">A2A speed entered the chat.</text>
+
+  <rect x="82" y="230" width="360" height="230" rx="22" fill="#251429" stroke="#ffd700" stroke-width="3"/>
+  <text x="118" y="278" fill="#ffd700" font-size="30" font-family="Segoe UI, sans-serif" font-weight="900">Plan B Startup</text>
+  <text x="118" y="320" fill="#fff8dc" font-size="22" font-family="Segoe UI, sans-serif">Chai &amp; Samosa Stall</text>
+  <text x="118" y="356" fill="#fff8dc" font-size="22" font-family="Segoe UI, sans-serif">outside Qualcomm office</text>
+  <text x="118" y="398" fill="#00d4aa" font-size="20" font-family="Segoe UI, sans-serif">"Low latency chai, deterministic samosa"</text>
+
+  <rect x="500" y="230" width="378" height="230" rx="22" fill="#13232a" stroke="#00d4aa" stroke-width="3"/>
+  <text x="532" y="286" font-size="74">☕</text>
+  <text x="648" y="286" font-size="74">🥟</text>
+  <text x="532" y="336" fill="#00d4aa" font-size="30" font-family="Segoe UI, sans-serif" font-weight="800">SLA Dashboard</text>
+  <text x="532" y="376" fill="#dffef7" font-size="22" font-family="monospace">uptime: 99.9%</text>
+  <text x="532" y="408" fill="#dffef7" font-size="22" font-family="monospace">latency: 02:00 min</text>
+  <text x="532" y="440" fill="#dffef7" font-size="22" font-family="monospace">chai_temp: HOT</text>
+</svg>
