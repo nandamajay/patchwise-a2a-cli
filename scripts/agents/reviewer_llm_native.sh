@@ -42,6 +42,11 @@ if ! command -v qgenie >/dev/null 2>&1; then
   exit 1
 fi
 
+QGENIE_SUBCMD="agent-exec"
+if qgenie codex-exec --help >/dev/null 2>&1; then
+  QGENIE_SUBCMD="codex-exec"
+fi
+
 PROMPT_FILE="$(mktemp)"
 OUT_FILE="$(mktemp)"
 trap 'rm -f "$PROMPT_FILE" "$OUT_FILE"' EXIT
@@ -80,25 +85,46 @@ Strict requirements:
 10) Enforce logical patch split and bisect-safe ordering across the full series, not only per-file syntax.
 11) If patchset artifacts exist (*.patches/series, *.cover, *.mbx), verify subject counts/order consistency and emit open finding(s) on mismatch.
 12) Cover letter "Changes since vN" must describe technical delta; tool/meta-only changelog text is a finding.
+13) Flag unchecked __must_check runtime-PM calls in touched code (e.g. devm_pm_runtime_enable) and track maintainer-requested subject/message wording fixes.
 EOF
 
 set +e
-if command -v timeout >/dev/null 2>&1; then
-  timeout "$LLM_TIMEOUT_SEC" qgenie agent exec \
-    --cd "$WORKDIR" \
-    --skip-git-repo-check \
-    --full-auto \
-    --output-schema "$SCHEMA" \
-    --output-last-message "$OUT_FILE" \
-    - < "$PROMPT_FILE"
+if [[ "$QGENIE_SUBCMD" == "codex-exec" ]]; then
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$LLM_TIMEOUT_SEC" qgenie codex-exec \
+      --cd "$WORKDIR" \
+      --skip-git-repo-check \
+      --full-auto \
+      --output-schema "$SCHEMA" \
+      --output-last-message "$OUT_FILE" \
+      - < "$PROMPT_FILE"
+  else
+    qgenie codex-exec \
+      --cd "$WORKDIR" \
+      --skip-git-repo-check \
+      --full-auto \
+      --output-schema "$SCHEMA" \
+      --output-last-message "$OUT_FILE" \
+      - < "$PROMPT_FILE"
+  fi
 else
-  qgenie agent exec \
-    --cd "$WORKDIR" \
-    --skip-git-repo-check \
-    --full-auto \
-    --output-schema "$SCHEMA" \
-    --output-last-message "$OUT_FILE" \
-    - < "$PROMPT_FILE"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$LLM_TIMEOUT_SEC" qgenie agent exec \
+      --cd "$WORKDIR" \
+      --skip-git-repo-check \
+      --full-auto \
+      --output-schema "$SCHEMA" \
+      --output-last-message "$OUT_FILE" \
+      - < "$PROMPT_FILE"
+  else
+    qgenie agent exec \
+      --cd "$WORKDIR" \
+      --skip-git-repo-check \
+      --full-auto \
+      --output-schema "$SCHEMA" \
+      --output-last-message "$OUT_FILE" \
+      - < "$PROMPT_FILE"
+  fi
 fi
 RC=$?
 set -e
@@ -114,7 +140,7 @@ if [[ $RC -ne 0 ]]; then
   if run_fallback; then
     exit 0
   fi
-  echo "[aryabhatta-llm] qgenie agent exec failed (rc=$RC)" >&2
+  echo "[aryabhatta-llm] qgenie $QGENIE_SUBCMD failed (rc=$RC)" >&2
   exit $RC
 fi
 

@@ -49,6 +49,11 @@ if ! command -v qgenie >/dev/null 2>&1; then
   exit 1
 fi
 
+QGENIE_SUBCMD="agent-exec"
+if qgenie codex-exec --help >/dev/null 2>&1; then
+  QGENIE_SUBCMD="codex-exec"
+fi
+
 PROMPT_FILE="$(mktemp)"
 OUT_FILE="$(mktemp)"
 trap 'rm -f "$PROMPT_FILE" "$OUT_FILE"' EXIT
@@ -80,23 +85,42 @@ Execution requirements:
 4) Return markdown only with required section headings.
 5) If no changes were needed, state why with evidence.
 6) Always include a `## Residual Risks` section with explicit yes/no risk statements and evidence.
+7) Never ignore fallible __must_check runtime-PM APIs in changed code; fix or justify maintainer-requested commit subject/message wording updates.
 EOF
 
 set +e
-if command -v timeout >/dev/null 2>&1; then
-  timeout "$LLM_TIMEOUT_SEC" qgenie agent exec \
-    --cd "$WORKDIR" \
-    --skip-git-repo-check \
-    --full-auto \
-    --output-last-message "$OUT_FILE" \
-    - < "$PROMPT_FILE"
+if [[ "$QGENIE_SUBCMD" == "codex-exec" ]]; then
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$LLM_TIMEOUT_SEC" qgenie codex-exec \
+      --cd "$WORKDIR" \
+      --skip-git-repo-check \
+      --full-auto \
+      --output-last-message "$OUT_FILE" \
+      - < "$PROMPT_FILE"
+  else
+    qgenie codex-exec \
+      --cd "$WORKDIR" \
+      --skip-git-repo-check \
+      --full-auto \
+      --output-last-message "$OUT_FILE" \
+      - < "$PROMPT_FILE"
+  fi
 else
-  qgenie agent exec \
-    --cd "$WORKDIR" \
-    --skip-git-repo-check \
-    --full-auto \
-    --output-last-message "$OUT_FILE" \
-    - < "$PROMPT_FILE"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$LLM_TIMEOUT_SEC" qgenie agent exec \
+      --cd "$WORKDIR" \
+      --skip-git-repo-check \
+      --full-auto \
+      --output-last-message "$OUT_FILE" \
+      - < "$PROMPT_FILE"
+  else
+    qgenie agent exec \
+      --cd "$WORKDIR" \
+      --skip-git-repo-check \
+      --full-auto \
+      --output-last-message "$OUT_FILE" \
+      - < "$PROMPT_FILE"
+  fi
 fi
 RC=$?
 set -e
@@ -112,7 +136,7 @@ if [[ $RC -ne 0 ]]; then
   if run_fallback; then
     exit 0
   fi
-  echo "[builder-llm] qgenie agent exec failed (rc=$RC)" >&2
+  echo "[builder-llm] qgenie $QGENIE_SUBCMD failed (rc=$RC)" >&2
   exit $RC
 fi
 

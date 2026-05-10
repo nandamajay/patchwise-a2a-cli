@@ -95,6 +95,10 @@ if [[ "$WITH_LLM" == "1" ]]; then
   if ! command -v qgenie >/dev/null 2>&1; then
     echo "qgenie not found; skipping --with-llm check." >&2
   else
+    QGENIE_LLM_CMD=(qgenie agent exec)
+    if qgenie codex-exec --help >/dev/null 2>&1; then
+      QGENIE_LLM_CMD=(qgenie codex-exec)
+    fi
     PROMPT="$(mktemp)"
     OUT="$(mktemp)"
     LOG="$(mktemp)"
@@ -103,7 +107,7 @@ if [[ "$WITH_LLM" == "1" ]]; then
 Return a minimal valid JSON object matching schema.
 EOF
     set +e
-    timeout 90 qgenie agent exec \
+    timeout 90 "${QGENIE_LLM_CMD[@]}" \
       --cd "$WATCH_PATH" \
       --skip-git-repo-check \
       --full-auto \
