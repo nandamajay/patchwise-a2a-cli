@@ -83,6 +83,9 @@ _REV_TOKEN_LOOSE_RE = re.compile(r"(?<![A-Za-z0-9])v(?P<num>\d+)(?![A-Za-z0-9])"
 _PATCHSET_VERSION_DIR_RE = re.compile(r"^v(?P<num>\d+)$", re.IGNORECASE)
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 _LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+")
+_PATCH_NEW_FILE_RE = re.compile(r"^\+\+\+ b/(.+)$")
+_DT_PROPERTY_ASSIGN_RE = re.compile(r"^([A-Za-z0-9,._+-]+)\s*=")
+_DTS_FILE_RE = re.compile(r"(^|/)arch/arm64/boot/dts/.+\.dtsi?$")
 _CONSOLE = Console() if Console else None
 _WATCH_BLOCKED_NOTIFICATION_DOMAINS = {
     "vger.kernel.org",
@@ -97,6 +100,26 @@ _WATCH_BLOCKED_LOCAL_PART_EXACT = {
     "linux-gpio",
     "lkml",
 }
+_DEPRECATED_DT_PROPERTIES = {
+    "qcom,din-ports",
+    "qcom,dout-ports",
+}
+_DOWNSTREAM_DT_PROPERTIES = {
+    "qcom,swr_master_id",
+    "qcom,swr-num-ports",
+    "qcom,swr-port-mapping",
+    "qcom,swr-num-dev",
+    "qcom,swr-clock-stop-mode0",
+    "qcom,swr-mstr-irq-wakeup-capable",
+    "qcom,mipi-sdw-block-packing-mode",
+    "qcom,is-used-swr-gpio",
+    "qcom,rx-swr-gpios",
+    "qcom,va-swr-gpios",
+    "swrm-io-base",
+}
+_DOWNSTREAM_DT_LINE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r'^compatible\s*=\s*"qcom,swr-mstr"'), 'downstream-only compatible "qcom,swr-mstr"'),
+]
 
 
 def _echo(*args: object, sep: str = " ", end: str = "\n") -> None:
@@ -1886,6 +1909,80 @@ def _run_post_respin_checkpatch(
     return payload
 
 
+def _run_post_respin_upstream_compat(
+    output_path: Path,
+) -> dict:
+    payload: dict = {
+        "ran": False,
+        "ok": True,
+        "files_checked": 0,
+        "dts_files_touched": [],
+        "violations": [],
+        "issues": [],
+    }
+    try:
+        patch_files = [p for p in _collect_active_patch_files(output_path) if not _is_cover_patch_file(p)]
+    except Exception as exc:
+        payload["issues"].append(f"cannot collect generated patch files: {exc}")
+        payload["ok"] = False
+        return payload
+    if not patch_files:
+        payload["issues"].append("no generated non-cover patch files found")
+        payload["ok"] = False
+        return payload
+
+    payload["ran"] = True
+    payload["files_checked"] = len(patch_files)
+
+    touched_dts: set[str] = set()
+    violations: list[str] = []
+
+    for patch in patch_files:
+        try:
+            lines = patch.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
+            payload["ok"] = False
+            payload["issues"].append(f"cannot read patch {patch}: {exc}")
+            continue
+
+        current_file = ""
+        for idx, line in enumerate(lines, start=1):
+            m = _PATCH_NEW_FILE_RE.match(line)
+            if m:
+                current_file = str(m.group(1) or "").strip()
+                continue
+            if not current_file or not _DTS_FILE_RE.search(current_file):
+                continue
+            touched_dts.add(current_file)
+            if not line.startswith("+") or line.startswith("+++"):
+                continue
+
+            content = line[1:].strip()
+            prop_match = _DT_PROPERTY_ASSIGN_RE.match(content)
+            prop_name = str(prop_match.group(1) or "") if prop_match else ""
+
+            if prop_name in _DEPRECATED_DT_PROPERTIES:
+                violations.append(
+                    f"{patch.name}:{idx}: deprecated DT property {prop_name!r} added in {current_file}"
+                )
+            if prop_name in _DOWNSTREAM_DT_PROPERTIES:
+                violations.append(
+                    f"{patch.name}:{idx}: downstream-only DT property {prop_name!r} added in {current_file}"
+                )
+            for pat, reason in _DOWNSTREAM_DT_LINE_PATTERNS:
+                if pat.search(content):
+                    violations.append(
+                        f"{patch.name}:{idx}: {reason} in {current_file}"
+                    )
+
+    payload["dts_files_touched"] = sorted(touched_dts)
+    if violations:
+        payload["ok"] = False
+        payload["violations"] = sorted(set(violations))
+        payload["issues"].extend(payload["violations"])
+    return payload
+
+
 def _run_post_respin_validation(
     root: Path,
     session: dict,
@@ -1937,6 +2034,15 @@ def _run_post_respin_validation(
             kernel_root,
         )
 
+    run_upstream_compat = bool(cfg.get("post_respin_upstream_compat", True))
+    upstream_compat_payload = {
+        "ran": False,
+        "ok": True,
+        "issues": [],
+    }
+    if run_upstream_compat:
+        upstream_compat_payload = _run_post_respin_upstream_compat(output_path)
+
     checks = {
         "artifact_coherence": {
             "ok": not artifact_issues,
@@ -1952,6 +2058,7 @@ def _run_post_respin_validation(
         },
         "reviewer_validation": reviewer_payload,
         "checkpatch": checkpatch_payload,
+        "upstream_compatibility": upstream_compat_payload,
     }
 
     all_issues: list[str] = []

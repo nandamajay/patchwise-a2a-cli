@@ -191,6 +191,11 @@ Per round, terminal output includes:
   - `a2a kb --clear`
 - Lore reply watcher:
   - `a2a watch --msgid <id>`
+  - `a2a watch --msgid <id> --auto-followup --task "<task>"` (starts/continues loop on new replies)
+  - `a2a watch --msgid <id> --notify-email nandam@qti.qualcomm.com` (emails reply-miss observations)
+  - Watch notifications have a hard guard against mailing-list/lore-style recipients; blocked targets are skipped.
+  - For unattended follow-up, the watcher process must stay running continuously (for example via `tmux`, `screen`, `systemd`, or CI runner).
+  - If watcher is not running, no automatic reply-triggered review occurs; run `a2a loop` manually.
 
 ## Key Artifact Paths
 
@@ -231,6 +236,7 @@ Frequently tuned keys:
 - `builder_command`, `reviewer_command`
 - `llm_native_default`, `llm_native_strict`, `llm_native_fallback`, `llm_native_timeout_sec`
 - `validation_gate_enabled`, `validation_gate_strict`, `validation_gate_checkpatch`
+- `post_respin_checkpatch`, `post_respin_upstream_compat`
 - `prior_review_gate`, `prior_review_search`, `prior_review_max_comments`
 - `reviewer_consistency_guard`
 - `full_subsystem_review_required`

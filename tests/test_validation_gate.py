@@ -8,6 +8,7 @@ from a2a_cli.main import (
     _resolve_gate_patch_scope,
     _resolve_gate_patch_targets,
     _run_post_respin_checkpatch,
+    _run_post_respin_upstream_compat,
 )
 
 
@@ -102,6 +103,56 @@ class ValidationGateTests(unittest.TestCase):
             payload = _run_post_respin_checkpatch(output, None)
             self.assertFalse(payload["ok"])
             self.assertIn("kernel tree not found", " ".join(payload["issues"]))
+
+    def test_post_respin_upstream_compat_flags_deprecated_din_dout(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            output = Path(td) / "patches"
+            output.mkdir(parents=True, exist_ok=True)
+            patch = output / "0001-a.patch"
+            patch.write_text(
+                "\n".join(
+                    [
+                        "diff --git a/arch/arm64/boot/dts/qcom/shikra.dtsi b/arch/arm64/boot/dts/qcom/shikra.dtsi",
+                        "--- a/arch/arm64/boot/dts/qcom/shikra.dtsi",
+                        "+++ b/arch/arm64/boot/dts/qcom/shikra.dtsi",
+                        "@@ -1,1 +1,3 @@",
+                        "+\tqcom,din-ports = <3>;",
+                        "+\tqcom,dout-ports = <0>;",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            payload = _run_post_respin_upstream_compat(output)
+            self.assertFalse(payload["ok"])
+            joined = " ".join(payload["issues"])
+            self.assertIn("deprecated DT property 'qcom,din-ports'", joined)
+            self.assertIn("deprecated DT property 'qcom,dout-ports'", joined)
+
+    def test_post_respin_upstream_compat_flags_downstream_swr_props(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            output = Path(td) / "patches"
+            output.mkdir(parents=True, exist_ok=True)
+            patch = output / "0001-a.patch"
+            patch.write_text(
+                "\n".join(
+                    [
+                        "diff --git a/arch/arm64/boot/dts/qcom/shikra.dtsi b/arch/arm64/boot/dts/qcom/shikra.dtsi",
+                        "--- a/arch/arm64/boot/dts/qcom/shikra.dtsi",
+                        "+++ b/arch/arm64/boot/dts/qcom/shikra.dtsi",
+                        "@@ -1,1 +1,3 @@",
+                        '+\tcompatible = "qcom,swr-mstr";',
+                        "+\tqcom,swr-port-mapping = <1 2 3>;",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            payload = _run_post_respin_upstream_compat(output)
+            self.assertFalse(payload["ok"])
+            joined = " ".join(payload["issues"])
+            self.assertIn("downstream-only compatible \"qcom,swr-mstr\"", joined)
+            self.assertIn("downstream-only DT property 'qcom,swr-port-mapping'", joined)
 
 
 if __name__ == "__main__":

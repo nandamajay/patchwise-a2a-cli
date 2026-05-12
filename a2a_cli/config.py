@@ -64,6 +64,7 @@ def default_config() -> dict:
         },
         "post_respin_run_reviewer": True,
         "post_respin_checkpatch": True,
+        "post_respin_upstream_compat": True,
         "post_respin_max_checkpatch_files": 100,
         "post_respin_auto_repair": True,
         "post_respin_repair_max_rounds": 5,
