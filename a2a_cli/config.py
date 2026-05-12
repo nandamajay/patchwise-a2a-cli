@@ -27,6 +27,7 @@ def default_config() -> dict:
         "validation_gate_timeout_sec": 300,
         "validation_gate_max_checkpatch_files": 50,
         "validation_gate_command": None,
+        "lgtm_full_series_checkpatch": True,
         "score_thresholds": {
             "low_builder_confidence": 40,
             "low_reviewer_confidence": 60,
@@ -45,6 +46,7 @@ def default_config() -> dict:
             "coccinelle": True,
             "block_on_sparse": True,
             "block_on_coccinelle": False,
+            "fail_on_missing_tools": True,
             "smatch": False,
         },
         "submission": {
@@ -63,8 +65,11 @@ def default_config() -> dict:
         "post_respin_run_reviewer": True,
         "post_respin_checkpatch": True,
         "post_respin_max_checkpatch_files": 100,
+        "post_respin_auto_repair": True,
+        "post_respin_repair_max_rounds": 5,
         "prior_review_gate": True,
         "prior_review_search": True,
+        "prior_review_refresh_each_round": True,
         "prior_review_max_comments": 120,
         "reviewer_consistency_guard": True,
         "full_subsystem_review_required": True,

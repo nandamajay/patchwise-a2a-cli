@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
+from email.utils import parseaddr
 from html import escape
 from pathlib import Path
 from typing import Callable, Iterable
@@ -22,6 +23,7 @@ from uuid import uuid4
 from .adapters.shell_adapter import run_shell_command
 from .config import A2A_DIRNAME, default_config, default_state, dump_json, load_json
 from .email_bridge import run_bridge_loop
+from .email_notify import send_email as send_notification_email
 from .prior_review import (
     augment_findings_with_prior_comments,
     classify_prior_comment,
@@ -82,6 +84,19 @@ _PATCHSET_VERSION_DIR_RE = re.compile(r"^v(?P<num>\d+)$", re.IGNORECASE)
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 _LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+")
 _CONSOLE = Console() if Console else None
+_WATCH_BLOCKED_NOTIFICATION_DOMAINS = {
+    "vger.kernel.org",
+    "lists.linux.dev",
+    "lore.kernel.org",
+    "spinics.net",
+    "lists.infradead.org",
+}
+_WATCH_BLOCKED_LOCAL_PART_EXACT = {
+    "linux-kernel",
+    "linux-arm-msm",
+    "linux-gpio",
+    "lkml",
+}
 
 
 def _echo(*args: object, sep: str = " ", end: str = "\n") -> None:
@@ -138,6 +153,49 @@ def _write_if_missing(path: Path, content: str, force: bool) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     return True
+
+
+def _normalize_focus_issues(raw: object) -> list[str]:
+    if raw is None:
+        return []
+    items = raw if isinstance(raw, list) else [raw]
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        for line in text.splitlines():
+            clean = re.sub(r"^\s*[-*]\s*", "", line).strip()
+            clean = re.sub(r"\s+", " ", clean).strip()
+            if not clean:
+                continue
+            if len(clean) > 400:
+                clean = clean[:400].rstrip()
+            key = clean.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(clean)
+    return out
+
+
+def _merge_session_focus_issues(
+    root: Path,
+    session: dict,
+    incoming: object,
+) -> tuple[dict, int]:
+    requested = _normalize_focus_issues(incoming)
+    if not requested:
+        return session, 0
+    existing = _normalize_focus_issues(session.get("focus_issues"))
+    merged = _normalize_focus_issues(existing + requested)
+    if merged == existing:
+        return session, 0
+    session["focus_issues"] = merged
+    session["updated_at"] = _now_utc()
+    _write_session(root, session)
+    return session, len(merged) - len(existing)
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -373,6 +431,31 @@ def _prompt_extend_after_max_rounds(
     _echo("└──────────────────────────────────────────────────────────────────────┘")
     try:
         answer = str(input_fn("Proceed with one more round? [y/N]: ")).strip().lower()
+    except EOFError:
+        return False
+    return answer in {"y", "yes"}
+
+
+def _prompt_continue_post_respin_repair(
+    session_id: str,
+    attempts_done: int,
+    max_rounds: int,
+    *,
+    interactive: bool | None = None,
+    input_fn: Callable[[str], str] = input,
+) -> bool:
+    if interactive is None:
+        interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
+    if not interactive:
+        return False
+
+    _echo("┌──────────────────────────────────────────────────────────────────────┐")
+    _echo(f"│ Post-respin auto-repair reached {attempts_done} rounds for {session_id}")
+    _echo(f"│ Current repair budget: {max_rounds} rounds")
+    _echo("│ Continue with 5 more post-respin repair rounds? [y/N]")
+    _echo("└──────────────────────────────────────────────────────────────────────┘")
+    try:
+        answer = str(input_fn("Continue post-respin auto-repair for 5 more rounds? [y/N]: ")).strip().lower()
     except EOFError:
         return False
     return answer in {"y", "yes"}
@@ -820,6 +903,7 @@ def _augment_cover_letter_history(
     path: Path,
     next_version: int,
     lore_link: str | None,
+    source_version: int | None = None,
     changelog_lines: list[str] | None = None,
 ) -> None:
     if not path.is_file():
@@ -840,8 +924,20 @@ def _augment_cover_letter_history(
             sep_idx = idx
             break
 
+    msgid_link = ""
+    for line in lines[:120]:
+        m = re.match(r"^\s*Message-Id:\s*<([^>]+)>\s*$", line, flags=re.IGNORECASE)
+        if not m:
+            continue
+        msgid = str(m.group(1) or "").strip()
+        if msgid:
+            msgid_link = f"https://lore.kernel.org/r/{msgid}"
+            break
+
     block: list[str] = []
-    link = (lore_link or "").strip()
+    link = ""
+    if source_version is None or int(source_version) == prev:
+        link = msgid_link or str(lore_link or "").strip()
     if link:
         vline = f"v{prev}: {link}"
         if not any(x.strip().lower().startswith(f"v{prev}:") for x in lines):
@@ -1024,50 +1120,99 @@ def _write_round_suggested_replies(
     return out_path
 
 
+_COVER_CHANGELOG_INTERNAL_SOURCE_RE = re.compile(
+    r"\b(?:prior-msg|prior-meta|subsys-scan|independent-scan|post-respin):",
+    re.IGNORECASE,
+)
+
+
+def _clean_cover_changelog_row(raw: str) -> str:
+    line = _MARKDOWN_LINK_RE.sub(r"\1", str(raw or "")).strip()
+    line = _LIST_PREFIX_RE.sub("", line)
+    line = re.sub(r"\bEvidence:\s*.*$", "", line, flags=re.IGNORECASE)
+    line = re.sub(r"\s+", " ", line).strip()
+    if line.endswith((".", ":")):
+        line = line[:-1].strip()
+    if len(line) > 220:
+        line = line[:217].rstrip() + "..."
+    return line
+
+
+def _is_actionable_cover_changelog_row(row: str) -> bool:
+    lower = str(row or "").strip().lower()
+    if not lower:
+        return False
+    banned_tokens = [
+        "no patch edits were required",
+        "closed the previously open round",
+        "line-level proof",
+        "technical delta summary unavailable",
+        "advertised because",
+        "action: none",
+        ".mbx",
+    ]
+    if any(token in lower for token in banned_tokens):
+        return False
+    if _COVER_CHANGELOG_INTERNAL_SOURCE_RE.search(lower):
+        return False
+    return True
+
+
 def _resolved_finding_changelog_lines(root: Path, session_id: str, limit: int = 8) -> list[str]:
     report_dir = _report_dir(root, session_id)
     rows: list[str] = []
     seen: set[str] = set()
     by_source: dict[str, str] = {}
 
-    def _clean_row(raw: str) -> str:
-        line = _MARKDOWN_LINK_RE.sub(r"\1", str(raw or "")).strip()
-        line = _LIST_PREFIX_RE.sub("", line)
-        line = re.sub(r"\s+", " ", line).strip()
-        if line.endswith((".", ":")):
-            line = line[:-1].strip()
-        return line
-
     builder_reports = sorted(report_dir.glob("round-*-builder.md"))
     if builder_reports:
-        latest_builder = builder_reports[-1]
-        try:
-            lines = latest_builder.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            lines = []
-        in_changes = False
-        for line in lines:
-            heading = line.strip().lower()
-            if heading == "## changes":
-                in_changes = True
-                continue
-            if in_changes and heading.startswith("## "):
-                break
-            if not in_changes:
-                continue
-            if not _LIST_PREFIX_RE.match(line):
-                continue
-            clean = _clean_row(line)
-            if not clean:
-                continue
-            key = clean.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            rows.append(clean)
+        for latest_builder in builder_reports:
+            try:
+                lines = latest_builder.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                lines = []
+            in_changes = False
+            for line in lines:
+                heading = line.strip().lower()
+                if heading == "## changes":
+                    in_changes = True
+                    continue
+                if in_changes and heading.startswith("## "):
+                    break
+                if not in_changes:
+                    continue
+                # Keep top-level bullets only; nested proof bullets are usually too noisy for cover changelog.
+                if line.startswith((" ", "\t")):
+                    continue
+                if not re.match(r"^\s*[-*]\s+", line):
+                    continue
+                clean = _clean_cover_changelog_row(line)
+                if not clean:
+                    continue
+                if not _is_actionable_cover_changelog_row(clean):
+                    continue
+                key = clean.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(clean)
+                if len(rows) >= limit:
+                    break
             if len(rows) >= limit:
                 break
         if rows:
+            complete_rows = _complete_builder_diff_changelog_rows(
+                report_dir,
+                limit=max(0, int(limit) - len(rows)),
+            )
+            for row in complete_rows:
+                key = row.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(row)
+                if len(rows) >= limit:
+                    break
             return rows[:limit]
 
     rows = []
@@ -1086,15 +1231,24 @@ def _resolved_finding_changelog_lines(root: Path, session_id: str, limit: int = 
                 continue
             if str(finding.get("status", "open")).lower() != "closed":
                 continue
-            title = _clean_row(str(finding.get("title") or finding.get("description") or ""))
+            source = str(finding.get("source_comment_id") or "").strip()
+            source_lower = source.lower()
+            if source_lower.startswith(
+                ("prior-meta:", "subsys-scan:", "independent-scan:", "post-respin:")
+            ):
+                continue
+            title = _clean_cover_changelog_row(str(finding.get("title") or finding.get("description") or ""))
             if not title:
                 continue
+            if title.lower().startswith("unresolved prior review comment"):
+                continue
+            if not _is_actionable_cover_changelog_row(title):
+                continue
             loc = str(finding.get("location") or "").strip()
-            source = str(finding.get("source_comment_id") or "").strip()
             row = title
             if loc:
                 row += f" ({loc})"
-            if source:
+            if source and not source_lower.startswith("prior-msg:"):
                 by_source[source] = row
                 continue
             key = row.lower()
@@ -1116,7 +1270,15 @@ def _resolved_finding_changelog_lines(root: Path, session_id: str, limit: int = 
         combined = deduped
 
     if combined:
+        complete_rows = _complete_builder_diff_changelog_rows(
+            report_dir,
+            limit=max(0, int(limit) - len(combined)),
+        )
+        combined.extend(complete_rows)
         return combined[:limit]
+    complete_rows = _complete_builder_diff_changelog_rows(report_dir, limit=limit)
+    if complete_rows:
+        return complete_rows[:limit]
     return [
         "Technical delta summary unavailable from session artifacts; update this section with manual vN changes before posting"
     ]
@@ -1166,6 +1328,7 @@ def _generate_lore_next_version(root: Path, session: dict) -> dict:
             cover_path,
             next_version=next_version,
             lore_link=lore_link or None,
+            source_version=current_version,
             changelog_lines=changelog_lines,
         )
     for cover_path in sorted(output.rglob("*.cover")):
@@ -1173,6 +1336,7 @@ def _generate_lore_next_version(root: Path, session: dict) -> dict:
             cover_path,
             next_version=next_version,
             lore_link=lore_link or None,
+            source_version=current_version,
             changelog_lines=changelog_lines,
         )
 
@@ -1192,6 +1356,21 @@ def _generate_lore_next_version(root: Path, session: dict) -> dict:
     return payload
 
 
+def _session_has_lore_message_id(session: dict) -> bool:
+    lore_meta = session.get("lore")
+    if not isinstance(lore_meta, dict):
+        return False
+    return bool(str(lore_meta.get("message_id") or "").strip())
+
+
+def _generate_watch_copy_fallback(root: Path, session: dict, *, reason: Exception) -> dict:
+    fallback = _generate_lore_next_version(root, session)
+    if not _session_has_lore_message_id(session):
+        fallback["kind"] = "watch_copy"
+    fallback["fallback_reason"] = str(reason)
+    return fallback
+
+
 def _auto_generate_next_version(root: Path, session: dict) -> dict:
     session_id = str(session.get("id") or "")
     try:
@@ -1201,12 +1380,7 @@ def _auto_generate_next_version(root: Path, session: dict) -> dict:
             result.setdefault("kind", "git_respin")
         return result
     except Exception as exc:
-        lore_meta = session.get("lore")
-        if isinstance(lore_meta, dict) and str(lore_meta.get("message_id") or "").strip():
-            fallback = _generate_lore_next_version(root, session)
-            fallback["fallback_reason"] = str(exc)
-            return fallback
-        raise
+        return _generate_watch_copy_fallback(root, session, reason=exc)
 
 
 def _subject_line(path: Path) -> str:
@@ -1401,6 +1575,9 @@ def _validate_cover_changelog_quality(output_path: Path) -> list[str]:
         "generated by a2a",
         "auto-generated",
         "generated by tool",
+        "no patch edits were required",
+        "closed the previously open round",
+        "line-level proof",
     ]
     for cover in deduped_cover_files:
         try:
@@ -1659,7 +1836,6 @@ def _run_post_respin_reviewer_validation(
 def _run_post_respin_checkpatch(
     output_path: Path,
     kernel_root: Path | None,
-    max_files: int,
 ) -> dict:
     payload: dict = {
         "ran": False,
@@ -1671,11 +1847,13 @@ def _run_post_respin_checkpatch(
     }
     if kernel_root is None:
         payload["issues"].append("kernel tree not found; skipped checkpatch")
+        payload["ok"] = False
         return payload
 
     checkpatch = kernel_root / "scripts" / "checkpatch.pl"
     if not checkpatch.is_file():
         payload["issues"].append(f"checkpatch not found: {checkpatch}")
+        payload["ok"] = False
         return payload
 
     try:
@@ -1689,8 +1867,8 @@ def _run_post_respin_checkpatch(
         payload["ok"] = False
         return payload
 
-    patch_files = patch_files[: max(1, int(max_files))]
     payload["ran"] = True
+    payload["scope"] = "full"
     payload["files_checked"] = len(patch_files)
     for patch in patch_files:
         cmd = f"{shlex.quote(str(checkpatch))} --no-tree --strict {shlex.quote(str(patch))}"
@@ -1757,7 +1935,6 @@ def _run_post_respin_validation(
         checkpatch_payload = _run_post_respin_checkpatch(
             output_path,
             kernel_root,
-            int(cfg.get("post_respin_max_checkpatch_files", 100)),
         )
 
     checks = {
@@ -1801,6 +1978,221 @@ def _run_post_respin_validation(
     report_path = report_dir / "post_respin_validation.json"
     dump_json(report_path, payload)
     payload["report"] = str(report_path)
+    return payload
+
+
+def _next_post_respin_repair_base_round(report_dir: Path) -> int:
+    highest = 0
+    for path in report_dir.glob("round-*-findings.json"):
+        match = re.match(r"^round-(\d+)-findings\.json$", path.name)
+        if not match:
+            continue
+        try:
+            highest = max(highest, int(match.group(1)))
+        except ValueError:
+            continue
+    return max(1000, highest + 1)
+
+
+def _post_respin_extra_open_findings(validation_payload: dict) -> list[dict]:
+    checks = validation_payload.get("checks", {}) if isinstance(validation_payload, dict) else {}
+    if not isinstance(checks, dict):
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for check_name, row in checks.items():
+        if check_name == "reviewer_validation":
+            continue
+        if not isinstance(row, dict):
+            continue
+        if bool(row.get("ok", False)):
+            continue
+        issues = row.get("issues", [])
+        if not isinstance(issues, list):
+            continue
+        for issue in issues:
+            text = str(issue or "").strip()
+            if not text:
+                continue
+            key = f"{check_name.lower()}::{text.lower()}"
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(
+                {
+                    "severity": "medium",
+                    "title": f"Post-respin {check_name} check failed",
+                    "location": f"{check_name}:1",
+                    "evidence": [text],
+                    "required_action": text,
+                    "status": "open",
+                    "source_comment_id": f"post-respin:{check_name}",
+                }
+            )
+    return out
+
+
+def _collect_post_respin_repair_findings(report_dir: Path, validation_payload: dict) -> list[dict]:
+    findings_path = report_dir / "post-respin-findings.json"
+    base_findings: list[dict] = []
+    if findings_path.exists():
+        try:
+            base_findings = _load_findings_payload(findings_path)
+        except Exception:
+            base_findings = []
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for row in base_findings + _post_respin_extra_open_findings(validation_payload):
+        if not isinstance(row, dict):
+            continue
+        source_id = str(row.get("source_comment_id") or "").strip()
+        title = str(row.get("title") or "").strip()
+        location = str(row.get("location") or "").strip()
+        key = f"{source_id}::{title}::{location}".lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(dict(row))
+    return merged
+
+
+def _write_post_respin_repair_findings_seed(
+    root: Path,
+    session_id: str,
+    reviewer_name: str,
+    round_no: int,
+    findings: list[dict],
+) -> None:
+    files = _round_files(root, session_id, round_no, reviewer_name)
+    files["report_dir"].mkdir(parents=True, exist_ok=True)
+    dump_json(files["findings"], {"findings": findings})
+
+
+def _run_post_respin_auto_repair(
+    root: Path,
+    session: dict,
+    next_version_payload: dict,
+    builder_cmd: str,
+    reviewer_cmd: str,
+    initial_validation_payload: dict,
+) -> dict:
+    cfg = _load_config_or_defaults(root)
+    if not bool(cfg.get("post_respin_auto_repair", True)):
+        payload = dict(initial_validation_payload) if isinstance(initial_validation_payload, dict) else {}
+        payload["auto_repair"] = {
+            "enabled": False,
+            "attempts": 0,
+        }
+        return payload
+
+    sid = str(session.get("id") or "")
+    reviewer_name = str(session.get("reviewer_name", "aryabhatta"))
+    report_dir = _report_dir(root, sid)
+    output_raw = str(next_version_payload.get("output_path") or "").strip()
+    output_path = Path(output_raw).resolve() if output_raw else Path()
+    if not output_raw or not output_path.exists():
+        return {
+            "status": "failed",
+            "issues": [f"post-respin auto-repair cannot start: output_path missing: {output_path}"],
+            "auto_repair": {"enabled": True, "attempts": 0},
+        }
+    if not str(builder_cmd or "").strip():
+        return {
+            "status": "failed",
+            "issues": ["post-respin auto-repair cannot start: builder command is empty"],
+            "auto_repair": {"enabled": True, "attempts": 0},
+        }
+    if not str(reviewer_cmd or "").strip():
+        return {
+            "status": "failed",
+            "issues": ["post-respin auto-repair cannot start: reviewer command is empty"],
+            "auto_repair": {"enabled": True, "attempts": 0},
+        }
+
+    repair_round_budget = int(cfg.get("post_respin_repair_max_rounds", 5) or 5)
+    if repair_round_budget < 1:
+        repair_round_budget = 1
+
+    base_round = _next_post_respin_repair_base_round(report_dir)
+    seed_round = base_round - 1
+    initial_findings = _collect_post_respin_repair_findings(report_dir, initial_validation_payload)
+    _write_post_respin_repair_findings_seed(root, sid, reviewer_name, seed_round, initial_findings)
+
+    attempt = 1
+    current_budget = repair_round_budget
+    latest_validation = dict(initial_validation_payload) if isinstance(initial_validation_payload, dict) else {}
+
+    while True:
+        if attempt > current_budget:
+            if _prompt_continue_post_respin_repair(
+                session_id=sid,
+                attempts_done=attempt - 1,
+                max_rounds=current_budget,
+            ):
+                current_budget += repair_round_budget
+            else:
+                break
+
+        repair_round = base_round + attempt - 1
+        _echo(f"Post-respin auto-repair round {attempt}/{current_budget} start (internal round {repair_round}).")
+
+        session_for_repair = dict(session)
+        session_for_repair["watch_path"] = str(output_path)
+
+        rc = _run_agent_step(root, session_for_repair, "builder", builder_cmd, repair_round)
+        if rc != 0:
+            return {
+                "status": "failed",
+                "issues": [f"builder failed during post-respin auto-repair round {attempt} (rc={rc})"],
+                "auto_repair": {
+                    "enabled": True,
+                    "attempts": attempt,
+                    "max_rounds_used": current_budget,
+                    "base_round": base_round,
+                    "failed_stage": "builder",
+                },
+            }
+
+        latest_validation = _run_post_respin_validation(
+            root,
+            session_for_repair,
+            next_version_payload,
+            reviewer_cmd=reviewer_cmd,
+        )
+        _echo(f"Post-respin validation after repair round {attempt}:")
+        _echo(json.dumps(latest_validation, indent=2, sort_keys=True))
+
+        round_findings = _collect_post_respin_repair_findings(report_dir, latest_validation)
+        _write_post_respin_repair_findings_seed(root, sid, reviewer_name, repair_round, round_findings)
+
+        if str(latest_validation.get("status", "")).lower() == "ok":
+            latest_validation["auto_repair"] = {
+                "enabled": True,
+                "attempts": attempt,
+                "max_rounds_used": current_budget,
+                "base_round": base_round,
+                "result": "resolved",
+            }
+            return latest_validation
+
+        attempt += 1
+
+    payload = dict(latest_validation) if isinstance(latest_validation, dict) else {}
+    payload["status"] = "failed"
+    issues = payload.get("issues")
+    if not isinstance(issues, list):
+        issues = []
+    issues.append(
+        f"post-respin auto-repair exhausted at {attempt - 1} round(s) without clean validation"
+    )
+    payload["issues"] = issues
+    payload["auto_repair"] = {
+        "enabled": True,
+        "attempts": attempt - 1,
+        "max_rounds_used": current_budget,
+        "base_round": base_round,
+        "result": "exhausted",
+    }
     return payload
 
 
@@ -2303,6 +2695,8 @@ def _agent_env(
             "A2A_REQUIRE_INDEPENDENT_SCAN": (
                 "1" if requires_full_subsystem_review(session, cfg) else "0"
             ),
+            "A2A_FOCUS_ISSUES": "",
+            "A2A_FOCUS_ISSUES_JSON": "[]",
             "CODEX_HOME": str(codex_home),
             "TMPDIR": str(runtime_tmp),
         }
@@ -2337,6 +2731,10 @@ def _agent_env(
     env["A2A_KB_CHANAKYA_CONTEXT"] = chanakya_context
     env["A2A_KB_ARYABHATTA_CONTEXT"] = aryabhata_context
     env["A2A_KB_CONTEXT"] = chanakya_context if role == "builder" else aryabhata_context
+    focus_issues = _normalize_focus_issues(session.get("focus_issues"))
+    if focus_issues:
+        env["A2A_FOCUS_ISSUES"] = "\n".join(f"- {row}" for row in focus_issues)
+        env["A2A_FOCUS_ISSUES_JSON"] = json.dumps(focus_issues)
     return env
 
 
@@ -2404,6 +2802,100 @@ def _write_builder_change_artifacts(
     changed_content = "\n".join(changed) + ("\n" if changed else "")
     changed_path.write_text(changed_content, encoding="utf-8")
     diff_path.write_text("".join(diff_chunks), encoding="utf-8")
+    _refresh_complete_builder_diff(files["report_dir"])
+
+
+def _refresh_complete_builder_diff(report_dir: Path) -> Path:
+    complete_path = report_dir / "complete-builder.diff"
+    round_files: list[tuple[int, Path]] = []
+    for path in sorted(report_dir.glob("round-*-builder.diff")):
+        match = re.match(r"^round-(\d+)-builder\.diff$", path.name)
+        if not match:
+            continue
+        try:
+            round_no = int(match.group(1))
+        except ValueError:
+            continue
+        round_files.append((round_no, path))
+
+    if not round_files:
+        complete_path.write_text("", encoding="utf-8")
+        return complete_path
+
+    out_lines: list[str] = [
+        "# Aggregated builder diff across all completed rounds",
+        f"# generated_at={_now_utc()}",
+        "",
+    ]
+    for round_no, path in round_files:
+        out_lines.append(f"# --- Round {round_no:02d} ({path.name}) ---")
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        if text.strip():
+            out_lines.append(text.rstrip("\n"))
+        else:
+            out_lines.append("# no textual changes captured")
+        out_lines.append("")
+
+    complete_path.write_text("\n".join(out_lines).rstrip() + "\n", encoding="utf-8")
+    return complete_path
+
+
+def _complete_builder_diff_changelog_rows(report_dir: Path, limit: int = 2) -> list[str]:
+    path = report_dir / "complete-builder.diff"
+    if not path.exists():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+
+    touched: list[str] = []
+    touched_seen: set[str] = set()
+    add_lines = 0
+    del_lines = 0
+    for line in lines:
+        if line.startswith("diff --git "):
+            parts = line.split()
+            if len(parts) >= 3:
+                rel = parts[2]
+                if rel.startswith("a/"):
+                    rel = rel[2:]
+                if rel and rel not in touched_seen:
+                    touched_seen.add(rel)
+                    touched.append(rel)
+            continue
+        if line.startswith("--- a/") or line.startswith("+++ b/"):
+            parts = line.split(maxsplit=1)
+            if len(parts) == 2:
+                rel = parts[1].strip()
+                if rel.startswith(("a/", "b/")):
+                    rel = rel[2:]
+                if rel and rel != "/dev/null" and rel not in touched_seen:
+                    touched_seen.add(rel)
+                    touched.append(rel)
+            continue
+        if line.startswith("+++ ") or line.startswith("--- "):
+            continue
+        if line.startswith("+"):
+            add_lines += 1
+        elif line.startswith("-"):
+            del_lines += 1
+
+    if not touched:
+        return []
+
+    rows: list[str] = []
+    rows.append(
+        f"Aggregate builder delta across review rounds: {len(touched)} files touched (+{add_lines}/-{del_lines} lines)"
+    )
+    if len(touched) <= 5:
+        rows.append("Touched files: " + ", ".join(touched))
+    else:
+        rows.append("Touched files: " + ", ".join(touched[:5]) + ", ...")
+    return rows[: max(0, int(limit))]
 
 
 def _collect_watch_patch_files(watch_path: Path) -> list[Path]:
@@ -2427,7 +2919,7 @@ def _load_round_changed_paths(root: Path, session_id: str, round_no: int, review
 
 
 def _resolve_gate_patch_targets(watch_path: Path, changed_rel_paths: list[str], round_no: int) -> list[Path]:
-    all_patches = _collect_watch_patch_files(watch_path)
+    all_patches = [p for p in _collect_watch_patch_files(watch_path) if not _is_cover_patch_file(p)]
     if not all_patches:
         return []
 
@@ -2439,7 +2931,7 @@ def _resolve_gate_patch_targets(watch_path: Path, changed_rel_paths: list[str], 
         if not rel.endswith(".patch"):
             continue
         candidate = watch_path / rel
-        if candidate.exists() and candidate.is_file():
+        if candidate.exists() and candidate.is_file() and not _is_cover_patch_file(candidate):
             selected.append(candidate)
 
     if selected:
@@ -2452,9 +2944,19 @@ def _resolve_gate_patch_targets(watch_path: Path, changed_rel_paths: list[str], 
             seen.add(patch)
         return out
 
-    if int(round_no) == 1:
-        return all_patches
-    return []
+    return all_patches
+
+
+def _resolve_gate_patch_scope(watch_path: Path, changed_rel_paths: list[str]) -> str:
+    if watch_path.is_file():
+        return "full"
+    for rel in changed_rel_paths:
+        if not rel.endswith(".patch"):
+            continue
+        candidate = watch_path / rel
+        if candidate.exists() and candidate.is_file() and not _is_cover_patch_file(candidate):
+            return "changed"
+    return "full"
 
 
 def _detect_kernel_repo_root(path: Path) -> Path | None:
@@ -2492,6 +2994,7 @@ def _run_validation_gate(root: Path, session: dict, round_no: int) -> tuple[bool
         "strict": strict,
         "ran": False,
         "passed": True,
+        "checkpatch_target_scope": "none",
         "commands": [],
         "failures": 0,
         "generated_at": _now_utc(),
@@ -2530,6 +3033,8 @@ def _run_validation_gate(root: Path, session: dict, round_no: int) -> tuple[bool
             if patch_targets:
                 max_files = int(cfg.get("validation_gate_max_checkpatch_files", 50))
                 patch_targets = patch_targets[:max_files]
+                target_scope = _resolve_gate_patch_scope(watch_path, changed_rel)
+                payload["checkpatch_target_scope"] = target_scope
                 checkpatch = kernel_root / "scripts" / "checkpatch.pl"
                 target_args = " ".join(shlex.quote(str(p)) for p in patch_targets)
                 cmd = f"{shlex.quote(str(checkpatch))} --no-tree --strict {target_args}"
@@ -2538,6 +3043,7 @@ def _run_validation_gate(root: Path, session: dict, round_no: int) -> tuple[bool
                         "name": "checkpatch",
                         "command": cmd,
                         "cwd": str(kernel_root),
+                        "target_scope": target_scope,
                         "targets": [str(p) for p in patch_targets],
                     }
                 )
@@ -2602,6 +3108,81 @@ def _run_validation_gate(root: Path, session: dict, round_no: int) -> tuple[bool
     return True, True
 
 
+def _run_lgtm_full_series_checkpatch(root: Path, session: dict, round_no: int, reviewer_name: str) -> dict:
+    session_id = str(session.get("id") or "")
+    report_dir = _round_files(root, session_id, round_no, reviewer_name)["report_dir"]
+    report_path = report_dir / f"{_round_basename(round_no, 'lgtm-checkpatch')}.json"
+    payload: dict = {
+        "ran": False,
+        "ok": True,
+        "scope": "full",
+        "kernel_root": "",
+        "files_checked": 0,
+        "results": [],
+        "issues": [],
+        "report": str(report_path),
+    }
+
+    def _finalize() -> dict:
+        dump_json(report_path, payload)
+        return payload
+
+    watch_raw = str(session.get("watch_path") or "").strip()
+    if not watch_raw:
+        payload["ok"] = False
+        payload["issues"].append("watch_path missing; cannot run LGTM checkpatch gate")
+        return _finalize()
+
+    watch_path = Path(watch_raw)
+    if not watch_path.exists():
+        payload["ok"] = False
+        payload["issues"].append(f"watch_path not found for LGTM checkpatch gate: {watch_path}")
+        return _finalize()
+
+    kernel_root = _detect_kernel_repo_root(watch_path)
+    if kernel_root is None:
+        payload["ok"] = False
+        payload["issues"].append(f"kernel tree not found for LGTM checkpatch gate: {watch_path}")
+        return _finalize()
+    payload["kernel_root"] = str(kernel_root)
+
+    checkpatch = kernel_root / "scripts" / "checkpatch.pl"
+    if not checkpatch.is_file():
+        payload["ok"] = False
+        payload["issues"].append(f"checkpatch not found: {checkpatch}")
+        return _finalize()
+
+    try:
+        patch_files = [p for p in _collect_active_patch_files(watch_path) if not _is_cover_patch_file(p)]
+    except Exception as exc:
+        payload["ok"] = False
+        payload["issues"].append(f"cannot collect patch files for LGTM checkpatch gate: {exc}")
+        return _finalize()
+    if not patch_files:
+        payload["ok"] = False
+        payload["issues"].append("no non-cover patch files found for LGTM checkpatch gate")
+        return _finalize()
+
+    payload["ran"] = True
+    payload["files_checked"] = len(patch_files)
+    for patch in patch_files:
+        cmd = f"{shlex.quote(str(checkpatch))} --no-tree --strict {shlex.quote(str(patch))}"
+        result = run_shell_command(cmd, cwd=kernel_root, env=dict(os.environ))
+        rc = int(result.get("returncode", 1))
+        payload["results"].append(
+            {
+                "patch": str(patch),
+                "returncode": rc,
+                "ok": rc == 0,
+            }
+        )
+        if rc != 0:
+            payload["ok"] = False
+            payload["issues"].append(f"checkpatch failed for {patch.name} (rc={rc})")
+
+    return _finalize()
+
+
 def _static_analysis_artifact(root: Path, session_id: str, round_no: int, reviewer_name: str) -> Path:
     files = _round_files(root, session_id, round_no, reviewer_name)
     return files["report_dir"] / f"{_round_basename(round_no, 'static-analysis')}.json"
@@ -2637,11 +3218,126 @@ def _run_static_analysis(root: Path, session: dict, round_no: int) -> dict:
         dump_json(artifact, result)
         return result
 
-    static_payload = run_static_analysis_gate(str(patch_targets[0]), str(kernel_root), sa_cfg)
-    static_payload["skipped"] = False
-    static_payload["reason"] = ""
-    dump_json(artifact, static_payload)
-    return static_payload
+    rows: list[dict] = []
+    for patch in patch_targets:
+        payload = run_static_analysis_gate(str(patch), str(kernel_root), sa_cfg)
+        if not isinstance(payload, dict):
+            payload = {}
+        payload = dict(payload)
+        payload["patch"] = str(patch)
+        rows.append(payload)
+
+    aggregated: dict = {
+        "enabled": bool(sa_cfg),
+        "skipped": False,
+        "reason": "",
+        "gate_passed": True,
+        "patches_total": len(patch_targets),
+        "patches_analyzed": [str(p) for p in patch_targets],
+        "per_patch": [
+            {
+                "patch": str(row.get("patch") or ""),
+                "gate_passed": bool(row.get("gate_passed", True)),
+                "missing_required_tools": list(row.get("missing_required_tools", []))
+                if isinstance(row.get("missing_required_tools"), list)
+                else [],
+            }
+            for row in rows
+        ],
+    }
+
+    sparse_enabled = bool(sa_cfg.get("sparse", True))
+    if sparse_enabled:
+        sparse_new: list[str] = []
+        sparse_new_seen: set[str] = set()
+        sparse_total_warnings = 0
+        sparse_blocking = False
+        sparse_skipped = 0
+        sparse_ran = 0
+        sparse_skip_reasons: list[str] = []
+        for row in rows:
+            sparse_row = row.get("sparse", {})
+            if not isinstance(sparse_row, dict):
+                continue
+            if bool(sparse_row.get("skipped")):
+                sparse_skipped += 1
+                reason = str(sparse_row.get("reason") or "").strip()
+                if reason and reason not in sparse_skip_reasons:
+                    sparse_skip_reasons.append(reason)
+                continue
+            sparse_ran += 1
+            sparse_total_warnings += int(sparse_row.get("total_warnings", 0) or 0)
+            sparse_blocking = sparse_blocking or bool(sparse_row.get("blocking", False))
+            nw = sparse_row.get("new_warnings", [])
+            if isinstance(nw, list):
+                for warning in nw:
+                    item = str(warning).strip()
+                    if item and item not in sparse_new_seen:
+                        sparse_new_seen.add(item)
+                        sparse_new.append(item)
+        aggregated["sparse"] = {
+            "skipped": sparse_ran == 0,
+            "reason": "; ".join(sparse_skip_reasons) if sparse_ran == 0 else "",
+            "new_warnings": sparse_new,
+            "total_warnings": sparse_total_warnings,
+            "blocking": sparse_blocking,
+            "ran_on_patches": sparse_ran,
+            "skipped_patches": sparse_skipped,
+        }
+
+    coccinelle_enabled = bool(sa_cfg.get("coccinelle", True))
+    if coccinelle_enabled:
+        cocci_matches: list[str] = []
+        cocci_seen: set[str] = set()
+        cocci_blocking = False
+        cocci_skipped = 0
+        cocci_ran = 0
+        cocci_skip_reasons: list[str] = []
+        for row in rows:
+            cocci_row = row.get("coccinelle", {})
+            if not isinstance(cocci_row, dict):
+                continue
+            if bool(cocci_row.get("skipped")):
+                cocci_skipped += 1
+                reason = str(cocci_row.get("reason") or "").strip()
+                if reason and reason not in cocci_skip_reasons:
+                    cocci_skip_reasons.append(reason)
+                continue
+            cocci_ran += 1
+            cocci_blocking = cocci_blocking or bool(cocci_row.get("blocking", False))
+            matches = cocci_row.get("matches", [])
+            if isinstance(matches, list):
+                for match in matches:
+                    item = str(match).strip()
+                    if item and item not in cocci_seen:
+                        cocci_seen.add(item)
+                        cocci_matches.append(item)
+        aggregated["coccinelle"] = {
+            "skipped": cocci_ran == 0,
+            "reason": "; ".join(cocci_skip_reasons) if cocci_ran == 0 else "",
+            "matches": cocci_matches,
+            "blocking": cocci_blocking,
+            "ran_on_patches": cocci_ran,
+            "skipped_patches": cocci_skipped,
+        }
+
+    missing_required_tools: set[str] = set()
+    for row in rows:
+        missing = row.get("missing_required_tools", [])
+        if isinstance(missing, list):
+            for tool in missing:
+                val = str(tool).strip()
+                if val:
+                    missing_required_tools.add(val)
+
+    aggregated["missing_required_tools"] = sorted(missing_required_tools)
+    aggregated["tooling_blocking"] = any(bool(row.get("tooling_blocking", False)) for row in rows)
+    aggregated["gate_passed"] = all(bool(row.get("gate_passed", True)) for row in rows)
+    if not aggregated["gate_passed"]:
+        aggregated["reason"] = "analysis_gate_failed"
+
+    dump_json(artifact, aggregated)
+    return aggregated
 
 
 def _load_findings_from_file(path: Path) -> list[dict]:
@@ -4486,6 +5182,75 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         return 1
 
 
+def _prior_seed_message_ids(session: dict) -> list[str]:
+    lore = session.get("lore")
+    if not isinstance(lore, dict):
+        return []
+    msgid = str(lore.get("message_id") or "").strip()
+    if not msgid:
+        return []
+    return [msgid]
+
+
+def _ingest_prior_review_for_session(root: Path, session: dict, cfg: dict | None = None) -> dict | None:
+    cfg_local = cfg if isinstance(cfg, dict) else _load_config_or_defaults(root)
+    if not bool(cfg_local.get("prior_review_gate", True)):
+        return None
+
+    watch_path_raw = str(session.get("watch_path") or "").strip()
+    if not watch_path_raw:
+        return None
+
+    watch_path = Path(watch_path_raw)
+    if not watch_path.exists():
+        return None
+
+    search_if_missing = bool(cfg_local.get("prior_review_search", True))
+    max_comments = int(cfg_local.get("prior_review_max_comments", 120))
+    report_dir = _report_dir(root, str(session["id"]))
+    return ingest_prior_review_context(
+        watch_path,
+        report_dir,
+        search_if_missing=search_if_missing,
+        max_comments=max_comments,
+        seed_message_ids=_prior_seed_message_ids(session),
+    )
+
+
+def _refresh_prior_review_context(
+    root: Path,
+    session: dict,
+    *,
+    cfg: dict | None = None,
+    force: bool = False,
+) -> tuple[dict | None, bool]:
+    cfg_local = cfg if isinstance(cfg, dict) else _load_config_or_defaults(root)
+    if not bool(cfg_local.get("prior_review_gate", True)):
+        return None, False
+    if not force and not bool(cfg_local.get("prior_review_refresh_each_round", True)):
+        current = session.get("prior_review")
+        if isinstance(current, dict):
+            return current, False
+        return None, False
+
+    context = _ingest_prior_review_for_session(root, session, cfg=cfg_local)
+    if not context:
+        return None, False
+
+    prev = session.get("prior_review")
+    changed = True
+    if isinstance(prev, dict):
+        changed = (
+            int(prev.get("comments_total", -1)) != int(context.get("comments_total", -1))
+            or int(prev.get("source_total", -1)) != int(context.get("source_total", -1))
+        )
+
+    session["prior_review"] = context
+    session["updated_at"] = _now_utc()
+    _write_session(root, session)
+    return context, changed
+
+
 def _start_session(
     root: Path,
     task: str,
@@ -4495,6 +5260,7 @@ def _start_session(
     reviewer_command: str | None = None,
     watch_path: str | None = None,
     lore_message_id: str | None = None,
+    focus_issues: list[str] | None = None,
 ) -> dict:
     cfg = _load_config(root)
     prep = load_json(_prepare_path(root))
@@ -4542,21 +5308,13 @@ def _start_session(
     }
     if lore_message_id:
         session["lore"] = {"message_id": str(lore_message_id).strip()}
+    focus_rows = _normalize_focus_issues(focus_issues)
+    if focus_rows:
+        session["focus_issues"] = focus_rows
 
-    prior_gate = bool(cfg.get("prior_review_gate", True))
-    search_if_missing = bool(cfg.get("prior_review_search", True))
-    max_comments = int(cfg.get("prior_review_max_comments", 120))
-    if prior_gate and watch_path_resolved:
-        report_dir = _report_dir(root, session_id)
-        context = ingest_prior_review_context(
-            Path(watch_path_resolved),
-            report_dir,
-            search_if_missing=search_if_missing,
-            max_comments=max_comments,
-            seed_message_ids=[str(lore_message_id).strip()] if lore_message_id else None,
-        )
-        if context:
-            session["prior_review"] = context
+    context = _ingest_prior_review_for_session(root, session, cfg=cfg)
+    if context:
+        session["prior_review"] = context
 
     dump_json(_session_path(root, session_id), session)
 
@@ -4676,6 +5434,14 @@ def _validate_round_only(
 def _advance_session(root: Path, session_id: str) -> int:
     state_path = root / A2A_DIRNAME / "state.json"
     state = load_json(state_path)
+    cfg_for_refresh = _load_config_or_defaults(root)
+    try:
+        current_session = _load_session(root, session_id)
+    except RuntimeError as exc:
+        _echo(str(exc))
+        return 1
+
+    _refresh_prior_review_context(root, current_session, cfg=cfg_for_refresh, force=False)
 
     try:
         session, open_count, findings, errors, findings_path = _validate_round_only(root, session_id)
@@ -4836,7 +5602,7 @@ def _advance_session(root: Path, session_id: str) -> int:
     round_files = _round_files(root, session_id, round_no, reviewer_name)
     reviewer_verdict = _reviewer_verdict_for_round(root, session_id, round_no, reviewer_name)
     should_lgtm, lgtm_reason = should_issue_lgtm(str(round_files["findings"]), reviewer_verdict)
-    if should_lgtm and int(open_count) == 0 and len(findings) == 0:
+    if should_lgtm and int(open_count) == 0:
         guard_enabled = bool(cfg_for_round.get("reviewer_consistency_guard", True))
         if guard_enabled:
             reviewer_log = root / A2A_DIRNAME / "logs" / session_id / f"{_round_basename(round_no, 'reviewer')}.log"
@@ -4901,20 +5667,53 @@ def _advance_session(root: Path, session_id: str) -> int:
     if score_decision.get("force_extra_round"):
         should_lgtm = False
 
+    lgtm_checkpatch_payload: dict | None = None
+    if should_lgtm and bool(cfg_for_round.get("lgtm_full_series_checkpatch", True)):
+        lgtm_checkpatch_payload = _run_lgtm_full_series_checkpatch(root, session, round_no, reviewer_name)
+        round_record["lgtm_checkpatch"] = lgtm_checkpatch_payload
+        if not bool(lgtm_checkpatch_payload.get("ok", False)):
+            should_lgtm = False
+            issues = lgtm_checkpatch_payload.get("issues", [])
+            lead_issue = str(issues[0]) if isinstance(issues, list) and issues else "unknown checkpatch failure"
+            lgtm_reason = f"LGTM full-series checkpatch gate failed: {lead_issue}"
+            _echo(f"LGTM blocked: {lgtm_reason}")
+            report_path = str(lgtm_checkpatch_payload.get("report") or "").strip()
+            if report_path:
+                _echo(f"LGTM checkpatch gate report: {report_path}")
+
     if should_lgtm:
         session["status"] = "lgtm"
         _set_summary_status(root, session_id, "lgtm")
         _append_summary_verdict(root, session_id, "LGTM")
+        complete_diff_path = _refresh_complete_builder_diff(_report_dir(root, session_id))
         resolved_findings = [
             row for row in findings if isinstance(row, dict) and str(row.get("status", "open")).lower() == "closed"
         ]
+        kb_updates = 0
         try:
+            kb_before = list_kb_entries(root)
+            before_occ: dict[tuple[str, str], int] = {}
+            for row in kb_before:
+                if not isinstance(row, dict):
+                    continue
+                key = (str(row.get("subsystem") or ""), str(row.get("pattern") or ""))
+                before_occ[key] = int(row.get("occurrences", 0) or 0)
+
             update_kb_after_lgtm(
                 root,
                 session_id=session_id,
                 watch_path=str(session.get("watch_path") or ""),
                 resolved_findings=resolved_findings,
             )
+            kb_after = list_kb_entries(root)
+            for row in kb_after:
+                if not isinstance(row, dict):
+                    continue
+                key = (str(row.get("subsystem") or ""), str(row.get("pattern") or ""))
+                prev = int(before_occ.get(key, 0))
+                curr = int(row.get("occurrences", 0) or 0)
+                if curr > prev:
+                    kb_updates += curr - prev
         except Exception as exc:
             _echo(f"Knowledge base update warning: {exc}")
         if state.get("active_session_id") == session_id:
@@ -4931,9 +5730,10 @@ def _advance_session(root: Path, session_id: str) -> int:
                 prior_closed=int(prior_totals.get("closed", 0)),
                 prior_received=int(prior_totals.get("received_total", 0)),
                 static_analysis_status="PASSED",
-                kb_updates=0,
+                kb_updates=kb_updates,
             )
         )
+        _echo(f"Complete builder diff: {complete_diff_path}")
         return 0
 
     if round_no >= max_rounds:
@@ -5009,11 +5809,19 @@ def cmd_run(args: argparse.Namespace) -> int:
         reviewer_cmd = _resolve_agent_command(cfg, args.reviewer_cmd, "reviewer_command")
         builder_cmd, reviewer_cmd = _resolve_default_agent_commands(root, cfg, builder_cmd, reviewer_cmd)
         watch_path = str(Path(args.watch_path).resolve()) if args.watch_path else None
+        focus_issues = _normalize_focus_issues(getattr(args, "focus_issue", None))
 
         if args.resume:
+            if focus_issues:
+                session = _load_session(root, args.resume)
+                session, added = _merge_session_focus_issues(root, session, focus_issues)
+                if added > 0:
+                    _echo(f"Session {args.resume}: added {added} focus issue(s).")
             if args.run_reviewer:
                 session = _load_session(root, args.resume)
                 round_no = int(session.get("current_round", 1))
+                _refresh_prior_review_context(root, session, cfg=cfg, force=False)
+                session = _load_session(root, args.resume)
                 if not reviewer_cmd:
                     reviewer_cmd = str(session.get("reviewer_command") or "").strip() or None
                 if not reviewer_cmd:
@@ -5037,6 +5845,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             reviewer_command=reviewer_cmd,
             watch_path=watch_path,
             lore_message_id=None,
+            focus_issues=focus_issues,
         )
         sid = session["id"]
         round_no = int(session["current_round"])
@@ -5092,6 +5901,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
         lore_source_msgid = _extract_lore_message_id(lore_input) if lore_input else None
         auto_respin_raw = getattr(args, "auto_respin", None)
         auto_respin = bool(auto_respin_raw) if auto_respin_raw is not None else bool(lore_input)
+        focus_issues = _normalize_focus_issues(getattr(args, "focus_issue", None))
         single_series_mode = bool(getattr(args, "_single_series", False))
 
         if lore_input:
@@ -5139,6 +5949,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
                             lore_url=None,
                             lore_msgid=None,
                             auto_respin=False,
+                            focus_issue=list(focus_issues),
                             max_iterations=args.max_iterations,
                             _single_series=True,
                         )
@@ -5169,6 +5980,10 @@ def cmd_loop(args: argparse.Namespace) -> int:
         if args.session:
             session = _load_session(root, args.session)
             sid = str(session["id"])
+            if focus_issues:
+                session, added = _merge_session_focus_issues(root, session, focus_issues)
+                if added > 0:
+                    _echo(f"Session {sid}: added {added} focus issue(s).")
         else:
             if not args.task:
                 _echo("Missing --task for new autonomous session.")
@@ -5182,6 +5997,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
                 reviewer_command=reviewer_cmd,
                 watch_path=watch_path,
                 lore_message_id=lore_source_msgid,
+                focus_issues=focus_issues,
             )
             sid = str(session["id"])
             _echo(f"Started session: {sid}")
@@ -5238,6 +6054,15 @@ def cmd_loop(args: argparse.Namespace) -> int:
                     _auto_write_session_html_report(root, sid)
                     return 0
 
+                prior_ctx, prior_changed = _refresh_prior_review_context(root, session, cfg=cfg, force=False)
+                if prior_ctx and prior_changed:
+                    _echo(
+                        "Prior-thread context refreshed: "
+                        f"comments={int(prior_ctx.get('comments_total', 0))}, "
+                        f"sources={int(prior_ctx.get('source_total', 0))}."
+                    )
+                    session = _load_session(root, sid)
+
                 round_no = int(session.get("current_round", 1))
                 builder_display_name = _resolve_builder_display_name(session=session, cfg=cfg)
                 reviewer_display_name = _resolve_reviewer_display_name(session=session, cfg=cfg)
@@ -5265,7 +6090,16 @@ def cmd_loop(args: argparse.Namespace) -> int:
 
                 sa_result = _run_static_analysis(root, session, round_no)
                 if not sa_result.get("gate_passed", True):
-                    _echo("Static analysis gate: sparse introduced new warnings (blocking).")
+                    missing_tools = sa_result.get("missing_required_tools", [])
+                    if isinstance(missing_tools, list) and missing_tools:
+                        _echo(
+                            "Static analysis gate: required tool(s) missing: "
+                            + ", ".join(str(x) for x in missing_tools)
+                        )
+                    else:
+                        _echo("Static analysis gate: blocking findings present.")
+                    _auto_write_session_html_report(root, sid)
+                    return 1
                 elif not sa_result.get("skipped", False):
                     _echo("Static analysis gate: passed.")
 
@@ -5294,9 +6128,21 @@ def cmd_loop(args: argparse.Namespace) -> int:
                             _echo("Post-respin validation completed:")
                             _echo(json.dumps(post_respin_payload, indent=2, sort_keys=True))
                             if str(post_respin_payload.get("status", "")).lower() != "ok":
-                                _echo("Post-respin validation failed. Generated patchset requires fixes before send.")
-                                _auto_write_session_html_report(root, sid)
-                                return 1
+                                _echo("Post-respin validation failed. Starting auto-repair loop.")
+                                post_respin_payload = _run_post_respin_auto_repair(
+                                    root,
+                                    session,
+                                    next_version_payload,
+                                    builder_cmd=builder_cmd or "",
+                                    reviewer_cmd=reviewer_cmd or "",
+                                    initial_validation_payload=post_respin_payload,
+                                )
+                                _echo("Post-respin auto-repair completed:")
+                                _echo(json.dumps(post_respin_payload, indent=2, sort_keys=True))
+                                if str(post_respin_payload.get("status", "")).lower() != "ok":
+                                    _echo("Post-respin validation failed after auto-repair rounds. Generated patchset requires fixes before send.")
+                                    _auto_write_session_html_report(root, sid)
+                                    return 1
                         except Exception as exc:
                             _echo(f"Auto next-version generation warning: {exc}")
                     _auto_write_session_html_report(root, sid)
@@ -5319,13 +6165,20 @@ def cmd_respin(args: argparse.Namespace) -> int:
         resume_id = str(args.resume or "").strip() or None
         session_id = str(args.session or resume_id or "").strip() or None
         if session_id:
-            result = run_respin(
-                root,
-                session_id,
-                dry_run=bool(args.dry_run),
-                conflict_strategy=args.conflict_strategy,
-                resume_id=resume_id,
-            )
+            try:
+                result = run_respin(
+                    root,
+                    session_id,
+                    dry_run=bool(args.dry_run),
+                    conflict_strategy=args.conflict_strategy,
+                    resume_id=resume_id,
+                )
+            except RuntimeError as exc:
+                if bool(args.dry_run) or resume_id:
+                    raise
+                session = _load_session(root, session_id)
+                result = _generate_watch_copy_fallback(root, session, reason=exc)
+                _echo("Git respin failed; used watch-path copy fallback for next version generation.")
             _echo(json.dumps(result, indent=2, sort_keys=True))
             return 0
 
@@ -5536,18 +6389,396 @@ def cmd_kb(args: argparse.Namespace) -> int:
         return 1
 
 
+def _watch_followup_session_id(root: Path, explicit_session: str | None = None) -> str | None:
+    explicit = str(explicit_session or "").strip()
+    if explicit:
+        return explicit
+    state_path = root / A2A_DIRNAME / "state.json"
+    if not state_path.exists():
+        return None
+    try:
+        state = load_json(state_path)
+    except Exception:
+        return None
+    sid = str(state.get("active_session_id") or "").strip()
+    return sid or None
+
+
+def _watch_notification_recipients(args: argparse.Namespace, cfg: dict | None) -> list[str]:
+    cli_rows = getattr(args, "notify_email", None)
+    if isinstance(cli_rows, list):
+        recipients = [str(row).strip() for row in cli_rows if str(row).strip()]
+    else:
+        recipients = []
+    if recipients:
+        seen: set[str] = set()
+        out: list[str] = []
+        for row in recipients:
+            key = row.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(row)
+        return out
+
+    cfg_payload = cfg if isinstance(cfg, dict) else {}
+    bridge_cfg = cfg_payload.get("email_bridge", {}) if isinstance(cfg_payload, dict) else {}
+    notify_rows = bridge_cfg.get("notify_to", []) if isinstance(bridge_cfg, dict) else []
+    out: list[str] = []
+    seen_cfg: set[str] = set()
+    if isinstance(notify_rows, list):
+        for row in notify_rows:
+            val = str(row).strip()
+            if not val:
+                continue
+            key = val.lower()
+            if key in seen_cfg:
+                continue
+            seen_cfg.add(key)
+            out.append(val)
+    if out:
+        return out
+    return ["nandam@qti.qualcomm.com"]
+
+
+def _normalize_recipient_email(value: str) -> str:
+    _name, addr = parseaddr(str(value).strip())
+    return addr.strip().lower()
+
+
+def _is_blocked_watch_recipient(value: str) -> bool:
+    addr = _normalize_recipient_email(value)
+    if not addr or "@" not in addr:
+        return True
+    local, domain = addr.rsplit("@", 1)
+    local = local.strip()
+    domain = domain.strip()
+    if not local or not domain:
+        return True
+    if domain in _WATCH_BLOCKED_NOTIFICATION_DOMAINS:
+        return True
+    if local in _WATCH_BLOCKED_LOCAL_PART_EXACT:
+        return True
+    if local.startswith("linux-") or local.startswith("list-"):
+        return True
+    if local.endswith("-list") or local.endswith("-lists"):
+        return True
+    return False
+
+
+def _filter_watch_safe_recipients(recipients: list[str]) -> tuple[list[str], list[str]]:
+    safe: list[str] = []
+    blocked: list[str] = []
+    safe_seen: set[str] = set()
+    blocked_seen: set[str] = set()
+    for raw in recipients:
+        addr = _normalize_recipient_email(raw)
+        if _is_blocked_watch_recipient(addr):
+            if addr and addr not in blocked_seen:
+                blocked_seen.add(addr)
+                blocked.append(addr)
+            continue
+        if addr and addr not in safe_seen:
+            safe_seen.add(addr)
+            safe.append(addr)
+    return safe, blocked
+
+
+def _watch_reply_observation(event: dict) -> tuple[str, str, list[str], list[str]]:
+    excerpt = str(event.get("excerpt") or "").strip()
+    author = str(event.get("author") or "unknown").strip()
+    lowered = excerpt.lower()
+
+    if any(token in lowered for token in ["must_check", "pm_runtime", "runtime pm", "devm_pm_runtime_enable"]):
+        topic = "runtime_pm_must_check"
+        reason = (
+            "Maintainer feedback points to unchecked runtime-PM call flow. "
+            "This is typically missed when review prioritizes logic flow but not return-value contracts."
+        )
+        acceptable = "0 misses for must-check/runtime-PM return handling."
+        actions = [
+            "Reviewer prompt now has explicit must-check/runtime-PM verification bullets.",
+            "Static analysis gate runs across all patches and blocks when required tools are missing.",
+            "Prior-thread context is refreshed each round so recurring PM comments stay visible.",
+        ]
+        return topic, reason, [acceptable], actions
+
+    if any(token in lowered for token in ["subject", "cover letter", "commit message", "changelog", "title"]):
+        topic = "commit_message_hygiene"
+        reason = (
+            "Feedback is about commit subject/message quality. "
+            "This can be missed when checks focus on code and not patch narrative."
+        )
+        acceptable = "Minor wording nits can be tolerated, but 0 blocking subject/format misses."
+        actions = [
+            "Builder/reviewer prompts now enforce maintainer-requested commit subject/message hygiene checks.",
+            "Auto-followup reruns the loop immediately after reply detection to apply wording fixes quickly.",
+            "Suggested-reply artifacts track what changed so maintainer concerns are explicitly addressed.",
+        ]
+        return topic, reason, [acceptable], actions
+
+    if any(token in lowered for token in ["checkpatch", "sparse", "coccinelle", "warning", "style"]):
+        topic = "tool_detectable_issue"
+        reason = (
+            "Issue appears tool-detectable (style/static-analysis). "
+            "Misses usually happen when tools are not run on the full series or tooling is absent."
+        )
+        acceptable = "0 misses for tool-detectable blockers when tooling is available."
+        actions = [
+            "Validation/static analysis now cover all patches in the series, not only a single patch.",
+            "Missing required static-analysis tools now blocks progression.",
+            "Gate fallback ensures full-patch validation when changed-file metadata is incomplete.",
+        ]
+        return topic, reason, [acceptable], actions
+
+    topic = "general_reviewer_feedback"
+    reason = (
+        "General maintainer feedback not tightly mapped to a specific heuristic. "
+        "Likely missed due to context weighting or insufficient prior-thread carry-over."
+    )
+    acceptable = "At most 1 minor nit per revision; 0 repeated misses on the same concern."
+    actions = [
+        "Prior-review ingestion and per-round refresh preserve historical feedback context.",
+        "Auto-followup starts/continues loop as soon as new lore feedback appears.",
+        "Round summaries and KB updates are used to prevent repeated misses.",
+    ]
+    _ = author
+    return topic, reason, [acceptable], actions
+
+
+def _watch_session_snapshot(root: Path, session_id: str | None) -> tuple[str, str]:
+    if not session_id:
+        return "", ""
+    try:
+        session = _load_session(root, session_id)
+    except RuntimeError:
+        return "", ""
+    status = str(session.get("status") or "unknown")
+    round_no = int(session.get("current_round", 0) or 0)
+    max_rounds = int(session.get("max_rounds", 0) or 0)
+    open_findings = session.get("open_findings")
+    open_text = "unknown" if open_findings is None else str(int(open_findings))
+    header = (
+        f"Session: {session_id}\n"
+        f"Task: {str(session.get('task') or '')}\n"
+        f"Status: {status}\n"
+        f"Round: {round_no}/{max_rounds}\n"
+        f"Open findings: {open_text}"
+    )
+    report_dir = _report_dir(root, session_id)
+    rows = sorted(report_dir.glob("round-*-summary.json"))
+    if not rows:
+        return header, ""
+    try:
+        payload = load_json(rows[-1])
+    except Exception:
+        return header, ""
+    findings = payload.get("findings", {}) if isinstance(payload, dict) else {}
+    open_items = findings.get("open_items", []) if isinstance(findings, dict) else []
+    if not isinstance(open_items, list) or not open_items:
+        return header, ""
+    first = open_items[0]
+    if not isinstance(first, dict):
+        return header, ""
+    top_issue = str(first.get("title") or "").strip()
+    if not top_issue:
+        return header, ""
+    return header, top_issue
+
+
+def _send_watch_reply_observation_email(
+    root: Path,
+    args: argparse.Namespace,
+    *,
+    event: dict,
+    msgid: str,
+    session_id: str | None,
+    auto_followup: bool,
+) -> None:
+    reply_msg_id = str(event.get("msg_id") or "").strip()
+    if not reply_msg_id:
+        return
+    cfg = _load_config_or_defaults(root)
+    configured_recipients = _watch_notification_recipients(args, cfg)
+    if not configured_recipients:
+        return
+    recipients, blocked = _filter_watch_safe_recipients(configured_recipients)
+    if blocked:
+        _echo(
+            "Watch notification guard: blocked mailing-list recipient(s): "
+            + ", ".join(blocked)
+        )
+    if not recipients:
+        fallback = "nandam@qti.qualcomm.com"
+        if not _is_blocked_watch_recipient(fallback):
+            recipients = [fallback]
+            _echo(
+                "Watch notification guard: no safe recipients configured; "
+                f"falling back to {fallback}."
+            )
+        else:
+            _echo("Watch notification guard: no safe recipients available; observation email skipped.")
+            return
+
+    topic, reason, acceptable_rows, actions = _watch_reply_observation(event)
+    session_header, top_issue = _watch_session_snapshot(root, session_id)
+    excerpt = str(event.get("excerpt") or "").strip()
+    author = str(event.get("author") or "unknown").strip()
+    priority = str(event.get("priority") or "unknown").strip()
+
+    subject = f"[A2A Watch] Lore reply analysis {reply_msg_id}"
+    body_lines = [
+        "A2A lore-reply observation report",
+        "",
+        f"Thread message-id: {msgid}",
+        f"Reply message-id: {reply_msg_id}",
+        f"Author: {author}",
+        f"Priority: {priority}",
+        f"Auto-followup enabled: {'yes' if auto_followup else 'no'}",
+        "",
+        "Reply excerpt:",
+        excerpt or "(empty excerpt)",
+        "",
+        "Why this was likely missed:",
+        f"- category: {topic}",
+        f"- observation: {reason}",
+        "",
+        "How far is it acceptable to miss:",
+    ]
+    for row in acceptable_rows:
+        body_lines.append(f"- {row}")
+    body_lines.append("")
+    body_lines.append("Steps taken to avoid next misses:")
+    for row in actions:
+        body_lines.append(f"- {row}")
+    if session_header:
+        body_lines.extend(["", "Current session snapshot:", session_header])
+    if top_issue:
+        body_lines.append(f"Top open issue: {top_issue}")
+    body_lines.append("")
+    body_lines.append("Action expectation: critical or repeated maintainer feedback should be fixed in the next revision.")
+    body = "\n".join(body_lines).rstrip() + "\n"
+
+    bridge_cfg = cfg.get("email_bridge", {}) if isinstance(cfg, dict) else {}
+    override_from = str(bridge_cfg.get("smtp_from") or "").strip() if isinstance(bridge_cfg, dict) else ""
+    result = send_notification_email(
+        subject=subject,
+        body=body,
+        to_addrs=recipients,
+        override_from=override_from or None,
+    )
+    sent = bool(result.get("sent"))
+    if sent:
+        _echo("Reply observation email sent to: " + ", ".join(recipients))
+    else:
+        _echo(
+            "Reply observation email fallback written: "
+            + str(result.get("fallback") or "unknown")
+        )
+
+
+def _build_watch_followup_loop_args(
+    args: argparse.Namespace,
+    *,
+    session_id: str | None,
+    msgid: str,
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        session=session_id,
+        task=(str(getattr(args, "task", "") or "").strip() or None) if not session_id else None,
+        max_rounds=getattr(args, "max_rounds", None),
+        timeout_min=getattr(args, "timeout_min", None),
+        builder_cmd=getattr(args, "builder_cmd", None),
+        reviewer_cmd=getattr(args, "reviewer_cmd", None),
+        watch_path=None,
+        lore_url=None,
+        lore_msgid=None if session_id else msgid,
+        lore_out_dir=getattr(args, "lore_out_dir", None),
+        max_iterations=getattr(args, "max_iterations", None),
+        auto_respin=False,
+        focus_issue=getattr(args, "focus_issue", None),
+        _single_series=False,
+    )
+
+
+def _run_watch_followup(root: Path, args: argparse.Namespace, *, msgid: str, reply_msg_id: str) -> int:
+    session_id = _watch_followup_session_id(root, getattr(args, "session", None))
+    loop_args = _build_watch_followup_loop_args(args, session_id=session_id, msgid=msgid)
+    if session_id:
+        _echo(
+            f"Auto follow-up: triggering session {session_id} "
+            f"for lore reply {reply_msg_id}."
+        )
+    else:
+        _echo(
+            f"Auto follow-up: starting new session from lore msgid {msgid} "
+            f"for reply {reply_msg_id}."
+        )
+    return cmd_loop(loop_args)
+
+
 def cmd_watch(args: argparse.Namespace) -> int:
     try:
         root = _must_find_root()
+        auto_followup = bool(getattr(args, "auto_followup", False))
+        max_iterations = getattr(args, "max_iterations", None)
+        if auto_followup and max_iterations is None:
+            args.max_iterations = 1
+
+        if auto_followup:
+            session_id = _watch_followup_session_id(root, getattr(args, "session", None))
+            task = str(getattr(args, "task", "") or "").strip()
+            if not session_id and not task:
+                _echo(
+                    "Auto follow-up requires --task when no --session and no active session exists."
+                )
+                return 1
+
         _echo(f"Watching lore thread: {args.msgid} (poll={args.poll}s)")
-        events = watch_lore(
+        if auto_followup:
+            _echo(
+                "Auto follow-up enabled: new replies trigger "
+                f"`a2a loop --max-iterations {int(getattr(args, 'max_iterations', 1) or 1)}`."
+            )
+
+        def _on_event(event: dict) -> None:
+            _echo(json.dumps(event, indent=2, sort_keys=True))
+            if str(event.get("type", "")).strip() != "network_warning":
+                reply_msg_id = str(event.get("msg_id") or "").strip()
+                if reply_msg_id:
+                    session_id_for_mail = _watch_followup_session_id(root, getattr(args, "session", None))
+                    try:
+                        _send_watch_reply_observation_email(
+                            root,
+                            args,
+                            event=event,
+                            msgid=str(args.msgid),
+                            session_id=session_id_for_mail,
+                            auto_followup=auto_followup,
+                        )
+                    except Exception as exc:
+                        _echo(f"Reply observation email warning: {exc}")
+            if not auto_followup:
+                return
+            if str(event.get("type", "")).strip() == "network_warning":
+                return
+            reply_msg_id = str(event.get("msg_id") or "").strip()
+            if not reply_msg_id:
+                return
+            rc = _run_watch_followup(root, args, msgid=str(args.msgid), reply_msg_id=reply_msg_id)
+            if rc != 0:
+                _echo(
+                    f"Auto follow-up exited with rc={rc} for reply {reply_msg_id}; "
+                    "watch mode will continue."
+                )
+
+        watch_lore(
             root,
             args.msgid,
             poll_interval_secs=int(args.poll),
             max_loops=args.max_loops,
+            on_event=_on_event,
         )
-        for event in events:
-            _echo(json.dumps(event, indent=2, sort_keys=True))
         return 0
     except RuntimeError as exc:
         _echo(str(exc))
@@ -5868,6 +7099,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to watch for builder file changes; emits round changed_files/diff artifacts.",
     )
     p_run.add_argument(
+        "--focus-issue",
+        action="append",
+        help="Issue/topic to force explicit builder/reviewer coverage (repeatable).",
+    )
+    p_run.add_argument(
         "--run-reviewer",
         action="store_true",
         help="On --resume, run reviewer command before validating and advancing.",
@@ -5912,6 +7148,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_loop.add_argument(
         "--watch-path",
         help="Path to watch for builder file changes; emits round changed_files/diff artifacts.",
+    )
+    p_loop.add_argument(
+        "--focus-issue",
+        action="append",
+        help="Issue/topic to force explicit builder/reviewer coverage (repeatable).",
     )
     p_loop.add_argument(
         "--lore-url",
@@ -6076,6 +7317,57 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-loops",
         type=int,
         help="Optional max polling loops (useful for tests/smoke).",
+    )
+    p_watch.add_argument(
+        "--auto-followup",
+        action="store_true",
+        help="Trigger `a2a loop` automatically when new lore replies appear.",
+    )
+    p_watch.add_argument(
+        "--session",
+        help="Session id to continue for follow-up runs (defaults to active session).",
+    )
+    p_watch.add_argument(
+        "--task",
+        help="Task for auto-starting a new lore loop session when no session is active.",
+    )
+    p_watch.add_argument(
+        "--max-rounds",
+        type=int,
+        help="Maximum rounds if auto-followup starts a new session.",
+    )
+    p_watch.add_argument(
+        "--timeout-min",
+        type=int,
+        help="Optional time budget metadata for auto-followup sessions.",
+    )
+    p_watch.add_argument(
+        "--builder-cmd",
+        help="Builder command override for auto-followup loop runs.",
+    )
+    p_watch.add_argument(
+        "--reviewer-cmd",
+        help="Reviewer command override for auto-followup loop runs.",
+    )
+    p_watch.add_argument(
+        "--max-iterations",
+        type=int,
+        default=1,
+        help="Per-followup cap for autonomous rounds (default: 1).",
+    )
+    p_watch.add_argument(
+        "--lore-out-dir",
+        help="Override lore fetch directory when auto-followup starts a new session.",
+    )
+    p_watch.add_argument(
+        "--focus-issue",
+        action="append",
+        help="Issue/topic to pass into follow-up loop runs for explicit coverage (repeatable).",
+    )
+    p_watch.add_argument(
+        "--notify-email",
+        action="append",
+        help="Email recipient for lore-reply observation report (repeatable). Defaults to config notify_to or nandam@qti.qualcomm.com.",
     )
     p_watch.set_defaults(func=cmd_watch)
 
