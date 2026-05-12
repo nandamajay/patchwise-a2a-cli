@@ -2196,6 +2196,66 @@ def _run_post_respin_auto_repair(
     return payload
 
 
+def _run_auto_respin_if_requested(
+    root: Path,
+    session: dict,
+    *,
+    auto_respin: bool,
+    builder_cmd: str,
+    reviewer_cmd: str,
+    skip_if_existing: bool = False,
+) -> int:
+    if not auto_respin:
+        return 0
+
+    sid = str(session.get("id") or "")
+    report_dir = _report_dir(root, sid)
+    if skip_if_existing:
+        report_path = report_dir / "lore_next_version.json"
+        if report_path.exists():
+            try:
+                existing = load_json(report_path)
+            except Exception:
+                existing = {}
+            status = str(existing.get("status") or "").strip().lower()
+            output_raw = str(existing.get("output_path") or "").strip()
+            output_path = Path(output_raw).resolve() if output_raw else None
+            if status == "ok" and output_path and output_path.exists():
+                _echo(f"Session {sid}: auto-respin artifacts already exist at {output_path}. Skipping regeneration.")
+                return 0
+
+    try:
+        next_version_payload = _auto_generate_next_version(root, session)
+        _echo("Auto next-version generation completed:")
+        _echo(json.dumps(next_version_payload, indent=2, sort_keys=True))
+        post_respin_payload = _run_post_respin_validation(
+            root,
+            session,
+            next_version_payload,
+            reviewer_cmd=reviewer_cmd,
+        )
+        _echo("Post-respin validation completed:")
+        _echo(json.dumps(post_respin_payload, indent=2, sort_keys=True))
+        if str(post_respin_payload.get("status", "")).lower() != "ok":
+            _echo("Post-respin validation failed. Starting auto-repair loop.")
+            post_respin_payload = _run_post_respin_auto_repair(
+                root,
+                session,
+                next_version_payload,
+                builder_cmd=builder_cmd,
+                reviewer_cmd=reviewer_cmd,
+                initial_validation_payload=post_respin_payload,
+            )
+            _echo("Post-respin auto-repair completed:")
+            _echo(json.dumps(post_respin_payload, indent=2, sort_keys=True))
+            if str(post_respin_payload.get("status", "")).lower() != "ok":
+                _echo("Post-respin validation failed after auto-repair rounds. Generated patchset requires fixes before send.")
+                return 1
+    except Exception as exc:
+        _echo(f"Auto next-version generation warning: {exc}")
+    return 0
+
+
 def _round_basename(round_no: int, suffix: str) -> str:
     return f"round-{round_no:02d}-{suffix}"
 
@@ -6042,8 +6102,16 @@ def cmd_loop(args: argparse.Namespace) -> int:
                 status = str(session.get("status", "in_progress"))
                 if status == "lgtm":
                     _echo(f"Session {sid}: already LGTM.")
+                    rc = _run_auto_respin_if_requested(
+                        root,
+                        session,
+                        auto_respin=auto_respin,
+                        builder_cmd=str(builder_cmd or ""),
+                        reviewer_cmd=str(reviewer_cmd or ""),
+                        skip_if_existing=True,
+                    )
                     _auto_write_session_html_report(root, sid)
-                    return 0
+                    return rc
                 if status == "stopped":
                     _echo(f"Session {sid}: already stopped.")
                     _auto_write_session_html_report(root, sid)
@@ -6114,37 +6182,17 @@ def cmd_loop(args: argparse.Namespace) -> int:
                 iterations += 1
 
                 if status == "lgtm":
-                    if auto_respin:
-                        try:
-                            next_version_payload = _auto_generate_next_version(root, session)
-                            _echo("Auto next-version generation completed:")
-                            _echo(json.dumps(next_version_payload, indent=2, sort_keys=True))
-                            post_respin_payload = _run_post_respin_validation(
-                                root,
-                                session,
-                                next_version_payload,
-                                reviewer_cmd=reviewer_cmd,
-                            )
-                            _echo("Post-respin validation completed:")
-                            _echo(json.dumps(post_respin_payload, indent=2, sort_keys=True))
-                            if str(post_respin_payload.get("status", "")).lower() != "ok":
-                                _echo("Post-respin validation failed. Starting auto-repair loop.")
-                                post_respin_payload = _run_post_respin_auto_repair(
-                                    root,
-                                    session,
-                                    next_version_payload,
-                                    builder_cmd=builder_cmd or "",
-                                    reviewer_cmd=reviewer_cmd or "",
-                                    initial_validation_payload=post_respin_payload,
-                                )
-                                _echo("Post-respin auto-repair completed:")
-                                _echo(json.dumps(post_respin_payload, indent=2, sort_keys=True))
-                                if str(post_respin_payload.get("status", "")).lower() != "ok":
-                                    _echo("Post-respin validation failed after auto-repair rounds. Generated patchset requires fixes before send.")
-                                    _auto_write_session_html_report(root, sid)
-                                    return 1
-                        except Exception as exc:
-                            _echo(f"Auto next-version generation warning: {exc}")
+                    rc = _run_auto_respin_if_requested(
+                        root,
+                        session,
+                        auto_respin=auto_respin,
+                        builder_cmd=str(builder_cmd or ""),
+                        reviewer_cmd=str(reviewer_cmd or ""),
+                        skip_if_existing=False,
+                    )
+                    if rc != 0:
+                        _auto_write_session_html_report(root, sid)
+                        return rc
                     _auto_write_session_html_report(root, sid)
                     return 0
                 if status == "stopped":
