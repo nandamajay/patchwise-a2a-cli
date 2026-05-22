@@ -30,6 +30,9 @@ class RoundSummary(BaseModel):
     findings: dict[str, Any] = Field(default_factory=dict)
     prior_comments: dict[str, Any] = Field(default_factory=dict)
     top_open: list[dict[str, Any]] = Field(default_factory=list)
+    started_at: str = ""
+    completed_at: str = ""
+    discussion: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class SessionReport(BaseModel):

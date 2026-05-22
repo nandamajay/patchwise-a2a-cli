@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import gzip
 import json
 import mailbox
@@ -17,10 +18,17 @@ _USER_AGENT = "A2A-CLI/0.1"
 _PATCH_SUBJECT_RE = re.compile(
     r"\[PATCH(?:\s+v(?P<version>\d+))?(?:\s+\d+/\d+)?\]\s*(?P<title>.*)", re.IGNORECASE
 )
-_LORE_LINK_RE = re.compile(r"(?:https?://)?lore\.kernel\.org/r/([^\s>]+)", re.IGNORECASE)
+_LORE_LINK_RE = re.compile(
+    r"(?:https?://)?lore\.kernel\.org/(?:r|all)/(?P<msgid>[^/\s>]+)(?:/[^\s>]*)?",
+    re.IGNORECASE,
+)
 _GENERIC_URL_RE = re.compile(r"https?://[^\s>]+")
 _RESULT_LINK_RE = re.compile(r"\d+\.\s+<b><a\s*\n?href=\"([^\"]+)/\"", re.MULTILINE)
 _GIT_KERNEL_COMMIT_RE = re.compile(r"https?://git\.kernel\.org/[^\s]*/c/[0-9a-f]{7,40}", re.IGNORECASE)
+_GITHUB_PR_URL_RE = re.compile(
+    r"^https?://github\.com/(?P<owner>[^/\s]+)/(?P<repo>[^/\s]+)/pull/(?P<number>\d+)(?:[/?#].*)?$",
+    re.IGNORECASE,
+)
 _APPLY_NOTICE_TOKENS = (
     "applied to",
     "applied in",
@@ -81,6 +89,7 @@ def ingest_prior_review_context(
     search_if_missing: bool,
     max_comments: int,
     seed_message_ids: list[str] | None = None,
+    source_context: dict | None = None,
 ) -> dict | None:
     patch_files = _collect_patch_files(watch_path)
     if not patch_files:
@@ -89,13 +98,13 @@ def ingest_prior_review_context(
     metadata = _series_metadata(patch_files)
     links = _extract_links_from_patches(patch_files)
 
-    sources: list[dict] = []
+    lore_sources: list[dict] = []
     search_attempted = False
     for seed in seed_message_ids or []:
         msgid = str(seed or "").strip()
         if not msgid:
             continue
-        sources.append(
+        lore_sources.append(
             {
                 "kind": "seed",
                 "message_id": msgid,
@@ -107,7 +116,7 @@ def ingest_prior_review_context(
     for link in links:
         msgid = _message_id_from_link(link)
         if msgid:
-            sources.append(
+            lore_sources.append(
                 {
                     "kind": "link",
                     "message_id": msgid,
@@ -116,7 +125,7 @@ def ingest_prior_review_context(
                 }
             )
 
-    if not sources and search_if_missing:
+    if not lore_sources and search_if_missing:
         candidates = metadata.get("series") or []
         for series in candidates:
             series_version = series.get("version")
@@ -129,7 +138,7 @@ def ingest_prior_review_context(
             target_version = int(series_version) - 1
             query_ids = _search_lore_message_ids(series_author, series_subject, target_version)
             for msgid in query_ids:
-                sources.append(
+                lore_sources.append(
                     {
                         "kind": "search",
                         "message_id": msgid,
@@ -139,17 +148,17 @@ def ingest_prior_review_context(
                 )
 
     seen_source_msgids: set[str] = set()
-    deduped_sources: list[dict] = []
-    for src in sources:
+    deduped_lore_sources: list[dict] = []
+    for src in lore_sources:
         msgid = str(src.get("message_id") or "")
         if not msgid or msgid in seen_source_msgids:
             continue
-        deduped_sources.append(src)
+        deduped_lore_sources.append(src)
         seen_source_msgids.add(msgid)
 
     comments: list[dict] = []
     seen_comment_ids: set[str] = set()
-    for src in deduped_sources:
+    for src in deduped_lore_sources:
         messages = _load_thread_messages(str(src["message_id"]))
         for msg in messages:
             comment = _comment_from_message(msg, author_email=str(metadata.get("author_email") or ""), source=src)
@@ -165,6 +174,22 @@ def ingest_prior_review_context(
         if len(comments) >= max_comments:
             break
 
+    remaining_slots = max(0, max_comments - len(comments))
+    external_sources, external_comments = _collect_external_prior_comments(
+        source_context,
+        max_comments=remaining_slots,
+    )
+    for comment in external_comments:
+        cid = str(comment.get("id") or "").strip()
+        if not cid or cid in seen_comment_ids:
+            continue
+        comments.append(comment)
+        seen_comment_ids.add(cid)
+        if len(comments) >= max_comments:
+            break
+
+    all_sources = deduped_lore_sources + external_sources
+
     requires_prior = False
     for series in metadata.get("series", []):
         series_version = series.get("version")
@@ -177,7 +202,7 @@ def ingest_prior_review_context(
             requires_prior = True
 
     if requires_prior:
-        if not deduped_sources:
+        if not all_sources:
             comments.append(
                 {
                     "id": "prior-meta:missing-thread-sources",
@@ -231,7 +256,7 @@ def ingest_prior_review_context(
         "generated_at": _utc_now(),
         "watch_path": str(watch_path),
         "detected": metadata,
-        "sources": deduped_sources,
+        "sources": all_sources,
         "comments_total": len(comments),
         "comment_type_totals": type_totals,
         "comments": comments,
@@ -247,12 +272,270 @@ def ingest_prior_review_context(
         "matrix_file": str(matrix_path),
         "comments_total": len(comments),
         "comment_type_totals": type_totals,
-        "source_total": len(deduped_sources),
+        "source_total": len(all_sources),
         "search_used": bool(search_attempted),
         "detected_version": metadata.get("version"),
         "detected_subject": metadata.get("subject_core"),
         "detected_author": metadata.get("author_email"),
     }
+
+
+def _collect_external_prior_comments(source_context: dict | None, *, max_comments: int) -> tuple[list[dict], list[dict]]:
+    if not isinstance(source_context, dict) or max_comments <= 0:
+        return [], []
+
+    kind = str(source_context.get("kind") or "").strip().lower()
+    if kind == "github_pr":
+        return _load_github_prior_comments(source_context, max_comments=max_comments)
+    if kind == "gerrit_change":
+        return _load_gerrit_prior_comments(source_context, max_comments=max_comments)
+    return [], []
+
+
+def _load_github_prior_comments(source_context: dict, *, max_comments: int) -> tuple[list[dict], list[dict]]:
+    repo = str(source_context.get("repo") or "").strip()
+    pr_number = int(source_context.get("pr_number") or 0)
+    pr_url = str(source_context.get("url") or "").strip()
+
+    if (not repo or pr_number <= 0) and pr_url:
+        match = _GITHUB_PR_URL_RE.match(pr_url)
+        if match:
+            repo = f"{match.group('owner')}/{match.group('repo')}"
+            pr_number = int(match.group("number"))
+
+    if not repo or pr_number <= 0:
+        return [], []
+
+    if not pr_url:
+        pr_url = f"https://github.com/{repo}/pull/{pr_number}"
+
+    headers = {"User-Agent": _USER_AGENT}
+    token = str(os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN") or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    sources = [
+        {
+            "kind": "github_pr",
+            "message_id": "",
+            "source": pr_url,
+            "fetch_url": pr_url,
+        }
+    ]
+    comments: list[dict] = []
+    seen_ids: set[str] = set()
+
+    endpoints = [
+        ("issue", f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"),
+        ("review_comment", f"https://api.github.com/repos/{repo}/pulls/{pr_number}/comments"),
+        ("review", f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews"),
+    ]
+
+    for endpoint_kind, endpoint in endpoints:
+        try:
+            rows = _fetch_json(endpoint, headers=headers)
+        except OSError:
+            continue
+        if not isinstance(rows, list):
+            continue
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw_id = str(row.get("id") or "").strip()
+            if not raw_id:
+                continue
+
+            user = row.get("user")
+            author = ""
+            if isinstance(user, dict):
+                author = str(user.get("login") or user.get("name") or "").strip()
+            if not author:
+                author = "github-user"
+
+            body = str(row.get("body") or "").strip()
+            state = str(row.get("state") or "").strip().lower()
+            if endpoint_kind == "review" and not body and state:
+                body = f"review_state={state}"
+            if not body:
+                continue
+
+            comment_id = f"github-{endpoint_kind}:{raw_id}"
+            if comment_id in seen_ids:
+                continue
+            seen_ids.add(comment_id)
+
+            subject = f"GitHub PR comment by {author}"
+            if endpoint_kind == "review":
+                label = state.upper() if state else "REVIEW"
+                subject = f"GitHub PR review ({label}) by {author}"
+            elif endpoint_kind == "review_comment":
+                path = str(row.get("path") or "").strip()
+                line = row.get("line") or row.get("original_line")
+                loc = path
+                if isinstance(line, int) and line > 0:
+                    loc = f"{loc}:{line}" if loc else f"line {line}"
+                if loc:
+                    subject = f"GitHub inline review comment on {loc}"
+
+            comments.append(
+                {
+                    "id": comment_id,
+                    "message_id": comment_id,
+                    "from": author,
+                    "subject": subject,
+                    "date": str(row.get("created_at") or row.get("submitted_at") or "").strip(),
+                    "excerpt": _truncate_comment_excerpt(body),
+                    "source": str(row.get("html_url") or pr_url),
+                    "source_kind": f"github_pr_{endpoint_kind}",
+                }
+            )
+            if len(comments) >= max_comments:
+                return sources, comments
+
+    return sources, comments
+
+
+def _load_gerrit_prior_comments(source_context: dict, *, max_comments: int) -> tuple[list[dict], list[dict]]:
+    base_url = str(source_context.get("base_url") or "").strip().rstrip("/")
+    change_id = str(source_context.get("change_id") or "").strip()
+    change_url = str(source_context.get("url") or "").strip()
+
+    if not base_url and change_url.startswith(("http://", "https://")):
+        parsed = urllib.parse.urlparse(change_url)
+        if parsed.scheme and parsed.netloc:
+            base_url = f"{parsed.scheme}://{parsed.netloc}"
+    if not change_id and change_url:
+        match = re.search(r"/\+/(?P<change>\d+)", change_url)
+        if match:
+            change_id = str(match.group("change") or "").strip()
+
+    if not base_url or not change_id:
+        return [], []
+    if not change_url:
+        change_url = f"{base_url}/q/{urllib.parse.quote(change_id, safe='~')}"
+
+    encoded_change = urllib.parse.quote(change_id, safe="~")
+    sources = [
+        {
+            "kind": "gerrit_change",
+            "message_id": "",
+            "source": change_url,
+            "fetch_url": change_url,
+        }
+    ]
+    comments: list[dict] = []
+    seen_ids: set[str] = set()
+
+    detail_url = f"{base_url}/changes/{encoded_change}/detail?o=MESSAGES"
+    try:
+        detail = _fetch_json(detail_url, headers={"User-Agent": _USER_AGENT}, strip_xssi=True)
+    except OSError:
+        detail = {}
+    if isinstance(detail, dict):
+        for row in detail.get("messages", []):
+            if not isinstance(row, dict):
+                continue
+            text = str(row.get("message") or "").strip()
+            if not text:
+                continue
+            raw_id = str(row.get("id") or "").strip() or str(row.get("date") or "").strip()
+            if not raw_id:
+                continue
+            comment_id = f"gerrit-message:{raw_id}"
+            if comment_id in seen_ids:
+                continue
+            seen_ids.add(comment_id)
+            author = _author_from_actor(row.get("author"))
+            subject = _truncate_comment_excerpt(text.splitlines()[0], max_len=120)
+            comments.append(
+                {
+                    "id": comment_id,
+                    "message_id": comment_id,
+                    "from": author,
+                    "subject": subject or "Gerrit change message",
+                    "date": str(row.get("date") or "").strip(),
+                    "excerpt": _truncate_comment_excerpt(text),
+                    "source": change_url,
+                    "source_kind": "gerrit_change_message",
+                }
+            )
+            if len(comments) >= max_comments:
+                return sources, comments
+
+    inline_url = f"{base_url}/changes/{encoded_change}/revisions/current/comments"
+    try:
+        inline_payload = _fetch_json(inline_url, headers={"User-Agent": _USER_AGENT}, strip_xssi=True)
+    except OSError:
+        inline_payload = {}
+    if isinstance(inline_payload, dict):
+        for path, rows in inline_payload.items():
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                text = str(row.get("message") or "").strip()
+                if not text:
+                    continue
+                raw_id = str(row.get("id") or "").strip()
+                if not raw_id:
+                    updated = str(row.get("updated") or "").strip()
+                    raw_id = f"{path}:{updated}:{len(comments)}"
+                comment_id = f"gerrit-inline:{raw_id}"
+                if comment_id in seen_ids:
+                    continue
+                seen_ids.add(comment_id)
+                author = _author_from_actor(row.get("author"))
+                line_no = row.get("line")
+                loc = str(path)
+                if isinstance(line_no, int) and line_no > 0:
+                    loc = f"{loc}:{line_no}"
+                comments.append(
+                    {
+                        "id": comment_id,
+                        "message_id": comment_id,
+                        "from": author,
+                        "subject": f"Gerrit inline comment on {loc}",
+                        "date": str(row.get("updated") or "").strip(),
+                        "excerpt": _truncate_comment_excerpt(text),
+                        "source": change_url,
+                        "source_kind": "gerrit_inline_comment",
+                    }
+                )
+                if len(comments) >= max_comments:
+                    return sources, comments
+
+    return sources, comments
+
+
+def _fetch_json(url: str, *, headers: dict[str, str] | None = None, strip_xssi: bool = False) -> object:
+    req_headers = {"User-Agent": _USER_AGENT}
+    if isinstance(headers, dict):
+        req_headers.update({str(k): str(v) for k, v in headers.items() if str(k)})
+    req = urllib.request.Request(url, headers=req_headers)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        text = resp.read().decode("utf-8", errors="replace")
+    if strip_xssi and text.startswith(")]}'"):
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+    return json.loads(text)
+
+
+def _author_from_actor(actor: object) -> str:
+    if not isinstance(actor, dict):
+        return "unknown"
+    for key in ("name", "email", "username", "_account_id"):
+        value = str(actor.get(key) or "").strip()
+        if value:
+            return value
+    return "unknown"
+
+
+def _truncate_comment_excerpt(text: str, *, max_len: int = 600) -> str:
+    clean = " ".join(str(text or "").split())
+    if len(clean) <= max_len:
+        return clean
+    return clean[:max_len].rstrip() + "..."
 
 
 def load_prior_comments(comments_file: Path) -> list[dict]:
@@ -526,7 +809,7 @@ def _message_id_from_link(link: str) -> str | None:
     match = _LORE_LINK_RE.search(link)
     if not match:
         return None
-    msgid = match.group(1).strip().strip("/>")
+    msgid = str(match.group("msgid") or "").strip().strip("/>")
     if not msgid:
         return None
     return urllib.parse.unquote(msgid)

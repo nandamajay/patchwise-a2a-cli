@@ -6,8 +6,10 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from email.utils import format_datetime, parseaddr
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .conflict_resolver import ConflictError, ConflictResolver
 
@@ -16,6 +18,10 @@ _REV_RE = re.compile(r"^(?P<prefix>.*?)(?P<sep>[_-])v(?P<num>\d+)$", re.IGNORECA
 _SERIES_LINK_RE = re.compile(r"^(?:Link:|v\d+:)", re.IGNORECASE)
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 _LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+")
+_COVER_PATCH_RE = re.compile(r"^(?:v\d+-)?0000-cover-letter\.patch$", re.IGNORECASE)
+_PATCH_SUBJECT_LINE_RE = re.compile(r"^(Subject:\s*\[PATCH)(?P<body>[^\]]*)(\].*)$", re.IGNORECASE)
+_PATCH_VERSION_TOKEN_RE = re.compile(r"\bv(?P<num>\d+)\b", re.IGNORECASE)
+_PATCH_INDEX_TOKEN_RE = re.compile(r"^\d+/\d+$")
 
 
 def _utc_now() -> str:
@@ -74,7 +80,7 @@ def _find_git_root(path: Path) -> Path:
 
 
 def _is_cover_patch(path: Path) -> bool:
-    return path.name.startswith("0000")
+    return bool(_COVER_PATCH_RE.fullmatch(path.name))
 
 
 def _read_series_file(series_path: Path) -> list[Path]:
@@ -145,7 +151,15 @@ def _run_git(repo: Path, *args: str, check: bool = True) -> subprocess.Completed
 
 
 def _ensure_clean_tree(repo: Path) -> None:
-    status = _run_git(repo, "status", "--porcelain", check=True).stdout.strip()
+    # Allow untracked files (common for local patch staging directories) while
+    # still blocking tracked/staged changes that would taint respin output.
+    status = _run_git(
+        repo,
+        "status",
+        "--porcelain",
+        "--untracked-files=no",
+        check=True,
+    ).stdout.strip()
     if status:
         raise RuntimeError("Source tree has uncommitted changes; aborting respin.")
 
@@ -169,7 +183,7 @@ def _find_cover_letter(path: Path) -> Path | None:
     if not path.is_dir():
         return None
 
-    for candidate in sorted(path.rglob("0000*.patch")):
+    for candidate in sorted(p for p in path.rglob("*.patch") if p.is_file() and _is_cover_patch(p)):
         return candidate
     for candidate in sorted(path.rglob("*.cover")):
         return candidate
@@ -294,10 +308,9 @@ def _generate_cover_letter_template(
 
     old_links = _collect_previous_links(previous_cover)
     prev_version = max(1, next_version - 1)
+    marker = f"Changes since v{prev_version}:"
 
-    lines = [
-        f"Changes since v{prev_version}:",
-    ]
+    lines = [marker]
     if changelog_lines:
         for row in changelog_lines:
             clean = _clean_changelog_row(row)
@@ -314,13 +327,112 @@ def _generate_cover_letter_template(
     content = "\n".join(lines) + "\n"
     if cover.exists():
         existing = cover.read_text(encoding="utf-8", errors="replace")
-        if "Changes in v" not in existing and "Changes since v" not in existing:
-            cover.write_text(existing + "\n" + content, encoding="utf-8")
-        else:
-            cover.write_text(existing, encoding="utf-8")
+        if marker not in existing:
+            existing_lines = existing.splitlines()
+            existing_norm = {line.strip() for line in existing_lines if line.strip()}
+            filtered_lines: list[str] = [marker]
+            if changelog_lines:
+                for row in changelog_lines:
+                    clean = _clean_changelog_row(row)
+                    if not clean:
+                        continue
+                    filtered_lines.append(f"- {clean}")
+            else:
+                filtered_lines.append(
+                    "- Technical delta summary unavailable from session artifacts; add manual vN changelog before posting."
+                )
+            links_to_add = [line for line in old_links if line.strip() and line.strip() not in existing_norm]
+            if links_to_add:
+                filtered_lines.append("")
+                filtered_lines.extend(links_to_add)
+            block = "\n".join(filtered_lines).rstrip() + "\n"
+            new_text = existing.rstrip() + "\n\n" + block
+            cover.write_text(new_text, encoding="utf-8")
     else:
         cover.write_text(content, encoding="utf-8")
     return cover
+
+
+def _refresh_cover_letter_headers(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        original = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+    lines = original.splitlines()
+    sep_idx = next((idx for idx, line in enumerate(lines) if line.strip() == ""), len(lines))
+    header_lines = lines[:sep_idx]
+    body_lines = lines[sep_idx + 1 :] if sep_idx < len(lines) else []
+
+    chunks: list[list[str]] = []
+    cur: list[str] = []
+    for line in header_lines:
+        if line[:1] in (" ", "\t") and cur:
+            cur.append(line)
+            continue
+        if cur:
+            chunks.append(cur)
+        cur = [line]
+    if cur:
+        chunks.append(cur)
+
+    drop_headers = {"message-id", "date", "in-reply-to", "references"}
+    kept_chunks: list[list[str]] = []
+    from_idx: int | None = None
+    for chunk in chunks:
+        first = chunk[0]
+        if ":" not in first:
+            kept_chunks.append(chunk)
+            continue
+        name = first.split(":", 1)[0].strip().lower()
+        if name in drop_headers:
+            continue
+        if name == "from":
+            from_idx = len(kept_chunks)
+        kept_chunks.append(chunk)
+
+    domain = "a2a.local"
+    for chunk in kept_chunks:
+        first = chunk[0]
+        if ":" not in first:
+            continue
+        if first.split(":", 1)[0].strip().lower() != "from":
+            continue
+        addr = parseaddr(first.split(":", 1)[1].strip())[1]
+        if "@" in addr:
+            candidate = addr.split("@", 1)[1].strip().lower()
+            candidate = re.sub(r"[^a-z0-9.-]+", "", candidate).strip(".-")
+            if candidate:
+                domain = candidate
+        break
+
+    now_local = datetime.now().astimezone()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    fresh_headers = [
+        [f"Date: {format_datetime(now_local)}"],
+        [f"Message-Id: <{stamp}.{uuid4().hex[:12]}@{domain}>"],
+    ]
+
+    insert_idx = len(kept_chunks)
+    if from_idx is not None:
+        insert_idx = from_idx + 1
+    elif kept_chunks and kept_chunks[0][0].lower().startswith("subject:"):
+        insert_idx = 1
+    for offset, header_chunk in enumerate(fresh_headers):
+        kept_chunks.insert(insert_idx + offset, header_chunk)
+
+    new_header_lines: list[str] = []
+    for chunk in kept_chunks:
+        new_header_lines.extend(chunk)
+
+    new_lines = [*new_header_lines, "", *body_lines]
+    updated = "\n".join(new_lines).rstrip("\n") + "\n"
+    if updated == original:
+        return False
+    path.write_text(updated, encoding="utf-8")
+    return True
 
 
 def _write_series_manifest(out_dir: Path) -> Path | None:
@@ -331,6 +443,109 @@ def _write_series_manifest(out_dir: Path) -> Path | None:
     lines = [p.name for p in patches]
     series.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return series
+
+
+def _normalize_subject_body(body: str, *, version: int, index: int, total: int) -> str:
+    tokens = [tok for tok in body.strip().split() if tok]
+    kept: list[str] = []
+    for tok in tokens:
+        if _PATCH_VERSION_TOKEN_RE.fullmatch(tok):
+            continue
+        if _PATCH_INDEX_TOKEN_RE.fullmatch(tok):
+            continue
+        kept.append(tok)
+    kept.extend([f"v{version}", f"{index}/{total}"])
+    return " " + " ".join(kept)
+
+
+def _rewrite_subject_header(path: Path, *, version: int, index: int, total: int) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+
+    changed = False
+    out_lines: list[str] = []
+    updated = False
+    for line in lines:
+        if updated:
+            out_lines.append(line)
+            continue
+        m = _PATCH_SUBJECT_LINE_RE.match(line)
+        if m:
+            new_body = _normalize_subject_body(m.group("body") or "", version=version, index=index, total=total)
+            new_line = f"{m.group(1)}{new_body}{m.group(3)}"
+            out_lines.append(new_line)
+            updated = True
+            changed = changed or (new_line != line)
+            continue
+        if line.lower().startswith("subject:"):
+            subject_text = line.split(":", 1)[1].strip()
+            new_line = f"Subject: [PATCH v{version} {index}/{total}] {subject_text}".rstrip()
+            out_lines.append(new_line)
+            updated = True
+            changed = changed or (new_line != line)
+            continue
+        out_lines.append(line)
+    if changed:
+        path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+    return changed
+
+
+def _sanitize_patch_slug(path: Path, *, fallback: str) -> str:
+    stem = str(path.stem).strip()
+    stem = re.sub(r"^v\d+-", "", stem, flags=re.IGNORECASE)
+    stem = re.sub(r"^\d{4}[-_]*", "", stem)
+    stem = stem.replace("_", "-")
+    stem = re.sub(r"[^A-Za-z0-9.+-]+", "-", stem)
+    stem = stem.strip("-").lower()
+    return stem or fallback
+
+
+def _normalize_formatted_patch_output(out_dir: Path, next_version: int) -> int:
+    patch_files = sorted(p for p in out_dir.glob("*.patch") if p.is_file())
+    if not patch_files:
+        return 0
+
+    cover = next((p for p in patch_files if _is_cover_patch(p)), None)
+    non_cover = [p for p in patch_files if not _is_cover_patch(p)]
+    if not non_cover:
+        return 0
+
+    total = len(non_cover)
+    for idx, patch in enumerate(non_cover, start=1):
+        _rewrite_subject_header(patch, version=next_version, index=idx, total=total)
+    if cover is not None:
+        _rewrite_subject_header(cover, version=next_version, index=0, total=total)
+
+    rename_map: dict[Path, Path] = {}
+    if cover is not None:
+        rename_map[cover] = cover.with_name(f"v{next_version}-0000-cover-letter.patch")
+    for idx, patch in enumerate(non_cover, start=1):
+        slug = _sanitize_patch_slug(patch, fallback=f"patch-{idx:04d}")
+        rename_map[patch] = patch.with_name(f"v{next_version}-{idx:04d}-{slug}.patch")
+
+    tmp_map: dict[Path, Path] = {}
+    for src, dst in rename_map.items():
+        if src == dst:
+            continue
+        tmp = src.with_name(f".a2a-tmp-{uuid4().hex}-{src.name}")
+        src.rename(tmp)
+        tmp_map[tmp] = dst
+    for tmp, dst in tmp_map.items():
+        tmp.rename(dst)
+
+    cover = rename_map.get(cover, cover) if cover is not None else None
+    non_cover = [rename_map.get(p, p) for p in non_cover]
+
+    lines: list[str] = []
+    if cover is not None and cover.exists():
+        lines.append(cover.name)
+    lines.extend(p.name for p in non_cover)
+    (out_dir / "series").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return total
 
 
 def _detect_upstream_drift(repo: Path) -> dict:
@@ -507,12 +722,21 @@ def respin(
             "--output-directory",
             str(out_dir),
         )
-        _write_series_manifest(out_dir)
+        generated_patch_count = _normalize_formatted_patch_output(out_dir, next_version)
+        if generated_patch_count <= 0:
+            _write_series_manifest(out_dir)
+            generated_patch_count = len(patches)
 
         previous_cover = _find_cover_letter(source_dir)
         resolved_findings = _load_resolved_findings(report_dir)
         changelog_lines = _build_cover_changelog_lines(report_dir, resolved_findings)
         _generate_cover_letter_template(out_dir, next_version, changelog_lines, previous_cover)
+        for cover_path in sorted(
+            p for p in out_dir.rglob("*.patch") if p.is_file() and _is_cover_patch(p)
+        ):
+            _refresh_cover_letter_headers(cover_path)
+        for cover_path in sorted(out_dir.rglob("*.cover")):
+            _refresh_cover_letter_headers(cover_path)
 
         if output_copy_dir.exists():
             shutil.rmtree(output_copy_dir)
@@ -528,7 +752,7 @@ def respin(
             output_dir=str(out_dir),
             output_copy_dir=str(output_copy_dir),
             temp_branch=temp_branch,
-            patch_count=len(patches),
+            patch_count=int(generated_patch_count),
             dry_run=False,
             notes=notes,
         )

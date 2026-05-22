@@ -68,6 +68,24 @@ class StaticAnalysisTests(unittest.TestCase):
                 result = run_gate("a.patch", "/repo", {"sparse": True, "coccinelle": True})
         self.assertTrue(result["gate_passed"])
 
+    def test_gate_fails_when_required_tools_missing_in_strict_mode(self) -> None:
+        with mock.patch(
+            "a2a_cli.static_analysis.run_sparse",
+            return_value={"skipped": True, "reason": "sparse not installed", "blocking": False, "new_warnings": [], "total_warnings": 0},
+        ):
+            with mock.patch(
+                "a2a_cli.static_analysis.run_coccinelle",
+                return_value={"skipped": True, "reason": "coccinelle not installed", "matches": [], "blocking": False},
+            ):
+                result = run_gate(
+                    "a.patch",
+                    "/repo",
+                    {"sparse": True, "coccinelle": True, "fail_on_missing_tools": True},
+                )
+        self.assertFalse(result["gate_passed"])
+        self.assertTrue(result["tooling_blocking"])
+        self.assertEqual(result["missing_required_tools"], ["coccinelle", "sparse"])
+
     def test_kernel_tree_restored_after_analysis(self) -> None:
         repo, patch = self._setup_paths()
         calls: list[tuple[str, ...]] = []

@@ -22,6 +22,9 @@ Return LGTM only when all findings are truly closed.
 3. Do not emit workflow/progress/meta findings.
 4. If evidence is weak, keep status `open`.
 5. If previous findings were "resolved" but new risk appears, raise a new finding.
+5a. Keep source IDs stable across rounds:
+   - If a concern is the same as a prior round, reuse the same `source_comment_id`.
+   - Do not mint a new `subsys-scan:*` id for an unchanged closed advisory.
 6. Never suppress observed concerns.
    - In-scope unresolved concern: emit `open` finding.
    - Pre-existing/out-of-scope concern: emit `low` severity advisory with explicit evidence and follow-up action.
@@ -30,6 +33,7 @@ Return LGTM only when all findings are truly closed.
    - When prior comments exist, do not limit output to only `prior-msg:*` mappings.
    - Also perform an independent subsystem scan and emit at least one finding/advisory with `source_comment_id` using `subsys-scan:<topic>`.
    - This independent row may be `closed` if no defect is found, but it must include concrete evidence and a real `patch_file:line` location.
+   - Prefer stable independent IDs when the check intent is unchanged (for example `subsys-scan:artifact-coherence`).
 9. Enforce patch-series quality, not just single-hunk correctness:
    - Each patch must be logically scoped (mechanical prep vs functional behavior changes should not be mixed without rationale).
    - Series ordering must remain bisect-safe (dependency-enabling patches must land before dependent functional patches).
@@ -51,11 +55,16 @@ Return LGTM only when all findings are truly closed.
 ## Kernel-Specific Review Focus
 
 - PM-runtime balance and unwind correctness.
+- Enforce `__must_check` API handling in touched paths (for example `devm_pm_runtime_enable()` and other fallible runtime-PM helpers).
 - Shared resource/refcount hazards.
 - PRE/POST power-sequencing safety.
 - Helper-conversion preconditions: ensure required hooks/initialization still run; flag recursive/dependency failures explicitly.
 - Regressions introduced by attempted fixes.
 - Upstream-consistent behavior and defensible rationale.
+- Maintainer-requested commit-message/subject updates must be reflected when applicable (remove stale wording, add missing rationale/NOP notes).
+- Reviewer/maintainer credit hygiene:
+  - If a prior actionable maintainer comment clearly suggested a technical change that is now implemented, verify the relevant commit message includes appropriate `Suggested-by: Name <email>` attribution.
+  - Do not require `Suggested-by` for generic nits, acknowledgements, or maintainer apply-notice emails.
 - Functional tunable changes (timeouts/delays/votes) must have rationale in commit message or cover letter.
 - Patch-series logical separation and bisect-safe ordering.
 - Cover-letter revision notes quality (`Changes since vN` reflects technical delta).

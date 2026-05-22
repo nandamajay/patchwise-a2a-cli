@@ -20,6 +20,14 @@ from typing import Any
 from .email_notify import send_email
 
 _LORE_URL_RE = re.compile(r"https?://lore\.kernel\.org/(?:all|r)/[^\s<>()\"']+", re.IGNORECASE)
+_GITHUB_PR_URL_RE = re.compile(
+    r"https?://github\.com/(?P<owner>[^/\s]+)/(?P<repo>[^/\s]+)/pull/(?P<number>\d+)[^\s<>()\"']*",
+    re.IGNORECASE,
+)
+_GERRIT_CHANGE_URL_RE = re.compile(
+    r"https?://[^\s<>()\"']+/\S*/\+/\d+(?:[/?#][^\s<>()\"']*)?",
+    re.IGNORECASE,
+)
 
 
 def utc_now() -> str:
@@ -492,6 +500,24 @@ def _extract_lore_url(text: str) -> str:
     return _trim_url_token(match.group(0))
 
 
+def _extract_github_pr_url(text: str) -> str:
+    if not text.strip():
+        return ""
+    match = _GITHUB_PR_URL_RE.search(text)
+    if not match:
+        return ""
+    return _trim_url_token(match.group(0))
+
+
+def _extract_gerrit_change_url(text: str) -> str:
+    if not text.strip():
+        return ""
+    match = _GERRIT_CHANGE_URL_RE.search(text)
+    if not match:
+        return ""
+    return _trim_url_token(match.group(0))
+
+
 def _infer_auto_run_request(subject: str, body: str, attachments: list[Path]) -> dict[str, Any] | None:
     patch_files = [p for p in attachments if p.suffix.lower() in {".patch", ".diff"}]
     if patch_files:
@@ -502,7 +528,26 @@ def _infer_auto_run_request(subject: str, body: str, attachments: list[Path]) ->
             "raw": "AUTO RUN ATTACHMENT",
         }
 
-    lore_url = _extract_lore_url("\n".join([subject or "", body or ""]))
+    combined = "\n".join([subject or "", body or ""])
+    github_pr_url = _extract_github_pr_url(combined)
+    if github_pr_url:
+        return {
+            "command": "run",
+            "mode": "github",
+            "params": {"PR": github_pr_url},
+            "raw": f"AUTO RUN GITHUB PR={github_pr_url}",
+        }
+
+    gerrit_change_url = _extract_gerrit_change_url(combined)
+    if gerrit_change_url:
+        return {
+            "command": "run",
+            "mode": "gerrit",
+            "params": {"CHANGE": gerrit_change_url},
+            "raw": f"AUTO RUN GERRIT CHANGE={gerrit_change_url}",
+        }
+
+    lore_url = _extract_lore_url(combined)
     if lore_url:
         return {
             "command": "run",
@@ -602,14 +647,21 @@ def _build_help_text() -> str:
         "3) Start file-based review\n"
         "A2A RUN FILE WATCH_PATH=/abs/path/to/patch_or_series TASK=my-task MAX_ROUNDS=3\n"
         "\n"
-        "4) Start from email patch attachment\n"
+        "4) Start GitHub PR review\n"
+        "A2A RUN GITHUB PR=https://github.com/<owner>/<repo>/pull/<n> TASK=my-task MAX_ROUNDS=3\n"
+        "\n"
+        "5) Start Gerrit change review\n"
+        "A2A RUN GERRIT CHANGE=https://review.example.com/c/project/+/12345 TASK=my-task MAX_ROUNDS=3\n"
+        "A2A RUN GERRIT CHANGE=12345 GERRIT_BASE_URL=https://review.example.com TASK=my-task\n"
+        "\n"
+        "6) Start from email patch attachment\n"
         "A2A RUN ATTACHMENT TASK=my-task MAX_ROUNDS=3\n"
         "Attach .patch files in the same email.\n"
         "\n"
-        "5) Resume session\n"
+        "7) Resume session\n"
         "A2A RESUME SESSION=sess-...\n"
         "\n"
-        "6) Extend stopped session by one round\n"
+        "8) Extend stopped session by one round\n"
         "A2A EXTEND SESSION=sess-... TOKEN=<token> AUTO_RUN=yes\n"
     )
 
@@ -655,6 +707,9 @@ def _build_loop_cmd_for_request(
     params: dict[str, str],
     watch_path: str = "",
     lore_url: str = "",
+    github_pr: str = "",
+    gerrit_change: str = "",
+    gerrit_base_url: str = "",
 ) -> list[str]:
     task = params.get("TASK", "").strip() or f"email-review-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
     max_rounds = _safe_int(params.get("MAX_ROUNDS"), cfg.default_max_rounds or 3)
@@ -671,6 +726,7 @@ def _build_loop_cmd_for_request(
         "--max-rounds",
         str(max_rounds),
     ]
+    fetch_out_dir = params.get("FETCH_OUT_DIR", "").strip() or params.get("LORE_OUT_DIR", "").strip()
     if mode == "file":
         cmd.extend(["--watch-path", watch_path])
     elif mode == "lore":
@@ -678,6 +734,16 @@ def _build_loop_cmd_for_request(
         lore_out_dir = params.get("LORE_OUT_DIR", "").strip() or cfg.default_lore_out_dir
         if lore_out_dir:
             cmd.extend(["--lore-out-dir", str(Path(lore_out_dir).expanduser().resolve())])
+    elif mode == "github":
+        cmd.extend(["--github-pr", github_pr])
+        if fetch_out_dir:
+            cmd.extend(["--fetch-out-dir", str(Path(fetch_out_dir).expanduser().resolve())])
+    elif mode == "gerrit":
+        cmd.extend(["--gerrit-change", gerrit_change])
+        if gerrit_base_url:
+            cmd.extend(["--gerrit-base-url", gerrit_base_url])
+        if fetch_out_dir:
+            cmd.extend(["--fetch-out-dir", str(Path(fetch_out_dir).expanduser().resolve())])
     if max_iterations > 0:
         cmd.extend(["--max-iterations", str(max_iterations)])
     if builder_cmd:
@@ -792,6 +858,52 @@ def handle_command(
                 f"Session: {session_id or 'pending'}\nPID: {pid}\nLog: {log_path}\n"
                 f"Command: {shlex.join(cmd)}\n"
             )
+        if mode == "github":
+            pr_ref = str(params.get("PR", "") or params.get("GITHUB_PR", "")).strip()
+            if not pr_ref:
+                return "error", "Missing PR/GITHUB_PR for `A2A RUN GITHUB`."
+            cmd = _build_loop_cmd_for_request(
+                cfg,
+                mode="github",
+                params=params,
+                github_pr=pr_ref,
+            )
+            pid, session_id, log_path = _spawn_loop_and_track(
+                cfg,
+                store,
+                sender,
+                cmd,
+                detect_new_session=True,
+            )
+            return "ok", (
+                "GitHub PR review scheduled.\n"
+                f"Session: {session_id or 'pending'}\nPID: {pid}\nLog: {log_path}\n"
+                f"Command: {shlex.join(cmd)}\n"
+            )
+        if mode == "gerrit":
+            change_ref = str(params.get("CHANGE", "") or params.get("GERRIT_CHANGE", "")).strip()
+            if not change_ref:
+                return "error", "Missing CHANGE/GERRIT_CHANGE for `A2A RUN GERRIT`."
+            gerrit_base_url = str(params.get("GERRIT_BASE_URL", "")).strip()
+            cmd = _build_loop_cmd_for_request(
+                cfg,
+                mode="gerrit",
+                params=params,
+                gerrit_change=change_ref,
+                gerrit_base_url=gerrit_base_url,
+            )
+            pid, session_id, log_path = _spawn_loop_and_track(
+                cfg,
+                store,
+                sender,
+                cmd,
+                detect_new_session=True,
+            )
+            return "ok", (
+                "Gerrit change review scheduled.\n"
+                f"Session: {session_id or 'pending'}\nPID: {pid}\nLog: {log_path}\n"
+                f"Command: {shlex.join(cmd)}\n"
+            )
         if mode == "file":
             watch_path = str(params.get("WATCH_PATH", "")).strip()
             if not watch_path:
@@ -842,7 +954,7 @@ def handle_command(
                 f"Watch path: {watch_path}\n"
                 f"Command: {shlex.join(cmd)}\n"
             )
-        return "error", "Unsupported RUN mode. Use: RUN LORE, RUN FILE, or RUN ATTACHMENT."
+        return "error", "Unsupported RUN mode. Use: RUN LORE, RUN GITHUB, RUN GERRIT, RUN FILE, or RUN ATTACHMENT."
     return "error", "Unsupported command. Send `A2A HELP`."
 
 

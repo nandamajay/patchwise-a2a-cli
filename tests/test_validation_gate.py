@@ -4,7 +4,9 @@ from pathlib import Path
 from unittest import mock
 
 from a2a_cli.main import (
+    _as_json,
     _detect_kernel_repo_root,
+    _run_post_respin_validation,
     _resolve_gate_patch_scope,
     _resolve_gate_patch_targets,
     _run_post_respin_checkpatch,
@@ -153,6 +155,73 @@ class ValidationGateTests(unittest.TestCase):
             joined = " ".join(payload["issues"])
             self.assertIn("downstream-only compatible \"qcom,swr-mstr\"", joined)
             self.assertIn("downstream-only DT property 'qcom,swr-port-mapping'", joined)
+
+    def test_post_respin_validation_uses_source_watch_path_for_kernel_root(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            a2a = root / ".a2a"
+            (a2a / "reports" / "sess-test").mkdir(parents=True, exist_ok=True)
+            (a2a / "config.json").write_text(_as_json({"post_respin_checkpatch": True}), encoding="utf-8")
+
+            kernel_root = root / "kernel"
+            scripts = kernel_root / "scripts"
+            scripts.mkdir(parents=True, exist_ok=True)
+            (scripts / "checkpatch.pl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+            source_watch = kernel_root / ".a2a" / "lore_series" / "demo"
+            source_watch.mkdir(parents=True, exist_ok=True)
+            output = root / "generated" / "v2"
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "0001-a.patch").write_text(
+                "\n".join(
+                    [
+                        "From: Tester <tester@example.com>",
+                        "Subject: [PATCH] test",
+                        "",
+                        "---",
+                        " a.txt | 1 +",
+                        " 1 file changed, 1 insertion(+)",
+                        "",
+                        "diff --git a/a.txt b/a.txt",
+                        "new file mode 100644",
+                        "index 000000000000..e69de29bb2d1",
+                        "--- /dev/null",
+                        "+++ b/a.txt",
+                        "@@ -0,0 +1 @@",
+                        "+x",
+                        "-- ",
+                        "2.34.1",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            session = {
+                "id": "sess-test",
+                "watch_path": str(output),
+                "repo_path": str(kernel_root),
+                "reviewer_name": "aryabhatta",
+            }
+            next_version_payload = {
+                "output_path": str(output),
+                "source_watch_path": str(source_watch),
+            }
+
+            with mock.patch("a2a_cli.main._run_post_respin_reviewer_validation", return_value={"ran": False, "ok": True, "issues": []}):
+                with mock.patch("a2a_cli.main.run_shell_command", return_value={"returncode": 0, "stdout": "", "stderr": ""}) as runner:
+                    payload = _run_post_respin_validation(
+                        root,
+                        session,
+                        next_version_payload,
+                        reviewer_cmd="echo reviewer",
+                    )
+
+            checkpatch = payload["checks"]["checkpatch"]
+            self.assertTrue(checkpatch.get("ok"))
+            self.assertEqual(checkpatch.get("kernel_root"), str(kernel_root))
+            self.assertEqual(checkpatch.get("files_checked"), 1)
+            self.assertEqual(runner.call_count, 1)
 
 
 if __name__ == "__main__":

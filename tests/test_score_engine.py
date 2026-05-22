@@ -11,7 +11,21 @@ from a2a_cli.score_engine import (
 
 
 class ScoreEngineTests(unittest.TestCase):
-    def test_low_builder_confidence_forces_extra_round(self) -> None:
+    def test_low_builder_confidence_forces_extra_round_when_findings_open(self) -> None:
+        thresholds = ScoreThresholds()
+        decision = evaluate_round_scores(
+            round_no=1,
+            open_findings=1,
+            builder_confidence=30,
+            reviewer_confidence=95,
+            patch_gauge=50,
+            previous_builder_confidence=None,
+            previous_reviewer_confidence=None,
+            thresholds=thresholds,
+        )
+        self.assertTrue(decision["force_extra_round"])
+
+    def test_low_builder_confidence_is_warning_only_when_findings_closed(self) -> None:
         thresholds = ScoreThresholds()
         decision = evaluate_round_scores(
             round_no=1,
@@ -23,7 +37,8 @@ class ScoreEngineTests(unittest.TestCase):
             previous_reviewer_confidence=None,
             thresholds=thresholds,
         )
-        self.assertTrue(decision["force_extra_round"])
+        self.assertFalse(decision["force_extra_round"])
+        self.assertIn("warning only", " ".join(decision["messages"]))
 
     def test_low_reviewer_forces_re_examine(self) -> None:
         thresholds = ScoreThresholds()
@@ -83,6 +98,22 @@ class ScoreEngineTests(unittest.TestCase):
         )
         self.assertTrue(decision["volatility_warning"])
         self.assertTrue(decision["force_extra_round"])
+
+    def test_volatility_is_warning_only_when_findings_closed(self) -> None:
+        thresholds = ScoreThresholds(volatility_swing=30)
+        decision = evaluate_round_scores(
+            round_no=3,
+            open_findings=0,
+            builder_confidence=20,
+            reviewer_confidence=90,
+            patch_gauge=40,
+            previous_builder_confidence=70,
+            previous_reviewer_confidence=50,
+            thresholds=thresholds,
+        )
+        self.assertTrue(decision["volatility_warning"])
+        self.assertFalse(decision["force_extra_round"])
+        self.assertIn("warning only", " ".join(decision["messages"]))
 
     def test_open_findings_always_block_lgtm(self) -> None:
         thresholds = ScoreThresholds()

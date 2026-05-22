@@ -1,4 +1,5 @@
 import argparse
+import base64
 import builtins
 import difflib
 import fcntl
@@ -12,11 +13,12 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
-from email.utils import parseaddr
+from email.utils import format_datetime, parseaddr
 from html import escape
 from pathlib import Path
 from typing import Callable, Iterable
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
+import urllib.request
 from contextlib import contextmanager
 from uuid import uuid4
 
@@ -79,6 +81,7 @@ _VOLATILE_SOURCE_ID_RE = re.compile(r"^(?:new|round\d+-new|issue-temp)[-:]", re.
 _PATCH_SUBJECT_LINE_RE = re.compile(r"^(Subject:\s*\[PATCH)(?P<body>[^\]]*)(\].*)$", re.IGNORECASE)
 _PATCH_VERSION_TOKEN_RE = re.compile(r"\bv(?P<num>\d+)\b", re.IGNORECASE)
 _PATCH_INDEX_TOKEN_RE = re.compile(r"^\d+/\d+$")
+_COVER_PATCH_NAME_RE = re.compile(r"^(?:v\d+-)?0000-cover-letter\.patch$", re.IGNORECASE)
 _REV_TOKEN_LOOSE_RE = re.compile(r"(?<![A-Za-z0-9])v(?P<num>\d+)(?![A-Za-z0-9])", re.IGNORECASE)
 _PATCHSET_VERSION_DIR_RE = re.compile(r"^v(?P<num>\d+)$", re.IGNORECASE)
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
@@ -86,6 +89,9 @@ _LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+")
 _PATCH_NEW_FILE_RE = re.compile(r"^\+\+\+ b/(.+)$")
 _DT_PROPERTY_ASSIGN_RE = re.compile(r"^([A-Za-z0-9,._+-]+)\s*=")
 _DTS_FILE_RE = re.compile(r"(^|/)arch/arm64/boot/dts/.+\.dtsi?$")
+_GITHUB_PR_URL_RE = re.compile(r"^https?://github\.com/(?P<owner>[^/\s]+)/(?P<repo>[^/\s]+)/pull/(?P<number>\d+)(?:[/?#].*)?$", re.IGNORECASE)
+_GITHUB_PR_SHORT_RE = re.compile(r"^(?P<owner>[^/\s]+)/(?P<repo>[^#\s]+)#(?P<number>\d+)$")
+_GERRIT_CHANGE_URL_RE = re.compile(r"^https?://(?P<host>[^/\s]+)/.*/\+/(?P<change>\d+)(?:[/?#].*)?$", re.IGNORECASE)
 _CONSOLE = Console() if Console else None
 _WATCH_BLOCKED_NOTIFICATION_DOMAINS = {
     "vger.kernel.org",
@@ -343,6 +349,168 @@ def _collect_patch_versions_for_session(root: Path, session_id: str) -> list[dic
     return rows
 
 
+def _external_fetch_base_dir(cfg: dict, fetch_out_dir: str | None = None, *, fallback_leaf: str) -> Path:
+    override = str(fetch_out_dir or "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+
+    cfg_override = str((cfg.get("lore_fetch_dir") if isinstance(cfg, dict) else "") or "").strip()
+    if cfg_override:
+        return Path(cfg_override).expanduser().resolve()
+
+    upstream = cfg.get("upstream_evidence", {}) if isinstance(cfg, dict) else {}
+    kernel_tree = str(upstream.get("kernel_tree") or "").strip()
+    if kernel_tree:
+        tree = Path(kernel_tree).expanduser().resolve()
+        if tree.exists() and (tree / "scripts" / "checkpatch.pl").is_file():
+            return tree / ".a2a" / fallback_leaf
+    return Path(tempfile.gettempdir()) / f"a2a_{fallback_leaf}"
+
+
+def _fetch_url_bytes(url: str, *, headers: dict[str, str] | None = None, timeout: int = 30) -> bytes:
+    req_headers = {"User-Agent": "A2A-CLI/0.1"}
+    if isinstance(headers, dict):
+        req_headers.update({str(k): str(v) for k, v in headers.items() if str(k)})
+    req = urllib.request.Request(url, headers=req_headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def _parse_github_pr_ref(value: str) -> tuple[str, int, str]:
+    raw = str(value or "").strip().strip("<>").strip()
+    if not raw:
+        raise RuntimeError("GitHub PR input is empty.")
+
+    match = _GITHUB_PR_URL_RE.match(raw)
+    if match:
+        owner = match.group("owner")
+        repo = match.group("repo")
+        number = int(match.group("number"))
+        return f"{owner}/{repo}", number, f"https://github.com/{owner}/{repo}/pull/{number}"
+
+    short = _GITHUB_PR_SHORT_RE.match(raw)
+    if short:
+        owner = short.group("owner")
+        repo = short.group("repo")
+        number = int(short.group("number"))
+        return f"{owner}/{repo}", number, f"https://github.com/{owner}/{repo}/pull/{number}"
+
+    raise RuntimeError(
+        "Invalid GitHub PR input. Use a PR URL like "
+        "https://github.com/<owner>/<repo>/pull/<number> or <owner>/<repo>#<number>."
+    )
+
+
+def _fetch_github_pr_series(cfg: dict, pr_input: str, fetch_out_dir: str | None = None) -> tuple[Path, dict]:
+    repo, number, pr_url = _parse_github_pr_ref(pr_input)
+    base_dir = _external_fetch_base_dir(cfg, fetch_out_dir, fallback_leaf="github_series")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    safe_repo = re.sub(r"[^A-Za-z0-9._-]+", "-", repo).strip("-") or "repo"
+    out_dir = (base_dir / f"github-{safe_repo}-pr{number}-{stamp}").resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    patch_url = f"{pr_url}.patch"
+    payload = _fetch_url_bytes(patch_url)
+    if not payload.strip():
+        raise RuntimeError(f"GitHub PR patch payload is empty: {patch_url}")
+    patch_path = out_dir / f"pr-{number}.patch"
+    patch_path.write_bytes(payload if payload.endswith(b"\n") else payload + b"\n")
+
+    source = {
+        "kind": "github_pr",
+        "repo": repo,
+        "pr_number": number,
+        "url": pr_url,
+        "patch_url": patch_url,
+    }
+    return out_dir, source
+
+
+def _parse_gerrit_change_ref(value: str, base_url: str | None = None) -> tuple[str, str, str]:
+    raw = str(value or "").strip().strip("<>").strip()
+    if not raw:
+        raise RuntimeError("Gerrit change input is empty.")
+
+    if raw.startswith(("http://", "https://")):
+        parsed = urlparse(raw)
+        host = (parsed.netloc or "").strip().lower()
+        if not host:
+            raise RuntimeError(f"Invalid Gerrit change URL: {value}")
+        match = _GERRIT_CHANGE_URL_RE.match(raw)
+        if not match:
+            raise RuntimeError(
+                "Cannot parse Gerrit change number from URL. Expected .../+/12345 form."
+            )
+        change = str(match.group("change") or "").strip()
+        if not change:
+            raise RuntimeError(f"Missing Gerrit change number in URL: {value}")
+        return f"{parsed.scheme}://{host}", change, raw
+
+    normalized_base = str(base_url or "").strip().rstrip("/")
+    if not normalized_base:
+        raise RuntimeError(
+            "Gerrit non-URL input requires --gerrit-base-url (e.g. https://review.example.com)."
+        )
+    parsed_base = urlparse(normalized_base)
+    if parsed_base.scheme not in {"http", "https"} or not parsed_base.netloc:
+        raise RuntimeError(f"Invalid Gerrit base URL: {base_url}")
+
+    change = raw
+    if not re.fullmatch(r"(?:\d+|I[a-fA-F0-9]{40})", change):
+        raise RuntimeError(
+            "Invalid Gerrit change reference. Use a Gerrit change URL, numeric change number, or Change-Id."
+        )
+    canonical = f"{parsed_base.scheme}://{parsed_base.netloc}/q/{change}"
+    return f"{parsed_base.scheme}://{parsed_base.netloc}", change, canonical
+
+
+def _decode_gerrit_patch_payload(payload: bytes) -> bytes:
+    text = payload.decode("utf-8", errors="replace").strip()
+    if text.startswith(")]}'"):
+        parts = text.splitlines()
+        text = "\n".join(parts[1:]).strip() if len(parts) > 1 else ""
+    if text.startswith("From ") or "diff --git " in text:
+        return text.encode("utf-8")
+    try:
+        decoded = base64.b64decode(text, validate=False)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to decode Gerrit patch payload: {exc}") from exc
+    if not decoded.strip():
+        raise RuntimeError("Gerrit patch payload decoded to empty content.")
+    return decoded
+
+
+def _fetch_gerrit_change_series(
+    cfg: dict,
+    change_input: str,
+    *,
+    base_url: str | None = None,
+    fetch_out_dir: str | None = None,
+) -> tuple[Path, dict]:
+    gerrit_base, change, change_url = _parse_gerrit_change_ref(change_input, base_url=base_url)
+    base_dir = _external_fetch_base_dir(cfg, fetch_out_dir, fallback_leaf="gerrit_series")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    safe_change = re.sub(r"[^A-Za-z0-9._-]+", "-", change).strip("-") or "change"
+    out_dir = (base_dir / f"gerrit-{safe_change}-{stamp}").resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    encoded_change = quote(change, safe="~")
+    patch_api = f"{gerrit_base}/changes/{encoded_change}/revisions/current/patch?download"
+    raw = _fetch_url_bytes(patch_api)
+    patch_payload = _decode_gerrit_patch_payload(raw)
+    patch_path = out_dir / f"{safe_change}.patch"
+    patch_path.write_bytes(patch_payload if patch_payload.endswith(b"\n") else patch_payload + b"\n")
+
+    source = {
+        "kind": "gerrit_change",
+        "base_url": gerrit_base,
+        "change_id": change,
+        "url": change_url,
+        "patch_api": patch_api,
+    }
+    return out_dir, source
+
+
 def _extract_lore_message_id(value: str) -> str:
     raw = str(value or "").strip().strip("<>").strip()
     if not raw:
@@ -433,6 +601,44 @@ def _fetch_lore_series(cfg: dict, lore_input: str, lore_out_dir: str | None = No
     return out_dir, message_id
 
 
+def _prompt_extend_after_max_rounds_count(
+    session_id: str,
+    round_no: int,
+    max_rounds: int,
+    open_count: int,
+    *,
+    interactive: bool | None = None,
+    input_fn: Callable[[str], str] = input,
+) -> int:
+    if interactive is None:
+        interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
+    if not interactive:
+        return 0
+
+    _echo("┌──────────────────────────────────────────────────────────────────────┐")
+    _echo(f"│ Max rounds reached for session {session_id}")
+    _echo(f"│ Current round: {round_no}/{max_rounds}  ·  Open findings: {open_count}")
+    _echo("│ Enter number of additional rounds (e.g. 5), or 'y' for +1. [N]")
+    _echo("└──────────────────────────────────────────────────────────────────────┘")
+    try:
+        answer = str(input_fn("Additional rounds to run [N | y=1 | number]: ")).strip()
+    except EOFError:
+        return 0
+
+    lowered = answer.lower()
+    if lowered in {"", "n", "no"}:
+        return 0
+    if lowered in {"y", "yes"}:
+        return 1
+
+    # Numeric input lets operator extend budget in one shot.
+    try:
+        extra_rounds = int(answer, 10)
+    except ValueError:
+        return 0
+    return extra_rounds if extra_rounds > 0 else 0
+
+
 def _prompt_extend_after_max_rounds(
     session_id: str,
     round_no: int,
@@ -442,21 +648,17 @@ def _prompt_extend_after_max_rounds(
     interactive: bool | None = None,
     input_fn: Callable[[str], str] = input,
 ) -> bool:
-    if interactive is None:
-        interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
-    if not interactive:
-        return False
-
-    _echo("┌──────────────────────────────────────────────────────────────────────┐")
-    _echo(f"│ Max rounds reached for session {session_id}")
-    _echo(f"│ Current round: {round_no}/{max_rounds}  ·  Open findings: {open_count}")
-    _echo("│ Proceed with one more round in the same session? [y/N]")
-    _echo("└──────────────────────────────────────────────────────────────────────┘")
-    try:
-        answer = str(input_fn("Proceed with one more round? [y/N]: ")).strip().lower()
-    except EOFError:
-        return False
-    return answer in {"y", "yes"}
+    return (
+        _prompt_extend_after_max_rounds_count(
+            session_id=session_id,
+            round_no=round_no,
+            max_rounds=max_rounds,
+            open_count=open_count,
+            interactive=interactive,
+            input_fn=input_fn,
+        )
+        > 0
+    )
 
 
 def _prompt_continue_post_respin_repair(
@@ -711,7 +913,7 @@ def _read_series_entries(series_file: Path) -> list[str]:
 
 def _is_cover_patch_file(path: Path) -> bool:
     name = path.name.lower()
-    return name.endswith(".patch") and name.startswith("0000")
+    return bool(_COVER_PATCH_NAME_RE.fullmatch(name))
 
 
 def _canonical_series_patch_entries(patch_dir: Path) -> list[str]:
@@ -778,7 +980,7 @@ def _materialize_cover_patch(output: Path) -> Path | None:
 
     series_path = patch_dir / "series"
     series_entries = _canonical_series_patch_entries(patch_dir)
-    _rewrite_series_file(series_path, series_entries, include_cover=True)
+    _rewrite_series_file(series_path, series_entries, cover_name=cover_patch.name)
     return cover_patch
 
 
@@ -850,12 +1052,68 @@ def _render_mbox_from_patch_files(patch_files: list[Path]) -> str:
     return "\n".join(chunks) + ("\n" if chunks else "")
 
 
-def _rewrite_series_file(series_path: Path, entries: list[str], include_cover: bool) -> None:
+def _rewrite_series_file(series_path: Path, entries: list[str], cover_name: str | None = None) -> None:
     lines: list[str] = []
-    if include_cover:
-        lines.append("0000-cover-letter.patch")
+    if cover_name:
+        lines.append(cover_name)
     lines.extend(entries)
     series_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _cover_patch_in_dir(path: Path) -> Path | None:
+    candidates = sorted(
+        p for p in path.glob("*.patch") if p.is_file() and _is_cover_patch_file(p)
+    )
+    return candidates[0] if candidates else None
+
+
+def _sanitize_patch_slug(path: Path, *, fallback: str) -> str:
+    stem = str(path.stem).strip()
+    stem = re.sub(r"^v\d+-", "", stem, flags=re.IGNORECASE)
+    stem = re.sub(r"^\d{4}[-_]*", "", stem)
+    stem = stem.replace("_", "-")
+    stem = re.sub(r"[^A-Za-z0-9.+-]+", "-", stem)
+    stem = stem.strip("-").lower()
+    return stem or fallback
+
+
+def _versioned_patch_name(path: Path, *, next_version: int, index: int) -> str:
+    if index == 0:
+        return f"v{next_version}-0000-cover-letter.patch"
+    slug = _sanitize_patch_slug(path, fallback=f"patch-{index:04d}")
+    return f"v{next_version}-{index:04d}-{slug}.patch"
+
+
+def _rename_patch_files_for_version(
+    patch_paths: list[Path],
+    *,
+    next_version: int,
+    cover_patch: Path | None = None,
+) -> tuple[list[Path], Path | None]:
+    rename_map: dict[Path, Path] = {}
+    if cover_patch is not None and cover_patch.exists():
+        rename_map[cover_patch] = cover_patch.with_name(
+            _versioned_patch_name(cover_patch, next_version=next_version, index=0)
+        )
+    for idx, patch_path in enumerate(patch_paths, start=1):
+        rename_map[patch_path] = patch_path.with_name(
+            _versioned_patch_name(patch_path, next_version=next_version, index=idx)
+        )
+
+    tmp_map: dict[Path, Path] = {}
+    for src, dst in rename_map.items():
+        if src == dst:
+            continue
+        tmp = src.with_name(f".a2a-tmp-{uuid4().hex}-{src.name}")
+        src.rename(tmp)
+        tmp_map[tmp] = dst
+    for tmp, dst in tmp_map.items():
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        tmp.rename(dst)
+
+    renamed_paths = [rename_map.get(path, path) for path in patch_paths]
+    renamed_cover = rename_map.get(cover_patch, cover_patch) if cover_patch is not None else None
+    return renamed_paths, renamed_cover
 
 
 def _synchronize_patchset_artifacts(output: Path, next_version: int) -> int:
@@ -874,28 +1132,46 @@ def _synchronize_patchset_artifacts(output: Path, next_version: int) -> int:
         patch_paths = [p for p in patch_paths if p.is_file() and p.suffix == ".patch" and not _is_cover_patch_file(p)]
         if not patch_paths:
             continue
+        cover_patch = _cover_patch_in_dir(patch_dir)
+        patch_paths, cover_patch = _rename_patch_files_for_version(
+            patch_paths,
+            next_version=next_version,
+            cover_patch=cover_patch,
+        )
         patch_map[patch_dir] = patch_paths
         total = len(patch_paths)
         non_cover_total += total
         for idx, patch_path in enumerate(patch_paths, start=1):
             _rewrite_subject_header(patch_path, version=next_version, index=idx, total=total)
-        cover_patch = patch_dir / "0000-cover-letter.patch"
-        if cover_patch.exists():
+        if cover_patch is not None and cover_patch.exists():
             _rewrite_subject_header(cover_patch, version=next_version, index=0, total=total)
-        _rewrite_series_file(patch_dir / "series", [p.name for p in patch_paths], include_cover=cover_patch.exists())
+        _rewrite_series_file(
+            patch_dir / "series",
+            [p.name for p in patch_paths],
+            cover_name=cover_patch.name if cover_patch is not None and cover_patch.exists() else None,
+        )
 
     loose_patches = sorted(
         p for p in output.glob("*.patch") if p.is_file() and not _is_cover_patch_file(p)
     )
     if not patch_map and loose_patches:
+        cover_patch = _cover_patch_in_dir(output)
+        loose_patches, cover_patch = _rename_patch_files_for_version(
+            loose_patches,
+            next_version=next_version,
+            cover_patch=cover_patch,
+        )
         total = len(loose_patches)
         non_cover_total += total
         for idx, patch_path in enumerate(loose_patches, start=1):
             _rewrite_subject_header(patch_path, version=next_version, index=idx, total=total)
-        cover_patch = output / "0000-cover-letter.patch"
-        if cover_patch.exists():
+        if cover_patch is not None and cover_patch.exists():
             _rewrite_subject_header(cover_patch, version=next_version, index=0, total=total)
-        _rewrite_series_file(output / "series", [p.name for p in loose_patches], include_cover=cover_patch.exists())
+        _rewrite_series_file(
+            output / "series",
+            [p.name for p in loose_patches],
+            cover_name=cover_patch.name if cover_patch is not None and cover_patch.exists() else None,
+        )
 
     named_patchsets: dict[str, list[Path]] = {}
     for patch_dir, patch_paths in patch_map.items():
@@ -982,6 +1258,111 @@ def _augment_cover_letter_history(
     else:
         out_lines = lines[: sep_idx + 1] + block + lines[sep_idx + 1 :]
     path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+
+
+def _refresh_cover_letter_headers(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        original = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+    lines = original.splitlines()
+    sep_idx = next((idx for idx, line in enumerate(lines) if line.strip() == ""), len(lines))
+    header_lines = lines[:sep_idx]
+    body_lines = lines[sep_idx + 1 :] if sep_idx < len(lines) else []
+
+    chunks: list[list[str]] = []
+    cur: list[str] = []
+    for line in header_lines:
+        if line[:1] in (" ", "\t") and cur:
+            cur.append(line)
+            continue
+        if cur:
+            chunks.append(cur)
+        cur = [line]
+    if cur:
+        chunks.append(cur)
+
+    drop_headers = {"message-id", "date", "in-reply-to", "references"}
+    kept_chunks: list[list[str]] = []
+    from_idx: int | None = None
+    for chunk in chunks:
+        first = chunk[0]
+        if ":" not in first:
+            kept_chunks.append(chunk)
+            continue
+        name = first.split(":", 1)[0].strip().lower()
+        if name in drop_headers:
+            continue
+        if name == "from":
+            from_idx = len(kept_chunks)
+        kept_chunks.append(chunk)
+
+    domain = "a2a.local"
+    for chunk in kept_chunks:
+        first = chunk[0]
+        if ":" not in first:
+            continue
+        if first.split(":", 1)[0].strip().lower() != "from":
+            continue
+        addr = parseaddr(first.split(":", 1)[1].strip())[1]
+        if "@" in addr:
+            candidate = addr.split("@", 1)[1].strip().lower()
+            candidate = re.sub(r"[^a-z0-9.-]+", "", candidate).strip(".-")
+            if candidate:
+                domain = candidate
+        break
+
+    now_local = datetime.now().astimezone()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    fresh_headers = [
+        [f"Date: {format_datetime(now_local)}"],
+        [f"Message-Id: <{stamp}.{uuid4().hex[:12]}@{domain}>"],
+    ]
+
+    insert_idx = len(kept_chunks)
+    if from_idx is not None:
+        insert_idx = from_idx + 1
+    elif kept_chunks and kept_chunks[0][0].lower().startswith("subject:"):
+        insert_idx = 1
+    for offset, header_chunk in enumerate(fresh_headers):
+        kept_chunks.insert(insert_idx + offset, header_chunk)
+
+    new_header_lines: list[str] = []
+    for chunk in kept_chunks:
+        new_header_lines.extend(chunk)
+
+    new_lines = [*new_header_lines, "", *body_lines]
+    updated = "\n".join(new_lines).rstrip("\n") + "\n"
+    if updated == original:
+        return False
+    path.write_text(updated, encoding="utf-8")
+    return True
+
+
+def _refresh_cover_headers_in_output_tree(output: Path) -> int:
+    if not output.exists():
+        return 0
+    changed = 0
+    seen: set[str] = set()
+    targets: list[Path] = []
+    targets.extend(
+        sorted(
+            p for p in output.rglob("*.patch")
+            if p.is_file() and _is_cover_patch_file(p)
+        )
+    )
+    targets.extend(sorted(p for p in output.rglob("*.cover") if p.is_file()))
+    for target in targets:
+        key = str(target.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        if _refresh_cover_letter_headers(target):
+            changed += 1
+    return changed
 
 
 def _detect_max_subject_version(paths: Iterable[Path]) -> int:
@@ -1326,7 +1707,9 @@ def _generate_lore_next_version(root: Path, session: dict) -> dict:
     while output.exists():
         next_version += 1
         output = root / A2A_DIRNAME / "patches" / session_id / f"v{next_version}"
-    _copy_respin_source(source, output, force=False)
+    # Keep vN as a directory even when the source watch_path is a single patch file.
+    copy_target = output / source.name if source.is_file() else output
+    _copy_respin_source(source, copy_target, force=False)
     _materialize_cover_patch(output)
 
     patch_files = _collect_active_patch_files(output)
@@ -1346,7 +1729,9 @@ def _generate_lore_next_version(root: Path, session: dict) -> dict:
         if msgid:
             lore_link = f"https://lore.kernel.org/r/{msgid}"
     changelog_lines = _resolved_finding_changelog_lines(root, session_id)
-    for cover_path in sorted(output.rglob("0000-cover-letter.patch")):
+    for cover_path in sorted(
+        p for p in output.rglob("*.patch") if p.is_file() and _is_cover_patch_file(p)
+    ):
         _augment_cover_letter_history(
             cover_path,
             next_version=next_version,
@@ -1362,6 +1747,7 @@ def _generate_lore_next_version(root: Path, session: dict) -> dict:
             source_version=current_version,
             changelog_lines=changelog_lines,
         )
+    _refresh_cover_headers_in_output_tree(output)
 
     payload = {
         "status": "ok",
@@ -1398,10 +1784,93 @@ def _auto_generate_next_version(root: Path, session: dict) -> dict:
     session_id = str(session.get("id") or "")
     try:
         result = run_respin(root, session_id, dry_run=False)
-        if isinstance(result, dict):
-            result = dict(result)
-            result.setdefault("kind", "git_respin")
-        return result
+        if not isinstance(result, dict):
+            raise RuntimeError("respin returned non-dict payload")
+        result = dict(result)
+
+        output_raw = str(result.get("output_path") or result.get("output_dir") or "").strip()
+        if not output_raw:
+            raise RuntimeError("respin payload missing output path")
+        output_path = Path(output_raw).resolve()
+        if not output_path.exists():
+            raise RuntimeError(f"respin output path not found: {output_path}")
+
+        next_version_raw = result.get("next_version")
+        try:
+            next_version = int(next_version_raw)
+        except Exception:
+            next_version = max(2, _extract_revision_from_name(output_path.name))
+
+        source_raw = str(result.get("source_watch_path") or str(session.get("watch_path") or "")).strip()
+        source_path = Path(source_raw).resolve() if source_raw else Path()
+        source_version: int | None = None
+        if source_raw and source_path.exists():
+            try:
+                source_patch_files = _collect_active_patch_files(source_path)
+                source_version = _detect_current_patchset_version(source_path, source_patch_files)
+            except Exception:
+                source_version = None
+        if source_version is None:
+            source_version = max(1, next_version - 1)
+
+        _materialize_cover_patch(output_path)
+        patch_count = _synchronize_patchset_artifacts(output_path, next_version)
+        if patch_count <= 0:
+            generated_files = _collect_active_patch_files(output_path)
+            patch_count = len([p for p in generated_files if not _is_cover_patch_file(p)])
+            if patch_count <= 0:
+                patch_count = len(generated_files)
+
+        lore_link = ""
+        lore_meta = session.get("lore")
+        if isinstance(lore_meta, dict):
+            msgid = str(lore_meta.get("message_id") or "").strip()
+            if msgid:
+                lore_link = f"https://lore.kernel.org/r/{msgid}"
+        changelog_lines = _resolved_finding_changelog_lines(root, session_id)
+        for cover_path in sorted(
+            p for p in output_path.rglob("*.patch") if p.is_file() and _is_cover_patch_file(p)
+        ):
+            _augment_cover_letter_history(
+                cover_path,
+                next_version=next_version,
+                lore_link=lore_link or None,
+                source_version=source_version,
+                changelog_lines=changelog_lines,
+            )
+        for cover_path in sorted(output_path.rglob("*.cover")):
+            _augment_cover_letter_history(
+                cover_path,
+                next_version=next_version,
+                lore_link=lore_link or None,
+                source_version=source_version,
+                changelog_lines=changelog_lines,
+            )
+        _refresh_cover_headers_in_output_tree(output_path)
+
+        output_copy_raw = str(result.get("output_copy_dir") or "").strip()
+        if output_copy_raw:
+            output_copy_dir = Path(output_copy_raw).resolve()
+            if output_copy_dir.exists():
+                shutil.rmtree(output_copy_dir)
+            shutil.copytree(output_path, output_copy_dir)
+
+        payload = {
+            "status": "ok",
+            "kind": "git_respin",
+            "session_id": session_id,
+            "source_watch_path": str(source_path) if source_raw else "",
+            "output_path": str(output_path),
+            "patch_count": int(patch_count),
+            "next_version": int(next_version),
+            "generated_at": _now_utc(),
+        }
+        if output_copy_raw:
+            payload["output_copy_dir"] = str(Path(output_copy_raw).resolve())
+        report_path = _report_dir(root, session_id) / "lore_next_version.json"
+        dump_json(report_path, payload)
+        payload["report"] = str(report_path)
+        return payload
     except Exception as exc:
         return _generate_watch_copy_fallback(root, session, reason=exc)
 
@@ -1568,13 +2037,32 @@ def _validate_patchset_artifact_coherence(output_path: Path) -> list[str]:
         if not rows:
             issues.append(f"{mbx_path}: no patch subject rows found")
             continue
-        if len(rows) != expected_total:
-            issues.append(f"{mbx_path}: subject row count {len(rows)} does not match expected {expected_total}")
-            continue
-        for index, (idx, declared_total) in enumerate(rows, start=1):
-            if idx != index or declared_total != expected_total:
+        # Accept two valid mbx layouts:
+        # 1) Patch mails only: [PATCH vN 1/T] .. [PATCH vN T/T]  -> row count T
+        # 2) Cover + patch mails: [PATCH vN 0/T], then 1/T .. T/T -> row count T+1
+        if len(rows) == expected_total:
+            start_index = 1
+            rows_to_check = rows
+        elif len(rows) == expected_total + 1:
+            cover_idx, cover_total = rows[0]
+            if cover_idx != 0 or cover_total != expected_total:
                 issues.append(
-                    f"{mbx_path}: row {index} has {idx}/{declared_total}, expected {index}/{expected_total}"
+                    f"{mbx_path}: cover row has {cover_idx}/{cover_total}, expected 0/{expected_total}"
+                )
+                continue
+            start_index = 1
+            rows_to_check = rows[1:]
+        else:
+            issues.append(
+                f"{mbx_path}: subject row count {len(rows)} does not match expected {expected_total} "
+                f"(patch-only) or {expected_total + 1} (with cover)"
+            )
+            continue
+
+        for offset, (idx, declared_total) in enumerate(rows_to_check, start=start_index):
+            if idx != offset or declared_total != expected_total:
+                issues.append(
+                    f"{mbx_path}: row {offset} has {idx}/{declared_total}, expected {offset}/{expected_total}"
                 )
 
     return issues
@@ -1582,7 +2070,9 @@ def _validate_patchset_artifact_coherence(output_path: Path) -> list[str]:
 
 def _validate_cover_changelog_quality(output_path: Path) -> list[str]:
     issues: list[str] = []
-    cover_files = sorted(output_path.rglob("0000-cover-letter.patch"))
+    cover_files = sorted(
+        p for p in output_path.rglob("*.patch") if p.is_file() and _is_cover_patch_file(p)
+    )
     cover_files.extend(sorted(output_path.rglob("*.cover")))
     seen: set[str] = set()
     deduped_cover_files: list[Path] = []
@@ -1998,7 +2488,21 @@ def _run_post_respin_validation(
     source_path = Path(source_raw).resolve() if source_raw else Path()
 
     watch_raw = str(session.get("watch_path") or "").strip()
-    kernel_root = _detect_kernel_repo_root(Path(watch_raw)) if watch_raw else None
+    kernel_root: Path | None = None
+    kernel_root_candidates: list[Path] = []
+    if source_raw:
+        kernel_root_candidates.append(source_path)
+    if watch_raw:
+        kernel_root_candidates.append(Path(watch_raw).resolve())
+    if output_raw:
+        kernel_root_candidates.append(output_path)
+
+    for candidate in kernel_root_candidates:
+        if not candidate.exists():
+            continue
+        kernel_root = _resolve_kernel_root_for_session(session, candidate)
+        if kernel_root is not None:
+            break
 
     artifact_issues = _validate_patchset_artifact_coherence(output_path)
     changelog_issues = _validate_cover_changelog_quality(output_path)
@@ -2317,6 +2821,7 @@ def _run_auto_respin_if_requested(
 
     sid = str(session.get("id") or "")
     report_dir = _report_dir(root, sid)
+    preexisting_next_payload: dict | None = None
     if skip_if_existing:
         report_path = report_dir / "lore_next_version.json"
         if report_path.exists():
@@ -2328,13 +2833,43 @@ def _run_auto_respin_if_requested(
             output_raw = str(existing.get("output_path") or "").strip()
             output_path = Path(output_raw).resolve() if output_raw else None
             if status == "ok" and output_path and output_path.exists():
-                _echo(f"Session {sid}: auto-respin artifacts already exist at {output_path}. Skipping regeneration.")
-                return 0
+                try:
+                    _materialize_cover_patch(output_path)
+                    refreshed = _refresh_cover_headers_in_output_tree(output_path)
+                    if refreshed:
+                        _echo(
+                            f"Session {sid}: refreshed cover-letter headers in existing artifacts "
+                            f"({refreshed} file(s))."
+                        )
+                except Exception as exc:
+                    _echo(f"Session {sid}: warning while refreshing existing cover headers: {exc}")
+                post_respin_report = report_dir / "post_respin_validation.json"
+                post_respin_status = ""
+                if post_respin_report.exists():
+                    try:
+                        post_respin_payload = load_json(post_respin_report)
+                    except Exception:
+                        post_respin_payload = {}
+                    post_respin_status = str(post_respin_payload.get("status") or "").strip().lower()
+                if post_respin_status == "ok":
+                    _echo(f"Session {sid}: auto-respin artifacts already exist at {output_path}. Skipping regeneration.")
+                    return 0
+
+                _echo(
+                    f"Session {sid}: auto-respin artifacts exist at {output_path}, "
+                    "but post-respin validation is not clean; re-running validation/repair."
+                )
+                preexisting_next_payload = dict(existing)
 
     try:
-        next_version_payload = _auto_generate_next_version(root, session)
-        _echo("Auto next-version generation completed:")
-        _echo(json.dumps(next_version_payload, indent=2, sort_keys=True))
+        if preexisting_next_payload is None:
+            next_version_payload = _auto_generate_next_version(root, session)
+            _echo("Auto next-version generation completed:")
+            _echo(json.dumps(next_version_payload, indent=2, sort_keys=True))
+        else:
+            next_version_payload = preexisting_next_payload
+            _echo("Reusing existing auto-respin artifacts:")
+            _echo(json.dumps(next_version_payload, indent=2, sort_keys=True))
         post_respin_payload = _run_post_respin_validation(
             root,
             session,
@@ -3135,6 +3670,25 @@ def _detect_kernel_repo_root(path: Path) -> Path | None:
     return None
 
 
+def _resolve_kernel_root_for_session(session: dict, watch_path: Path) -> Path | None:
+    """
+    Resolve kernel root for validation/checkpatch gates.
+    Prefer watch_path ancestry; if patches are outside the kernel tree,
+    fall back to the prepared session repo_path.
+    """
+    kernel_root = _detect_kernel_repo_root(watch_path)
+    if kernel_root is not None:
+        return kernel_root
+
+    repo_raw = str(session.get("repo_path") or "").strip()
+    if not repo_raw:
+        return None
+    repo_path = Path(repo_raw).expanduser().resolve()
+    if not repo_path.exists():
+        return None
+    return _detect_kernel_repo_root(repo_path)
+
+
 def _gate_artifacts(root: Path, session_id: str, round_no: int, reviewer_name: str) -> dict[str, Path]:
     files = _round_files(root, session_id, round_no, reviewer_name)
     logs_dir = root / A2A_DIRNAME / "logs" / session_id
@@ -3193,7 +3747,7 @@ def _run_validation_gate(root: Path, session: dict, round_no: int) -> tuple[bool
         )
 
     if run_checkpatch:
-        kernel_root = _detect_kernel_repo_root(watch_path)
+        kernel_root = _resolve_kernel_root_for_session(session, watch_path)
         if kernel_root is not None:
             changed_rel = _load_round_changed_paths(root, str(session["id"]), round_no, reviewer_name)
             patch_targets = _resolve_gate_patch_targets(watch_path, changed_rel, round_no)
@@ -3306,10 +3860,13 @@ def _run_lgtm_full_series_checkpatch(root: Path, session: dict, round_no: int, r
         payload["issues"].append(f"watch_path not found for LGTM checkpatch gate: {watch_path}")
         return _finalize()
 
-    kernel_root = _detect_kernel_repo_root(watch_path)
+    kernel_root = _resolve_kernel_root_for_session(session, watch_path)
     if kernel_root is None:
         payload["ok"] = False
-        payload["issues"].append(f"kernel tree not found for LGTM checkpatch gate: {watch_path}")
+        payload["issues"].append(
+            "kernel tree not found for LGTM checkpatch gate: "
+            f"watch_path={watch_path}, repo_path={session.get('repo_path')}"
+        )
         return _finalize()
     payload["kernel_root"] = str(kernel_root)
 
@@ -3541,7 +4098,7 @@ def _builder_change_stats(root: Path, session_id: str, round_no: int, reviewer_n
 
 
 def _clamp_score(value: int) -> int:
-    return max(1, min(99, int(value)))
+    return max(0, min(99, int(value)))
 
 
 def _clamp_confidence(value: int) -> int:
@@ -3824,7 +4381,6 @@ def _build_round_runtime_summary(
     gate_failures = int(gate_payload.get("failures", 0)) if isinstance(gate_payload, dict) else 0
 
     closed_count = len(findings) - open_count
-    current_ids = {_finding_identity(f) for f in findings if isinstance(f, dict)}
     current_open_ids = {
         _finding_identity(f)
         for f in findings
@@ -3837,18 +4393,18 @@ def _build_round_runtime_summary(
             previous_round = record
             break
 
-    previous_ids: set[str] = set()
     previous_open_ids: set[str] = set()
     if previous_round is not None:
         prev_findings = _extract_effective_round_findings(session, previous_round)
-        previous_ids = {_finding_identity(f) for f in prev_findings if isinstance(f, dict)}
         previous_open_ids = {
             _finding_identity(f)
             for f in prev_findings
             if isinstance(f, dict) and str(f.get("status", "")).lower() != "closed"
         }
 
-    new_ids = sorted(current_ids - previous_ids)
+    # Track churn only for currently open findings; closed advisory rows should not
+    # create artificial "new" counts that prolong otherwise converged rounds.
+    new_ids = sorted(current_open_ids - previous_open_ids)
     resolved_ids = sorted(previous_open_ids - current_open_ids)
 
     open_items: list[dict] = []
@@ -4406,6 +4962,7 @@ def _session_report_payload(root: Path, session_id: str) -> dict:
             "branch": session.get("branch"),
             "builder_command": session.get("builder_command"),
             "reviewer_command": session.get("reviewer_command"),
+            "review_source": session.get("review_source"),
             "prior_review": prior_summary,
             "watch_path": _normalize_path_for_report(session.get("watch_path")),
             "lore_link": _lore_link_from_session(session),
@@ -5352,11 +5909,36 @@ def cmd_prepare(args: argparse.Namespace) -> int:
 def _prior_seed_message_ids(session: dict) -> list[str]:
     lore = session.get("lore")
     if not isinstance(lore, dict):
-        return []
+        lore = {}
     msgid = str(lore.get("message_id") or "").strip()
-    if not msgid:
-        return []
-    return [msgid]
+    if msgid:
+        return [msgid]
+
+    source = session.get("review_source")
+    if isinstance(source, dict) and str(source.get("kind") or "").strip().lower() == "lore":
+        source_msgid = str(source.get("message_id") or "").strip()
+        if source_msgid:
+            return [source_msgid]
+    return []
+
+
+def _session_source_context(session: dict) -> dict | None:
+    source = session.get("review_source")
+    if isinstance(source, dict):
+        kind = str(source.get("kind") or "").strip().lower()
+        if kind:
+            return source
+
+    lore = session.get("lore")
+    if isinstance(lore, dict):
+        message_id = str(lore.get("message_id") or "").strip()
+        if message_id:
+            return {
+                "kind": "lore",
+                "message_id": message_id,
+                "url": f"https://lore.kernel.org/r/{message_id}",
+            }
+    return None
 
 
 def _ingest_prior_review_for_session(root: Path, session: dict, cfg: dict | None = None) -> dict | None:
@@ -5381,6 +5963,7 @@ def _ingest_prior_review_for_session(root: Path, session: dict, cfg: dict | None
         search_if_missing=search_if_missing,
         max_comments=max_comments,
         seed_message_ids=_prior_seed_message_ids(session),
+        source_context=_session_source_context(session),
     )
 
 
@@ -5428,6 +6011,7 @@ def _start_session(
     watch_path: str | None = None,
     lore_message_id: str | None = None,
     focus_issues: list[str] | None = None,
+    source_context: dict | None = None,
 ) -> dict:
     cfg = _load_config(root)
     prep = load_json(_prepare_path(root))
@@ -5475,6 +6059,8 @@ def _start_session(
     }
     if lore_message_id:
         session["lore"] = {"message_id": str(lore_message_id).strip()}
+    if isinstance(source_context, dict):
+        session["review_source"] = dict(source_context)
     focus_rows = _normalize_focus_issues(focus_issues)
     if focus_rows:
         session["focus_issues"] = focus_rows
@@ -5714,7 +6300,7 @@ def _advance_session(root: Path, session_id: str) -> int:
             {
                 "round": round_no,
                 "max_rounds": int(session.get("max_rounds", 0) or 0),
-                "gate_passed": True,
+                "gate_passed": bool((round_summary.get("validation_gate", {}) or {}).get("passed", False)),
                 "builder_confidence": builder_confidence,
                 "reviewer_confidence": reviewer_confidence,
                 "builder_patch_gauge": builder_patch_gauge,
@@ -5831,7 +6417,7 @@ def _advance_session(root: Path, session_id: str) -> int:
 
     if score_decision.get("block_lgtm"):
         should_lgtm = False
-    if score_decision.get("force_extra_round"):
+    if score_decision.get("force_extra_round") and open_count > 0:
         should_lgtm = False
 
     lgtm_checkpatch_payload: dict | None = None
@@ -5904,14 +6490,15 @@ def _advance_session(root: Path, session_id: str) -> int:
         return 0
 
     if round_no >= max_rounds:
-        if _prompt_extend_after_max_rounds(
+        extend_by = _prompt_extend_after_max_rounds_count(
             session_id=session_id,
             round_no=round_no,
             max_rounds=max_rounds,
             open_count=open_count,
-        ):
+        )
+        if extend_by > 0:
             next_round = round_no + 1
-            session["max_rounds"] = max_rounds + 1
+            session["max_rounds"] = max_rounds + int(extend_by)
             session["current_round"] = next_round
             session["status"] = "in_progress"
             session["extra_scrutiny_next_round"] = bool(score_decision.get("extra_scrutiny_next_round"))
@@ -5924,7 +6511,7 @@ def _advance_session(root: Path, session_id: str) -> int:
                 reviewer_display_name=_resolve_reviewer_display_name(session=session, cfg=_load_config(root)),
             )
             _echo(
-                f"Session {session_id}: max rounds extended to {session['max_rounds']}. "
+                f"Session {session_id}: max rounds extended by {extend_by} to {session['max_rounds']}. "
                 f"Prepared round {next_round} templates."
             )
             return 0
@@ -6064,12 +6651,32 @@ def cmd_loop(args: argparse.Namespace) -> int:
         lore_url = str(getattr(args, "lore_url", "") or "").strip()
         lore_msgid = str(getattr(args, "lore_msgid", "") or "").strip()
         lore_out_dir = str(getattr(args, "lore_out_dir", "") or "").strip()
+        github_pr = str(getattr(args, "github_pr", "") or "").strip()
+        gerrit_change = str(getattr(args, "gerrit_change", "") or "").strip()
+        gerrit_base_url = str(getattr(args, "gerrit_base_url", "") or "").strip()
+        fetch_out_dir = str(getattr(args, "fetch_out_dir", "") or "").strip()
         lore_input = lore_msgid or lore_url
         lore_source_msgid = _extract_lore_message_id(lore_input) if lore_input else None
+        source_context: dict | None = None
         auto_respin_raw = getattr(args, "auto_respin", None)
         auto_respin = bool(auto_respin_raw) if auto_respin_raw is not None else bool(lore_input)
         focus_issues = _normalize_focus_issues(getattr(args, "focus_issue", None))
+        extend_rounds = int(getattr(args, "extend_rounds", 0) or 0)
         single_series_mode = bool(getattr(args, "_single_series", False))
+        selected_external_sources = int(bool(lore_input)) + int(bool(github_pr)) + int(bool(gerrit_change))
+        if extend_rounds < 0:
+            _echo("--extend-rounds must be >= 0.")
+            return 1
+
+        if lore_out_dir and not lore_input:
+            _echo("--lore-out-dir requires --lore-url or --lore-msgid.")
+            return 1
+        if fetch_out_dir and not (lore_input or github_pr or gerrit_change):
+            _echo("--fetch-out-dir requires --lore-url/--lore-msgid, --github-pr, or --gerrit-change.")
+            return 1
+        if selected_external_sources > 1:
+            _echo("Use only one external source: --lore-url/--lore-msgid, --github-pr, or --gerrit-change.")
+            return 1
 
         if lore_input:
             if args.session:
@@ -6078,19 +6685,51 @@ def cmd_loop(args: argparse.Namespace) -> int:
             if watch_path:
                 _echo("Use either --watch-path or --lore-url/--lore-msgid, not both.")
                 return 1
-            fetch_base_dir = _lore_fetch_base_dir(cfg, lore_out_dir=lore_out_dir)
+            resolved_lore_out = lore_out_dir or fetch_out_dir
+            fetch_base_dir = _lore_fetch_base_dir(cfg, lore_out_dir=resolved_lore_out)
             kernel_tree_cfg = str(((cfg.get("upstream_evidence") if isinstance(cfg, dict) else {}) or {}).get("kernel_tree") or "").strip()
             if kernel_tree_cfg:
                 _echo(f"Kernel tree (config): {Path(kernel_tree_cfg).expanduser().resolve()}")
             _echo(f"Lore fetch base dir: {fetch_base_dir}")
-            fetched_dir, fetched_msgid = _fetch_lore_series(cfg, lore_input, lore_out_dir=lore_out_dir)
+            fetched_dir, fetched_msgid = _fetch_lore_series(cfg, lore_input, lore_out_dir=resolved_lore_out)
             watch_path = str(fetched_dir)
             lore_source_msgid = fetched_msgid
+            source_context = {
+                "kind": "lore",
+                "message_id": fetched_msgid,
+                "url": str(lore_input),
+            }
             _echo(f"Lore source message-id: {fetched_msgid}")
             _echo(f"Lore patch series fetched to: {watch_path}")
-        elif lore_out_dir:
-            _echo("--lore-out-dir requires --lore-url or --lore-msgid.")
-            return 1
+        elif github_pr:
+            if args.session:
+                _echo("GitHub PR source flags are only supported for new sessions (no --session).")
+                return 1
+            if watch_path:
+                _echo("Use either --watch-path or --github-pr, not both.")
+                return 1
+            fetch_base_dir = _external_fetch_base_dir(cfg, fetch_out_dir, fallback_leaf="github_series")
+            _echo(f"GitHub fetch base dir: {fetch_base_dir}")
+            fetched_dir, source_context = _fetch_github_pr_series(cfg, github_pr, fetch_out_dir=fetch_out_dir)
+            watch_path = str(fetched_dir)
+            _echo(f"GitHub PR fetched to: {watch_path}")
+        elif gerrit_change:
+            if args.session:
+                _echo("Gerrit source flags are only supported for new sessions (no --session).")
+                return 1
+            if watch_path:
+                _echo("Use either --watch-path or --gerrit-change, not both.")
+                return 1
+            fetch_base_dir = _external_fetch_base_dir(cfg, fetch_out_dir, fallback_leaf="gerrit_series")
+            _echo(f"Gerrit fetch base dir: {fetch_base_dir}")
+            fetched_dir, source_context = _fetch_gerrit_change_series(
+                cfg,
+                gerrit_change,
+                base_url=gerrit_base_url or None,
+                fetch_out_dir=fetch_out_dir,
+            )
+            watch_path = str(fetched_dir)
+            _echo(f"Gerrit change fetched to: {watch_path}")
 
         if not single_series_mode and not args.session and watch_path:
             wp = Path(watch_path)
@@ -6147,6 +6786,33 @@ def cmd_loop(args: argparse.Namespace) -> int:
         if args.session:
             session = _load_session(root, args.session)
             sid = str(session["id"])
+            prev_max_rounds = int(session.get("max_rounds", 1) or 1)
+            max_rounds_changed = False
+
+            if args.max_rounds is not None:
+                requested_max = int(args.max_rounds)
+                if requested_max <= 0:
+                    _echo("--max-rounds must be > 0.")
+                    return 1
+                if requested_max > prev_max_rounds:
+                    session["max_rounds"] = requested_max
+                    max_rounds_changed = True
+
+            if extend_rounds > 0:
+                session["max_rounds"] = int(session.get("max_rounds", prev_max_rounds) or prev_max_rounds) + extend_rounds
+                max_rounds_changed = True
+
+            if max_rounds_changed:
+                if str(session.get("status", "")).lower() == "stopped":
+                    session["status"] = "in_progress"
+                session["updated_at"] = _now_utc()
+                _write_session(root, session)
+                new_max_rounds = int(session.get("max_rounds", prev_max_rounds) or prev_max_rounds)
+                _echo(
+                    f"Session {sid}: max rounds updated {prev_max_rounds} -> {new_max_rounds}."
+                )
+                session = _load_session(root, sid)
+
             if focus_issues:
                 session, added = _merge_session_focus_issues(root, session, focus_issues)
                 if added > 0:
@@ -6165,6 +6831,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
                 watch_path=watch_path,
                 lore_message_id=lore_source_msgid,
                 focus_issues=focus_issues,
+                source_context=source_context,
             )
             sid = str(session["id"])
             _echo(f"Started session: {sid}")
@@ -7285,7 +7952,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_loop.add_argument(
         "--max-rounds",
         type=int,
-        help="Maximum review/fix rounds for a new session.",
+        help="Maximum review/fix rounds for a new session (or absolute cap when used with --session).",
+    )
+    p_loop.add_argument(
+        "--extend-rounds",
+        type=int,
+        default=0,
+        help="With --session, add N more rounds to the current max-round budget before running.",
     )
     p_loop.add_argument(
         "--timeout-min",
@@ -7320,6 +7993,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_loop.add_argument(
         "--lore-out-dir",
         help="Override directory where lore-fetched patch series are stored.",
+    )
+    p_loop.add_argument(
+        "--fetch-out-dir",
+        help="Override directory where externally fetched patch sources are stored (lore/GitHub/Gerrit).",
+    )
+    p_loop.add_argument(
+        "--github-pr",
+        help="GitHub PR source (URL or <owner>/<repo>#<number>) to fetch as patch input.",
+    )
+    p_loop.add_argument(
+        "--gerrit-change",
+        help="Gerrit change source (URL, numeric change number, or Change-Id).",
+    )
+    p_loop.add_argument(
+        "--gerrit-base-url",
+        help="Gerrit base URL required for non-URL --gerrit-change values (e.g. https://review.example.com).",
     )
     p_loop.add_argument(
         "--max-iterations",

@@ -8,6 +8,7 @@
     report: null,
     rounds: [],
   };
+  const DISPLAY_TIMEZONE = "Asia/Kolkata";
 
   const paneThemes = {
     chanakya: { background: "#0d2626", foreground: "#00ffd0" },
@@ -16,6 +17,28 @@
   };
 
   const el = (id) => document.getElementById(id);
+
+  function escapeHtml(value) {
+    return String(value || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function formatTime(ts) {
+    if (!ts) return "";
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return "";
+    const value = new Intl.DateTimeFormat("en-IN", {
+      timeZone: DISPLAY_TIMEZONE,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(d);
+    return `${value} IST`;
+  }
 
   async function api(path, options = {}) {
     const res = await fetch(path, {
@@ -99,10 +122,71 @@
     el("live-badge").classList.add("hidden");
   }
 
-  async function loadSessions() {
+  function isRunningSession(session) {
+    const status = String(session?.status || "").toLowerCase();
+    return status === "running" || status === "in_progress";
+  }
+
+  function sessionOptionLabel(session) {
+    const sid = String(session?.session_id || "");
+    const task = String(session?.task || "");
+    const status = String(session?.status || "").toLowerCase();
+    const marker = isRunningSession(session) ? "●" : "○";
+    const taskPart = task ? ` · ${task}` : "";
+    return `${marker} ${sid}${taskPart} [${status || "unknown"}]`;
+  }
+
+  async function refreshSessionPicker(preferredSessionId = null) {
     const sessions = await api("/api/sessions");
-    if (Array.isArray(sessions) && sessions.length > 0) {
-      const active = sessions.find((s) => s.status === "running") || sessions[0];
+    const select = el("sel-running-session");
+    if (!select) return sessions;
+
+    const previous = preferredSessionId || state.sessionId || select.value || "";
+    const sessionRows = Array.isArray(sessions) ? sessions : [];
+    const runningRows = sessionRows.filter((s) => isRunningSession(s));
+    const source = runningRows.length > 0 ? runningRows : sessionRows;
+
+    select.innerHTML = "";
+    if (source.length === 0) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "No sessions found";
+      option.disabled = true;
+      option.selected = true;
+      select.appendChild(option);
+      return sessions;
+    }
+
+    source.forEach((session) => {
+      const option = document.createElement("option");
+      option.value = String(session.session_id || "");
+      option.textContent = sessionOptionLabel(session);
+      select.appendChild(option);
+    });
+
+    const selectedExists = source.some((s) => String(s.session_id || "") === previous);
+    const selected = selectedExists ? previous : String(source[0].session_id || "");
+    select.value = selected;
+    return sessions;
+  }
+
+  async function openSessionThread(sessionId) {
+    if (!sessionId) return;
+    setLiveUi(sessionId);
+    connectAllTerminalStreams(sessionId);
+    connectEventStream(sessionId);
+    await loadReport(sessionId);
+    const select = el("sel-running-session");
+    if (select) {
+      select.value = sessionId;
+    }
+  }
+
+  async function loadSessions() {
+    const sessions = await refreshSessionPicker();
+    const sessionRows = Array.isArray(sessions) ? sessions : [];
+    if (sessionRows.length > 0) {
+      const active = sessionRows.find((s) => isRunningSession(s)) || sessionRows[0];
       if (active?.session_id) {
         setLiveUi(active.session_id);
         await loadReport(active.session_id);
@@ -185,11 +269,15 @@
   }
 
   function onFinding(finding) {
-    addNegotiationEntry(getActiveRound(), "aryabhata", "finding", {
+    addNegotiationEntry({
+      round: getActiveRound(),
+      agent: "aryabhata",
+      type: "finding",
       severity: finding.severity || "low",
       location: finding.location || "",
       content: finding.desc || "",
       id: finding.id || "",
+      ts: finding.ts || "",
     });
   }
 
@@ -328,25 +416,51 @@
     el("lgtm-output-path").textContent = report.watch_path || "";
   }
 
-  function addNegotiationEntry(round, agent, type, content) {
+  function addRoundDivider(round, ts = "") {
+    const container = el("negotiation-thread");
+    const row = document.createElement("div");
+    row.className = "round-divider";
+    const timeText = formatTime(ts);
+    row.innerHTML = `<span class="round-pill-tag">Round ${Number(round || 0)}</span>${timeText ? ` <span class="round-time">${timeText}</span>` : ""}`;
+    container.appendChild(row);
+  }
+
+  function addNegotiationEntry({
+    round = 0,
+    agent = "aryabhata",
+    type = "major",
+    content = "",
+    severity = "",
+    location = "",
+    ts = "",
+    section = "",
+  }) {
     const container = el("negotiation-thread");
     const bubble = document.createElement("div");
     bubble.className = `bubble ${agent}`;
 
-    let body = String(content.content || "");
+    const safeSection = escapeHtml(section || type);
+    const safeContent = escapeHtml(content || "");
+    const safeLocation = escapeHtml(location || "");
+    const timeLabel = formatTime(ts);
+    const roundTag = `R${Number(round || 0)}`;
+
+    let body = safeContent;
     if (type === "finding") {
-      body = `<span class="sev-chip ${(content.severity || "low").toLowerCase()}">${content.severity || "LOW"}</span> ${body} <small>${content.location || ""}</small>`;
-    }
-    if (type === "verdict") {
-      body = `<strong>${content.content || ""}</strong>`;
-    }
-    if (type === "objection") {
-      body = `${body} <a href="#">evidence</a>`;
+      const sev = String(severity || "low").toLowerCase();
+      body = `<span class="sev-chip ${sev}">${escapeHtml(sev.toUpperCase())}</span> ${safeContent}${safeLocation ? ` <span class="loc-chip">${safeLocation}</span>` : ""}`;
+    } else if (type === "verdict") {
+      body = `<strong>${safeContent}</strong>`;
     }
 
     bubble.innerHTML = `
-      <div class="bubble-header">R${round} · ${agent.toUpperCase()} · ${type}</div>
-      <div>${body}</div>
+      <div class="bubble-meta">
+        <span class="round-tag">${roundTag}</span>
+        <span class="agent-tag">${escapeHtml(agent === "chanakya" ? "CHANAKYA" : "ARYABHATA")}</span>
+        <span class="type-tag">${safeSection}</span>
+      </div>
+      <div class="bubble-body">${body}</div>
+      ${timeLabel ? `<div class="bubble-time">${timeLabel}</div>` : ""}
     `;
     container.appendChild(bubble);
     container.scrollTop = container.scrollHeight;
@@ -356,18 +470,57 @@
     const container = el("negotiation-thread");
     container.innerHTML = "";
     rounds.forEach((round) => {
+      addRoundDivider(round.round, round.completed_at || round.started_at || "");
+
+      const majorDiscussion = Array.isArray(round.discussion) ? round.discussion : [];
+      majorDiscussion
+        .filter((d) => String(d.agent || "").toLowerCase() === "chanakya")
+        .forEach((d) => {
+          addNegotiationEntry({
+            round: round.round,
+            agent: "chanakya",
+            type: String(d.kind || "major").toLowerCase(),
+            content: d.text || "",
+            ts: d.ts || round.started_at || round.completed_at || "",
+            section: d.section || "major",
+          });
+        });
+
       const items = round.findings?.items || [];
       items.forEach((item) => {
-        addNegotiationEntry(round.round, "aryabhata", "finding", {
+        addNegotiationEntry({
+          round: round.round,
+          agent: "aryabhata",
+          type: "finding",
           severity: item.severity || "low",
           location: item.location || "",
           content: item.description || "",
-          id: item.id || "",
+          ts: round.completed_at || round.started_at || "",
+          section: "finding",
         });
       });
+
+      majorDiscussion
+        .filter((d) => String(d.agent || "").toLowerCase() === "aryabhata")
+        .forEach((d) => {
+          addNegotiationEntry({
+            round: round.round,
+            agent: "aryabhata",
+            type: String(d.kind || "major").toLowerCase(),
+            content: d.text || "",
+            ts: d.ts || round.completed_at || round.started_at || "",
+            section: d.section || "major",
+          });
+        });
+
       if ((round.findings?.open || 0) === 0) {
-        addNegotiationEntry(round.round, "chanakya", "verdict", {
+        addNegotiationEntry({
+          round: round.round,
+          agent: "chanakya",
+          type: "verdict",
           content: "All findings addressed for this round",
+          ts: round.completed_at || round.started_at || "",
+          section: "verdict",
         });
       }
     });
@@ -462,8 +615,27 @@
     el("btn-stop").addEventListener("click", async () => {
       try {
         await stopSession();
+        await refreshSessionPicker(state.sessionId);
       } catch (err) {
         window.alert(`Stop failed: ${err.message}`);
+      }
+    });
+
+    el("btn-open-thread").addEventListener("click", async () => {
+      const selected = el("sel-running-session").value;
+      if (!selected) return;
+      try {
+        await openSessionThread(selected);
+      } catch (err) {
+        window.alert(`Open thread failed: ${err.message}`);
+      }
+    });
+
+    el("btn-refresh-sessions").addEventListener("click", async () => {
+      try {
+        await refreshSessionPicker();
+      } catch (err) {
+        window.alert(`Refresh failed: ${err.message}`);
       }
     });
 
@@ -498,15 +670,9 @@
     state.terminals.orchestrator = initTerminal("orchestrator-terminal", paneThemes.orchestrator);
 
     bindUi();
-    const sessions = await loadSessions();
+    await loadSessions();
 
-    const target = sessions.find((s) => s.session_id === "sess-20260503-090049-420846");
-    if (target) {
-      setLiveUi(target.session_id);
-      connectAllTerminalStreams(target.session_id);
-      connectEventStream(target.session_id);
-      await loadReport(target.session_id);
-    } else if (state.sessionId) {
+    if (state.sessionId) {
       connectAllTerminalStreams(state.sessionId);
       connectEventStream(state.sessionId);
     }
@@ -514,6 +680,12 @@
 
   boot().catch((err) => {
     console.error(err);
-    addNegotiationEntry(0, "aryabhata", "objection", { content: `Boot error: ${err.message}` });
+    addNegotiationEntry({
+      round: 0,
+      agent: "aryabhata",
+      type: "major",
+      content: `Boot error: ${err.message}`,
+      section: "error",
+    });
   });
 })();

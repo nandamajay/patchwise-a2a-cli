@@ -181,12 +181,25 @@ def _extend_stopped_and_resume() -> int:
     if not sid:
         return 1
 
-    rc = _run([sys.executable, "-m", "a2a_cli.main", "review", "--session", sid, "--advance"])
-    if rc != 0:
-        return rc
+    extend_by = _prompt_int("Add how many rounds", 1)
+    if extend_by <= 0:
+        print("Extend count must be > 0.")
+        return 1
+
     if not _prompt_yes_no("Start loop now for this session?", default_yes=True):
         return 0
-    return _run([sys.executable, "-m", "a2a_cli.main", "loop", "--session", sid])
+    return _run(
+        [
+            sys.executable,
+            "-m",
+            "a2a_cli.main",
+            "loop",
+            "--session",
+            sid,
+            "--extend-rounds",
+            str(extend_by),
+        ]
+    )
 
 
 def main() -> int:
@@ -196,7 +209,7 @@ def main() -> int:
     print("What do you want to do?")
     print("1. Start a new loop session")
     print("2. Resume an existing session")
-    print("3. Extend a stopped session by one round and resume")
+    print("3. Extend a stopped session by N rounds and resume")
     print("4. Show loop command options help")
     print("5. Exit")
 

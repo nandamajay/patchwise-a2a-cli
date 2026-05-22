@@ -120,6 +120,24 @@ def run_gate(patch_file: str, kernel_tree: str, config: dict[str, Any]) -> dict[
     if bool(config.get("coccinelle", True)):
         results["coccinelle"] = run_coccinelle(patch_file, kernel_tree)
 
+    fail_on_missing_tools = bool(config.get("fail_on_missing_tools", False))
+    missing_required_tools: list[str] = []
+    if fail_on_missing_tools:
+        sparse_row = results.get("sparse", {})
+        if isinstance(sparse_row, dict) and bool(sparse_row.get("skipped")):
+            reason = str(sparse_row.get("reason") or "").lower()
+            if "not installed" in reason:
+                missing_required_tools.append("sparse")
+
+        cocci_row = results.get("coccinelle", {})
+        if isinstance(cocci_row, dict) and bool(cocci_row.get("skipped")):
+            reason = str(cocci_row.get("reason") or "").lower()
+            if "not installed" in reason:
+                missing_required_tools.append("coccinelle")
+
     sparse_block = bool(results.get("sparse", {}).get("blocking", False))
-    results["gate_passed"] = not sparse_block
+    tooling_block = bool(missing_required_tools)
+    results["missing_required_tools"] = sorted(set(missing_required_tools))
+    results["tooling_blocking"] = tooling_block
+    results["gate_passed"] = not sparse_block and not tooling_block
     return results

@@ -185,7 +185,14 @@ def build_submission_email(root: Path, session_id: str) -> dict[str, Any]:
     if not patch_files:
         raise RuntimeError("Patch files missing for submission.")
 
-    cover = next((p for p in patch_files if p.name.startswith("0000")), None)
+    cover = next(
+        (
+            p
+            for p in patch_files
+            if p.name.startswith("0000") or p.name.lower().endswith("0000-cover-letter.patch")
+        ),
+        None,
+    )
     subject_hint = _parse_subject_from_cover(cover) or "<cover letter subject>"
     version = _detect_version(session, patch_files)
     summary = build_patchset_summary(root, session_id)

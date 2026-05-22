@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from a2a_cli.lore_watcher import (
+    fetch_thread_message_ids,
     load_known_message_ids,
     process_new_reply,
     save_known_message_ids,
@@ -103,6 +104,47 @@ class LoreWatcherTests(unittest.TestCase):
                 events = watch(root, "id-1", poll_interval_secs=1, max_loops=1, fetch_ids_fn=fetch_ids, fetch_msg_fn=lambda _: "")
             self.assertEqual(events[0]["type"], "network_warning")
             self.assertEqual(load_known_message_ids(root, "id-1"), set())
+
+    def test_on_event_callback_receives_new_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            received = []
+
+            def fetch_ids(_msgid: str) -> set[str]:
+                return {"msg-1"}
+
+            def fetch_msg(_msgid: str) -> str:
+                return "From: Dev One <dev@example.com>\n\nnit: pm_runtime"
+
+            events = watch(
+                root,
+                "id-1",
+                poll_interval_secs=1,
+                max_loops=1,
+                fetch_ids_fn=fetch_ids,
+                fetch_msg_fn=fetch_msg,
+                on_event=received.append,
+            )
+            self.assertEqual(len(events), 1)
+            self.assertEqual(len(received), 1)
+            self.assertEqual(received[0]["msg_id"], "msg-1")
+
+    def test_fetch_thread_message_ids_accepts_non_numeric_msgid_from_href(self) -> None:
+        html = (
+            "<html><body>"
+            '<a href="/all/cover.abc123@example.com/">x</a>'
+            '<a href="/all/20260508@example.com/">y</a>'
+            "</body></html>"
+        ).encode("utf-8")
+        response = mock.MagicMock()
+        response.read.return_value = html
+        cm = mock.MagicMock()
+        cm.__enter__.return_value = response
+        cm.__exit__.return_value = False
+        with mock.patch("a2a_cli.lore_watcher.urllib.request.urlopen", return_value=cm):
+            ids = fetch_thread_message_ids("root@example.com")
+        self.assertIn("cover.abc123@example.com", ids)
+        self.assertIn("20260508@example.com", ids)
 
 
 if __name__ == "__main__":

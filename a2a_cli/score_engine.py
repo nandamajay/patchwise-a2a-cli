@@ -88,8 +88,11 @@ def evaluate_round_scores(
     }
 
     if bconf < thresholds.low_builder_confidence:
-        decisions["force_extra_round"] = True
-        decisions["messages"].append("builder confidence low — extra round forced")
+        if open_findings > 0:
+            decisions["force_extra_round"] = True
+            decisions["messages"].append("builder confidence low — extra round forced")
+        else:
+            decisions["messages"].append("builder confidence low (no open findings) — warning only")
 
     if rconf < thresholds.low_reviewer_confidence:
         decisions["low_quality_reviewer"] = True
@@ -99,7 +102,7 @@ def evaluate_round_scores(
 
     if gauge <= thresholds.zero_patch_gauge:
         decisions["messages"].append("No code changes detected in this round")
-        if round_no > 1:
+        if round_no > 1 and open_findings > 0:
             decisions["abort_session"] = True
             decisions["abort_reason"] = "Chanakya produced no patch changes — aborting"
 
@@ -114,9 +117,12 @@ def evaluate_round_scores(
         swings.append(abs(rconf - clamp_score(previous_reviewer_confidence)))
     if swings and max(swings) > thresholds.volatility_swing:
         decisions["volatility_warning"] = True
-        decisions["force_extra_round"] = True
-        decisions["extra_scrutiny_next_round"] = True
-        decisions["messages"].append("score instability detected (volatility swing > threshold) — extra round forced")
+        if open_findings > 0:
+            decisions["force_extra_round"] = True
+            decisions["extra_scrutiny_next_round"] = True
+            decisions["messages"].append("score instability detected (volatility swing > threshold) — extra round forced")
+        else:
+            decisions["messages"].append("score instability detected (volatility swing > threshold) — warning only")
 
     if open_findings > 0:
         decisions["allow_early_lgtm"] = False

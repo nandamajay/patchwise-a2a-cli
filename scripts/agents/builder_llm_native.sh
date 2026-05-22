@@ -31,6 +31,7 @@ STRICT="${A2A_LLM_STRICT:-1}"
 ALLOW_FALLBACK="${A2A_ALLOW_FALLBACK:-0}"
 FALLBACK_CMD="${A2A_FALLBACK_BUILDER_CMD:-}"
 LLM_TIMEOUT_SEC="${A2A_LLM_TIMEOUT_SEC:-900}"
+LLM_TIMEOUT_PER_MODEL_SEC="${A2A_LLM_TIMEOUT_PER_MODEL_SEC:-$LLM_TIMEOUT_SEC}"
 
 run_fallback() {
   if [[ "$ALLOW_FALLBACK" == "1" && -n "$FALLBACK_CMD" ]]; then
@@ -54,6 +55,141 @@ if qgenie codex-exec --help >/dev/null 2>&1; then
   QGENIE_SUBCMD="codex-exec"
 fi
 
+if ! [[ "$LLM_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [[ "$LLM_TIMEOUT_SEC" -le 0 ]]; then
+  LLM_TIMEOUT_SEC=900
+fi
+if ! [[ "$LLM_TIMEOUT_PER_MODEL_SEC" =~ ^[0-9]+$ ]] || [[ "$LLM_TIMEOUT_PER_MODEL_SEC" -le 0 ]]; then
+  LLM_TIMEOUT_PER_MODEL_SEC="$LLM_TIMEOUT_SEC"
+fi
+
+resolve_qgenie_default_model() {
+  if [[ -n "${A2A_LLM_MODEL:-}" ]]; then
+    printf '%s\n' "${A2A_LLM_MODEL}"
+    return
+  fi
+  if [[ -n "${QGENIE_MODEL:-}" ]]; then
+    printf '%s\n' "${QGENIE_MODEL}"
+    return
+  fi
+
+  local cfg=""
+  local model=""
+  local cfg_candidates=()
+  if [[ -n "${QGENIE_CLI_HOME:-}" ]]; then
+    cfg_candidates+=("${QGENIE_CLI_HOME}/config.toml")
+  fi
+  cfg_candidates+=(
+    "$HOME/.config/qgenie-cli/config.toml"
+    "$REPO_ROOT/.runtime/qgenie-cli/config.toml"
+  )
+
+  for cfg in "${cfg_candidates[@]}"; do
+    [[ -f "$cfg" ]] || continue
+    model="$(sed -n 's/^[[:space:]]*default_model[[:space:]]*=[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p' "$cfg" | head -n 1)"
+    if [[ -n "$model" ]]; then
+      printf '%s\n' "$model"
+      return
+    fi
+  done
+
+  printf '%s\n' "azure::gpt-5.3-codex"
+}
+
+MODEL_CANDIDATES=()
+add_unique_model() {
+  local candidate="$1"
+  local existing=""
+  if [[ -z "$candidate" ]]; then
+    return
+  fi
+  for existing in "${MODEL_CANDIDATES[@]}"; do
+    if [[ "$existing" == "$candidate" ]]; then
+      return
+    fi
+  done
+  MODEL_CANDIDATES+=("$candidate")
+}
+
+build_model_candidates() {
+  local token=""
+  local resolved_default=""
+  if [[ -n "${A2A_LLM_MODEL_PRIORITY:-}" ]]; then
+    for token in ${A2A_LLM_MODEL_PRIORITY//,/ }; do
+      add_unique_model "$token"
+    done
+  fi
+  if [[ "${#MODEL_CANDIDATES[@]}" -eq 0 ]]; then
+    resolved_default="$(resolve_qgenie_default_model)"
+    add_unique_model "$resolved_default"
+    add_unique_model "azure::gpt-5.3-codex"
+    add_unique_model "anthropic::claude-4-6-sonnet"
+  fi
+}
+
+run_qgenie_builder() {
+  local rc=1
+  local model=""
+  local total_models=1
+  local per_model_timeout="$LLM_TIMEOUT_PER_MODEL_SEC"
+  local idx=0
+
+  if [[ "$QGENIE_SUBCMD" == "codex-exec" ]]; then
+    total_models="${#MODEL_CANDIDATES[@]}"
+    if [[ "$total_models" -eq 0 ]]; then
+      MODEL_CANDIDATES=("azure::gpt-5.3-codex")
+      total_models=1
+    fi
+    for idx in "${!MODEL_CANDIDATES[@]}"; do
+      model="${MODEL_CANDIDATES[$idx]}"
+      : > "$OUT_FILE"
+      echo "[builder-llm] attempting model=$model ($((idx + 1))/$total_models)" >&2
+      if command -v timeout >/dev/null 2>&1; then
+        timeout "$per_model_timeout" qgenie codex-exec \
+          -m "$model" \
+          --cd "$WORKDIR" \
+          --skip-git-repo-check \
+          --full-auto \
+          --output-last-message "$OUT_FILE" \
+          - < "$PROMPT_FILE"
+      else
+        qgenie codex-exec \
+          -m "$model" \
+          --cd "$WORKDIR" \
+          --skip-git-repo-check \
+          --full-auto \
+          --output-last-message "$OUT_FILE" \
+          - < "$PROMPT_FILE"
+      fi
+      rc=$?
+      if [[ $rc -eq 0 ]]; then
+        return 0
+      fi
+      echo "[builder-llm] model=$model failed (rc=$rc)" >&2
+    done
+    return "$rc"
+  fi
+
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$LLM_TIMEOUT_SEC" qgenie agent exec \
+      --cd "$WORKDIR" \
+      --skip-git-repo-check \
+      --full-auto \
+      --output-last-message "$OUT_FILE" \
+      - < "$PROMPT_FILE"
+  else
+    qgenie agent exec \
+      --cd "$WORKDIR" \
+      --skip-git-repo-check \
+      --full-auto \
+      --output-last-message "$OUT_FILE" \
+      - < "$PROMPT_FILE"
+  fi
+}
+
+if [[ "$QGENIE_SUBCMD" == "codex-exec" ]]; then
+  build_model_candidates
+fi
+
 PROMPT_FILE="$(mktemp)"
 OUT_FILE="$(mktemp)"
 trap 'rm -f "$PROMPT_FILE" "$OUT_FILE"' EXIT
@@ -70,6 +206,7 @@ cat >>"$PROMPT_FILE" <<EOF
 Runtime context:
 - Working directory: ${WORKDIR}
 - Patch watch path: ${A2A_WATCH_PATH:-<unset>}
+- Focus issues: ${A2A_FOCUS_ISSUES:-<none>}
 - Prior review context: ${A2A_PRIOR_COMMENTS_FILE:-<none>}
 - Previous round findings JSON: ${PREV_FINDINGS:-<none>}
 - Current round: ${ROUND}
@@ -86,42 +223,11 @@ Execution requirements:
 5) If no changes were needed, state why with evidence.
 6) Always include a `## Residual Risks` section with explicit yes/no risk statements and evidence.
 7) Never ignore fallible __must_check runtime-PM APIs in changed code; fix or justify maintainer-requested commit subject/message wording updates.
+8) If focus issues are provided, address each explicitly with concrete patch_file:line evidence.
 EOF
 
 set +e
-if [[ "$QGENIE_SUBCMD" == "codex-exec" ]]; then
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$LLM_TIMEOUT_SEC" qgenie codex-exec \
-      --cd "$WORKDIR" \
-      --skip-git-repo-check \
-      --full-auto \
-      --output-last-message "$OUT_FILE" \
-      - < "$PROMPT_FILE"
-  else
-    qgenie codex-exec \
-      --cd "$WORKDIR" \
-      --skip-git-repo-check \
-      --full-auto \
-      --output-last-message "$OUT_FILE" \
-      - < "$PROMPT_FILE"
-  fi
-else
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$LLM_TIMEOUT_SEC" qgenie agent exec \
-      --cd "$WORKDIR" \
-      --skip-git-repo-check \
-      --full-auto \
-      --output-last-message "$OUT_FILE" \
-      - < "$PROMPT_FILE"
-  else
-    qgenie agent exec \
-      --cd "$WORKDIR" \
-      --skip-git-repo-check \
-      --full-auto \
-      --output-last-message "$OUT_FILE" \
-      - < "$PROMPT_FILE"
-  fi
-fi
+run_qgenie_builder
 RC=$?
 set -e
 

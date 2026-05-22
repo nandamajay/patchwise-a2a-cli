@@ -38,9 +38,16 @@ Do not wait for reviewer guidance when risks are visible in the patch.
 ## Kernel-Specific Focus
 
 - PM-runtime get/put pairing and error unwind symmetry.
+- Handle `__must_check` runtime-PM APIs in changed code paths; never ignore fallible calls (for example `devm_pm_runtime_enable()`).
 - Shared rails/refcount ownership (no unconditional force-off if shared).
 - PRE/POST DAPM event sequencing correctness.
 - Helper conversion preconditions (required hooks/init paths) to avoid recursive/dependency breakage.
+- Fold maintainer-requested message hygiene updates into respins (subject wording, preparatory-NOP rationale, redundant lists).
+- Credit prior maintainer suggestions when applicable: if an actionable maintainer comment directly suggested a technical change you are implementing, add `Suggested-by: Name <email>` to the relevant commit message trailer.
+- Attribution hygiene for `Suggested-by`:
+  - Add only when suggestion is substantive and attributable from prior context (`from`, message-id, quoted suggestion).
+  - Do not invent names/emails, and do not add for generic nits, pure acknowledgements, or apply-notice emails.
+  - Keep trailer style/order upstream-consistent.
 - Functional tunable changes (autosuspend delays, vote windows, timeouts) need explicit rationale in commit/cover text.
 - Side effects on related symbols/subsystems.
 

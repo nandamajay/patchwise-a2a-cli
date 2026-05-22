@@ -9,6 +9,7 @@ from .models import RoundSummary, SessionReport
 
 
 _ROUND_SUMMARY_RE = re.compile(r"^round-(\d+)-summary\.json$")
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 
 
 def _load_json(path: Path) -> dict:
@@ -23,6 +24,59 @@ def _load_findings(path: Path) -> list[dict]:
     payload = _load_json(path)
     findings = payload.get("findings", [])
     return findings if isinstance(findings, list) else []
+
+
+def _clean_discussion_text(raw: str, *, max_len: int = 220) -> str:
+    text = _MARKDOWN_LINK_RE.sub(r"\1", raw).strip()
+    text = re.sub(r"\s+", " ", text)
+    if text.lower().startswith("evidence:"):
+        return ""
+    if len(text) <= max_len:
+        return text
+    return f"{text[: max_len - 3].rstrip()}..."
+
+
+def _extract_markdown_bullets(path: Path) -> dict[str, list[str]]:
+    if not path.exists():
+        return {}
+
+    sections: dict[str, list[str]] = {}
+    current_section = ""
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("## "):
+            current_section = line[3:].strip().lower()
+            continue
+        if not current_section:
+            continue
+        if line.startswith("- "):
+            sections.setdefault(current_section, []).append(line[2:].strip())
+        elif line.startswith("* "):
+            sections.setdefault(current_section, []).append(line[2:].strip())
+    return sections
+
+
+def _pick_major_points(
+    sections: dict[str, list[str]],
+    preferred_sections: list[str],
+    *,
+    max_points: int,
+) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for section in preferred_sections:
+        items = sections.get(section, [])
+        for item in items:
+            cleaned = _clean_discussion_text(item)
+            if not cleaned:
+                continue
+            if cleaned in seen:
+                continue
+            seen.add(cleaned)
+            out.append({"section": section, "text": cleaned})
+            if len(out) >= max_points:
+                return out
+    return out
 
 
 def list_sessions() -> list[dict]:
@@ -47,6 +101,9 @@ def list_sessions() -> list[dict]:
 
 def _round_summary_from_files(report_dir: Path, summary_payload: dict) -> RoundSummary:
     round_no = int(summary_payload.get("round") or 0)
+    timing_block = summary_payload.get("timing") if isinstance(summary_payload.get("timing"), dict) else {}
+    started_at = str(timing_block.get("started_at") or "")
+    completed_at = str(summary_payload.get("generated_at") or "")
 
     findings_block = summary_payload.get("findings") if isinstance(summary_payload.get("findings"), dict) else {}
     gate_block = (
@@ -122,6 +179,39 @@ def _round_summary_from_files(report_dir: Path, summary_payload: dict) -> RoundS
         "closed": int(prior_totals.get("closed", 0)),
     }
 
+    builder_points = _pick_major_points(
+        _extract_markdown_bullets(report_dir / f"round-{round_no:02d}-builder.md"),
+        ["changes", "rationale"],
+        max_points=3,
+    )
+    reviewer_points = _pick_major_points(
+        _extract_markdown_bullets(report_dir / f"round-{round_no:02d}-aryabhatta.md"),
+        ["verdict", "findings"],
+        max_points=2,
+    )
+
+    discussion: list[dict[str, str]] = []
+    for item in builder_points:
+        discussion.append(
+            {
+                "agent": "chanakya",
+                "kind": "major",
+                "section": item["section"],
+                "text": item["text"],
+                "ts": started_at or completed_at,
+            }
+        )
+    for item in reviewer_points:
+        discussion.append(
+            {
+                "agent": "aryabhata",
+                "kind": "verdict" if item["section"] == "verdict" else "major",
+                "section": item["section"],
+                "text": item["text"],
+                "ts": completed_at or started_at,
+            }
+        )
+
     return RoundSummary(
         round=round_no,
         gate=gate,
@@ -129,6 +219,9 @@ def _round_summary_from_files(report_dir: Path, summary_payload: dict) -> RoundS
         findings=findings,
         prior_comments=prior_comments,
         top_open=top_open,
+        started_at=started_at,
+        completed_at=completed_at,
+        discussion=discussion,
     )
 
 

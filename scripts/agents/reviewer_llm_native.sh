@@ -24,6 +24,7 @@ fi
 ALLOW_FALLBACK="${A2A_ALLOW_FALLBACK:-0}"
 FALLBACK_CMD="${A2A_FALLBACK_REVIEWER_CMD:-}"
 LLM_TIMEOUT_SEC="${A2A_LLM_TIMEOUT_SEC:-900}"
+LLM_TIMEOUT_PER_MODEL_SEC="${A2A_LLM_TIMEOUT_PER_MODEL_SEC:-$LLM_TIMEOUT_SEC}"
 
 run_fallback() {
   if [[ "$ALLOW_FALLBACK" == "1" && -n "$FALLBACK_CMD" ]]; then
@@ -47,6 +48,144 @@ if qgenie codex-exec --help >/dev/null 2>&1; then
   QGENIE_SUBCMD="codex-exec"
 fi
 
+if ! [[ "$LLM_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [[ "$LLM_TIMEOUT_SEC" -le 0 ]]; then
+  LLM_TIMEOUT_SEC=900
+fi
+if ! [[ "$LLM_TIMEOUT_PER_MODEL_SEC" =~ ^[0-9]+$ ]] || [[ "$LLM_TIMEOUT_PER_MODEL_SEC" -le 0 ]]; then
+  LLM_TIMEOUT_PER_MODEL_SEC="$LLM_TIMEOUT_SEC"
+fi
+
+resolve_qgenie_default_model() {
+  if [[ -n "${A2A_LLM_MODEL:-}" ]]; then
+    printf '%s\n' "${A2A_LLM_MODEL}"
+    return
+  fi
+  if [[ -n "${QGENIE_MODEL:-}" ]]; then
+    printf '%s\n' "${QGENIE_MODEL}"
+    return
+  fi
+
+  local cfg=""
+  local model=""
+  local cfg_candidates=()
+  if [[ -n "${QGENIE_CLI_HOME:-}" ]]; then
+    cfg_candidates+=("${QGENIE_CLI_HOME}/config.toml")
+  fi
+  cfg_candidates+=(
+    "$HOME/.config/qgenie-cli/config.toml"
+    "$REPO_ROOT/.runtime/qgenie-cli/config.toml"
+  )
+
+  for cfg in "${cfg_candidates[@]}"; do
+    [[ -f "$cfg" ]] || continue
+    model="$(sed -n 's/^[[:space:]]*default_model[[:space:]]*=[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p' "$cfg" | head -n 1)"
+    if [[ -n "$model" ]]; then
+      printf '%s\n' "$model"
+      return
+    fi
+  done
+
+  printf '%s\n' "azure::gpt-5.3-codex"
+}
+
+MODEL_CANDIDATES=()
+add_unique_model() {
+  local candidate="$1"
+  local existing=""
+  if [[ -z "$candidate" ]]; then
+    return
+  fi
+  for existing in "${MODEL_CANDIDATES[@]}"; do
+    if [[ "$existing" == "$candidate" ]]; then
+      return
+    fi
+  done
+  MODEL_CANDIDATES+=("$candidate")
+}
+
+build_model_candidates() {
+  local token=""
+  local resolved_default=""
+  if [[ -n "${A2A_LLM_MODEL_PRIORITY:-}" ]]; then
+    for token in ${A2A_LLM_MODEL_PRIORITY//,/ }; do
+      add_unique_model "$token"
+    done
+  fi
+  if [[ "${#MODEL_CANDIDATES[@]}" -eq 0 ]]; then
+    resolved_default="$(resolve_qgenie_default_model)"
+    add_unique_model "anthropic::claude-4-6-sonnet"
+    add_unique_model "anthropic::claude-4-5-sonnet"
+    add_unique_model "$resolved_default"
+    add_unique_model "azure::gpt-5.3-codex"
+  fi
+}
+
+run_qgenie_reviewer() {
+  local rc=1
+  local model=""
+  local total_models=1
+  local per_model_timeout="$LLM_TIMEOUT_PER_MODEL_SEC"
+  local idx=0
+
+  if [[ "$QGENIE_SUBCMD" == "codex-exec" ]]; then
+    total_models="${#MODEL_CANDIDATES[@]}"
+    if [[ "$total_models" -eq 0 ]]; then
+      MODEL_CANDIDATES=("azure::gpt-5.3-codex")
+      total_models=1
+    fi
+    for idx in "${!MODEL_CANDIDATES[@]}"; do
+      model="${MODEL_CANDIDATES[$idx]}"
+      : > "$OUT_FILE"
+      echo "[aryabhatta-llm] attempting model=$model ($((idx + 1))/$total_models)" >&2
+      if command -v timeout >/dev/null 2>&1; then
+        timeout "$per_model_timeout" qgenie codex-exec \
+          -m "$model" \
+          --cd "$WORKDIR" \
+          --skip-git-repo-check \
+          --full-auto \
+          --output-last-message "$OUT_FILE" \
+          - < "$PROMPT_FILE"
+      else
+        qgenie codex-exec \
+          -m "$model" \
+          --cd "$WORKDIR" \
+          --skip-git-repo-check \
+          --full-auto \
+          --output-last-message "$OUT_FILE" \
+          - < "$PROMPT_FILE"
+      fi
+      rc=$?
+      if [[ $rc -eq 0 ]]; then
+        return 0
+      fi
+      echo "[aryabhatta-llm] model=$model failed (rc=$rc)" >&2
+    done
+    return "$rc"
+  fi
+
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$LLM_TIMEOUT_SEC" qgenie agent exec \
+      --cd "$WORKDIR" \
+      --skip-git-repo-check \
+      --full-auto \
+      --output-schema "$SCHEMA" \
+      --output-last-message "$OUT_FILE" \
+      - < "$PROMPT_FILE"
+  else
+    qgenie agent exec \
+      --cd "$WORKDIR" \
+      --skip-git-repo-check \
+      --full-auto \
+      --output-schema "$SCHEMA" \
+      --output-last-message "$OUT_FILE" \
+      - < "$PROMPT_FILE"
+  fi
+}
+
+if [[ "$QGENIE_SUBCMD" == "codex-exec" ]]; then
+  build_model_candidates
+fi
+
 PROMPT_FILE="$(mktemp)"
 OUT_FILE="$(mktemp)"
 trap 'rm -f "$PROMPT_FILE" "$OUT_FILE"' EXIT
@@ -62,6 +201,7 @@ cat >>"$PROMPT_FILE" <<EOF
 
 Runtime context:
 - Review patch files under: ${A2A_WATCH_PATH:-<unset>}
+- Focus issues: ${A2A_FOCUS_ISSUES:-<none>}
 - Prior review context: ${A2A_PRIOR_COMMENTS_FILE:-<none>}
 - Round: ${A2A_ROUND:-?}
 - Subsystem: ${A2A_KB_SUBSYSTEM:-unknown}
@@ -86,46 +226,12 @@ Strict requirements:
 11) If patchset artifacts exist (*.patches/series, *.cover, *.mbx), verify subject counts/order consistency and emit open finding(s) on mismatch.
 12) Cover letter "Changes since vN" must describe technical delta; tool/meta-only changelog text is a finding.
 13) Flag unchecked __must_check runtime-PM calls in touched code (e.g. devm_pm_runtime_enable) and track maintainer-requested subject/message wording fixes.
+14) If focus issues are provided, include at least one explicit finding/advisory row with source_comment_id prefix focus-issue: and concrete patch_file:line evidence.
+15) Keep source_comment_id stable for unchanged concerns across rounds; do not invent new subsys-scan ids for unchanged closed advisories.
 EOF
 
 set +e
-if [[ "$QGENIE_SUBCMD" == "codex-exec" ]]; then
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$LLM_TIMEOUT_SEC" qgenie codex-exec \
-      --cd "$WORKDIR" \
-      --skip-git-repo-check \
-      --full-auto \
-      --output-schema "$SCHEMA" \
-      --output-last-message "$OUT_FILE" \
-      - < "$PROMPT_FILE"
-  else
-    qgenie codex-exec \
-      --cd "$WORKDIR" \
-      --skip-git-repo-check \
-      --full-auto \
-      --output-schema "$SCHEMA" \
-      --output-last-message "$OUT_FILE" \
-      - < "$PROMPT_FILE"
-  fi
-else
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$LLM_TIMEOUT_SEC" qgenie agent exec \
-      --cd "$WORKDIR" \
-      --skip-git-repo-check \
-      --full-auto \
-      --output-schema "$SCHEMA" \
-      --output-last-message "$OUT_FILE" \
-      - < "$PROMPT_FILE"
-  else
-    qgenie agent exec \
-      --cd "$WORKDIR" \
-      --skip-git-repo-check \
-      --full-auto \
-      --output-schema "$SCHEMA" \
-      --output-last-message "$OUT_FILE" \
-      - < "$PROMPT_FILE"
-  fi
-fi
+run_qgenie_reviewer
 RC=$?
 set -e
 
@@ -146,6 +252,7 @@ fi
 
 python - "$OUT_FILE" "$A2A_FINDINGS_FILE" "$A2A_REVIEW_FILE" "${A2A_ROUND:-?}" "${A2A_WATCH_PATH:-}" "${A2A_REQUIRE_INDEPENDENT_SCAN:-0}" "${A2A_PRIOR_COMMENTS_TOTAL:-0}" <<'PY'
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -160,21 +267,62 @@ try:
     prior_comments_total = int(str(sys.argv[7] if len(sys.argv) > 7 else "0").strip() or "0")
 except ValueError:
     prior_comments_total = 0
+focus_issues: list[str] = []
+focus_raw = str(os.environ.get("A2A_FOCUS_ISSUES_JSON", "")).strip()
+if focus_raw:
+    try:
+        parsed = json.loads(focus_raw)
+        if isinstance(parsed, list):
+            focus_issues = [str(x).strip() for x in parsed if str(x).strip()]
+    except Exception:
+        focus_issues = []
 text = src.read_text(encoding="utf-8", errors="replace").strip()
 
-payload = None
-try:
-    payload = json.loads(text)
-except json.JSONDecodeError:
-    m = re.search(r"```json\s*(\{.*\})\s*```", text, re.S)
-    if m:
-        payload = json.loads(m.group(1))
-    else:
-        m2 = re.search(r"(\{.*\})", text, re.S)
-        if m2:
-            payload = json.loads(m2.group(1))
-        else:
-            raise
+
+def _parse_payload_from_text(raw: str) -> dict:
+    # 1) Fast path: full output is JSON.
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    # 2) Try each fenced ```json ...``` block and keep the last valid findings payload.
+    fenced_candidates = re.findall(r"```json\s*(\{.*?\})\s*```", raw, flags=re.S | re.I)
+    for chunk in reversed(fenced_candidates):
+        try:
+            parsed = json.loads(chunk)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("findings"), list):
+            return parsed
+
+    # 3) Recover from mixed prose/duplicate JSON by scanning for valid JSON objects.
+    decoder = json.JSONDecoder()
+    last_valid = None
+    idx = 0
+    length = len(raw)
+    while idx < length:
+        brace = raw.find("{", idx)
+        if brace < 0:
+            break
+        try:
+            parsed, end = decoder.raw_decode(raw, brace)
+        except json.JSONDecodeError:
+            idx = brace + 1
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("findings"), list):
+            last_valid = parsed
+        idx = max(end, brace + 1)
+
+    if isinstance(last_valid, dict):
+        return last_valid
+
+    raise RuntimeError("cannot parse reviewer JSON payload from LLM output")
+
+
+payload = _parse_payload_from_text(text)
 
 if not isinstance(payload, dict):
     raise RuntimeError("LLM output is not a JSON object")
@@ -193,7 +341,6 @@ def is_meta_finding(row: dict) -> bool:
     else:
         evidence_text = str(evidence).lower()
     markers = [
-        "workflow",
         "patchwise skill",
         "loaded skill instructions",
         "starting review workflow",
@@ -260,6 +407,21 @@ if require_independent and prior_comments_total > 0 and not has_independent:
         "LGTM may be blocked by dual-track guard.",
         file=sys.stderr,
     )
+
+if focus_issues:
+    has_focus_row = False
+    for row in findings:
+        if not isinstance(row, dict):
+            continue
+        source_id = str(row.get("source_comment_id", "")).strip().lower()
+        if source_id.startswith("focus-issue:"):
+            has_focus_row = True
+            break
+    if not has_focus_row:
+        raise RuntimeError(
+            "reviewer output missing explicit focus-issue finding/advisory row "
+            "(source_comment_id must start with focus-issue:)"
+        )
 
 out_findings.parent.mkdir(parents=True, exist_ok=True)
 out_findings.write_text(json.dumps({"findings": findings}, indent=2) + "\n", encoding="utf-8")

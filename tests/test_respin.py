@@ -9,6 +9,7 @@ from a2a_cli.conflict_resolver import ConflictError, ConflictResolver
 from a2a_cli.respin import (
     _collect_patch_series,
     _generate_cover_letter_template,
+    _refresh_cover_letter_headers,
     detect_version_number,
     next_version_path,
     respin,
@@ -95,6 +96,35 @@ class RespinTests(unittest.TestCase):
             self.assertIn("Changes since v2:", text)
             self.assertIn("Fix runtime pm", text)
             self.assertNotIn("F-1", text)
+
+    def test_refresh_cover_letter_headers_replaces_stale_thread_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cover = Path(td) / "0000-cover-letter.patch"
+            cover.write_text(
+                "\n".join(
+                    [
+                        "Subject: [PATCH v3 0/1] demo",
+                        "From: Author <author@example.com>",
+                        "Date: Fri, 10 May 2026 11:00:00 +0000",
+                        "Message-Id: <old-v3@example.com>",
+                        "In-Reply-To: <old-thread@example.com>",
+                        "References: <old-thread@example.com>",
+                        "",
+                        "body",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            changed = _refresh_cover_letter_headers(cover)
+            text = cover.read_text(encoding="utf-8")
+
+            self.assertTrue(changed)
+            self.assertNotIn("Message-Id: <old-v3@example.com>", text)
+            self.assertNotIn("In-Reply-To:", text)
+            self.assertNotIn("References:", text)
+            self.assertRegex(text, r"(?im)^Date:\s+.+$")
+            self.assertRegex(text, r"(?im)^Message-Id:\s*<[^>]+>$")
 
     def test_collect_patch_series_prefers_nested_series_and_skips_cover(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -76,13 +76,43 @@ Notes:
 - You can set a persistent default fetch directory in config using key `lore_fetch_dir`.
 - `--auto-respin` is enabled by default for lore input; after LGTM it generates a next-version patch path.
 
-#### C. Resume an existing session
+#### C. Review directly from GitHub PR
+
+```bash
+a2a loop \
+  --task github-pr-review \
+  --github-pr "https://github.com/<owner>/<repo>/pull/<number>" \
+  --fetch-out-dir /abs/path/for/fetched-sources \
+  --max-rounds 3
+```
+
+Notes:
+- `--github-pr` also accepts short form `<owner>/<repo>#<number>`.
+- Prior-review context is ingested from GitHub PR discussion/review comments.
+
+#### D. Review directly from Gerrit change
+
+```bash
+a2a loop \
+  --task gerrit-review \
+  --gerrit-change "https://review.example.com/c/project/+/12345" \
+  --fetch-out-dir /abs/path/for/fetched-sources \
+  --max-rounds 3
+```
+
+Notes:
+- You can pass `--gerrit-change 12345 --gerrit-base-url https://review.example.com`.
+- Prior-review context is ingested from Gerrit change messages and inline comments.
+
+#### E. Resume an existing session
 
 ```bash
 a2a loop --session <session-id>
+# run exactly 5 more rounds in same session budget
+a2a loop --session <session-id> --extend-rounds 5
 ```
 
-#### D. Manual/stepwise mode
+#### F. Manual/stepwise mode
 
 ```bash
 # start
@@ -96,9 +126,13 @@ a2a review --session <session-id> --advance
 
 At max rounds, interactive runs prompt:
 
-- `Proceed with one more round? [y/N]`
+- `Additional rounds to run [N | y=1 | number]:`
 
-If accepted, the same session is extended by one round (no restart from round 1).
+You can enter:
+- `y` to add 1 more round
+- a number (for example `5`) to add that many rounds in one shot
+
+No restart from round 1.
 
 ### 5) Generate reports
 
@@ -339,10 +373,14 @@ Wizard actions:
 - Extend a stopped session by one round and resume
 - Show loop command options help
 
-Quick smart launcher (auto-detect lore URL/msgid/session/path):
+Quick smart launcher (auto-detect lore URL/msgid/GitHub PR/Gerrit URL/session/path):
 
 ```bash
 ./run.sh "https://lore.kernel.org/all/<msgid>/"
+# or
+./run.sh "https://github.com/<owner>/<repo>/pull/<number>"
+# or
+./run.sh "https://review.example.com/c/project/+/12345"
 # or
 ./run.sh "<message-id>"
 # or

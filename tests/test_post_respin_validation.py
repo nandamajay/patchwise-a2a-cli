@@ -56,6 +56,44 @@ class PostRespinValidationTests(unittest.TestCase):
             issues = _validate_patchset_artifact_coherence(out)
             self.assertTrue(any("0002-b.patch" in issue for issue in issues))
 
+    def test_patchset_artifact_coherence_accepts_mbx_with_cover_row(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "out"
+            patch_dir = out / "demo.patches"
+            _write(
+                patch_dir / "0000-cover-letter.patch",
+                "Subject: [PATCH v3 0/2] demo\n\n---\n",
+            )
+            _write(
+                patch_dir / "0001-a.patch",
+                "Subject: [PATCH v3 1/2] a\n\n---\ndiff --git a/a.c b/a.c\n",
+            )
+            _write(
+                patch_dir / "0002-b.patch",
+                "Subject: [PATCH v3 2/2] b\n\n---\ndiff --git a/b.c b/b.c\n",
+            )
+            _write(
+                patch_dir / "series",
+                "0000-cover-letter.patch\n0001-a.patch\n0002-b.patch\n",
+            )
+            _write(out / "demo.cover", "Subject: [PATCH v3 0/2] demo\n")
+            _write(
+                out / "demo.mbx",
+                "\n".join(
+                    [
+                        "Subject: [PATCH v3 0/2] demo",
+                        "",
+                        "Subject: [PATCH v3 1/2] a",
+                        "",
+                        "Subject: [PATCH v3 2/2] b",
+                        "",
+                    ]
+                ),
+            )
+
+            issues = _validate_patchset_artifact_coherence(out)
+            self.assertEqual([], issues)
+
     def test_cover_changelog_quality_detects_tool_meta_text(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "out"

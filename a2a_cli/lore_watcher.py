@@ -13,6 +13,10 @@ from .maintainer_tracker import get_priority, update_profile
 
 
 _MSGID_RE = re.compile(r"<([^>]+)>")
+_HREF_MSGID_RE = re.compile(
+    r"""href=["']?[^"'>\s]*/(?P<msgid>[^/"'>\s]+)/(?:raw)?["']?""",
+    re.IGNORECASE,
+)
 _FROM_RE = re.compile(r"^From:\s*(.+)$", re.MULTILINE)
 
 
@@ -45,7 +49,19 @@ def fetch_thread_message_ids(msgid: str) -> set[str]:
     req = urllib.request.Request(url, headers={"User-Agent": "A2A-CLI/0.1"})
     with urllib.request.urlopen(req, timeout=15) as response:
         html = response.read().decode("utf-8", errors="replace")
-    return {m.group(1) for m in _MSGID_RE.finditer(html)}
+    message_ids: set[str] = set()
+    for match in _HREF_MSGID_RE.finditer(html):
+        candidate = urllib.parse.unquote(match.group("msgid")).strip().strip("<>")
+        if candidate and "@" in candidate and " " not in candidate:
+            message_ids.add(candidate)
+    if message_ids:
+        return message_ids
+    # Fallback for non-standard pages where IDs appear as <msgid>.
+    for match in _MSGID_RE.finditer(html):
+        candidate = match.group(1).strip().strip("<>")
+        if candidate and "@" in candidate and " " not in candidate:
+            message_ids.add(candidate)
+    return message_ids
 
 
 def fetch_message(msg_id: str) -> str:
@@ -93,6 +109,7 @@ def watch(
     fetch_ids_fn: Callable[[str], set[str]] = fetch_thread_message_ids,
     fetch_msg_fn: Callable[[str], str] = fetch_message,
     process_fn: Callable[[Path, str, str, str], dict[str, Any]] | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
     known_ids = load_known_message_ids(root, msgid)
     events: list[dict[str, Any]] = []
@@ -110,12 +127,17 @@ def watch(
                 else:
                     event = process_new_reply(root, mid, author, content)
                 events.append(event)
+                if on_event:
+                    on_event(event)
                 update_profile(root, author, finding_types=["lore_reply"], verdict="pending")
                 known_ids.add(mid)
             save_known_message_ids(root, msgid, known_ids)
             backoff = 1
         except urllib.error.URLError as exc:
-            events.append({"type": "network_warning", "error": str(exc)})
+            warning = {"type": "network_warning", "error": str(exc)}
+            events.append(warning)
+            if on_event:
+                on_event(warning)
             sleep_for = min(poll_interval_secs, backoff * 2)
             time.sleep(max(1, sleep_for))
             backoff = min(backoff * 2, 60)

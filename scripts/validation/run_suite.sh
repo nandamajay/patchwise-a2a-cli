@@ -33,6 +33,71 @@ done
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
+resolve_qgenie_default_model() {
+  if [[ -n "${A2A_LLM_MODEL:-}" ]]; then
+    printf '%s\n' "${A2A_LLM_MODEL}"
+    return
+  fi
+  if [[ -n "${QGENIE_MODEL:-}" ]]; then
+    printf '%s\n' "${QGENIE_MODEL}"
+    return
+  fi
+
+  local cfg=""
+  local model=""
+  local cfg_candidates=()
+  if [[ -n "${QGENIE_CLI_HOME:-}" ]]; then
+    cfg_candidates+=("${QGENIE_CLI_HOME}/config.toml")
+  fi
+  cfg_candidates+=(
+    "$HOME/.config/qgenie-cli/config.toml"
+    "$ROOT/.runtime/qgenie-cli/config.toml"
+  )
+
+  for cfg in "${cfg_candidates[@]}"; do
+    [[ -f "$cfg" ]] || continue
+    model="$(sed -n 's/^[[:space:]]*default_model[[:space:]]*=[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p' "$cfg" | head -n 1)"
+    if [[ -n "$model" ]]; then
+      printf '%s\n' "$model"
+      return
+    fi
+  done
+
+  printf '%s\n' "azure::gpt-5.3-codex"
+}
+
+MODEL_CANDIDATES=()
+add_unique_model() {
+  local candidate="$1"
+  local existing=""
+  if [[ -z "$candidate" ]]; then
+    return
+  fi
+  for existing in "${MODEL_CANDIDATES[@]}"; do
+    if [[ "$existing" == "$candidate" ]]; then
+      return
+    fi
+  done
+  MODEL_CANDIDATES+=("$candidate")
+}
+
+build_model_candidates() {
+  local token=""
+  local resolved_default=""
+  if [[ -n "${A2A_LLM_MODEL_PRIORITY:-}" ]]; then
+    for token in ${A2A_LLM_MODEL_PRIORITY//,/ }; do
+      add_unique_model "$token"
+    done
+  fi
+  if [[ "${#MODEL_CANDIDATES[@]}" -eq 0 ]]; then
+    resolved_default="$(resolve_qgenie_default_model)"
+    add_unique_model "anthropic::claude-4-6-sonnet"
+    add_unique_model "anthropic::claude-4-5-sonnet"
+    add_unique_model "$resolved_default"
+    add_unique_model "azure::gpt-5.3-codex"
+  fi
+}
+
 if [[ ! -d .a2a ]]; then
   echo "Missing .a2a workspace. Run: python -m a2a_cli.main init" >&2
   exit 1
@@ -45,8 +110,19 @@ fi
 echo "[suite] static compile checks"
 python -m py_compile a2a_cli/main.py a2a_cli/config.py a2a_cli/prior_review.py
 
-echo "[suite] unit tests"
-python -m unittest discover -s tests -p 'test_*.py' -v
+echo "[suite] unit tests (pytest)"
+if "$PYTHON_BIN" - <<'PY'
+import importlib.util
+import sys
+
+sys.exit(0 if importlib.util.find_spec("pytest") else 1)
+PY
+then
+  PYTHONPATH=. "$PYTHON_BIN" -m pytest -q
+else
+  echo "pytest not installed; falling back to unittest discover." >&2
+  "$PYTHON_BIN" -m unittest discover -s tests -p 'test_*.py' -v
+fi
 
 echo "[suite] deterministic autonomous smoke"
 SMOKE_OUT="$(
@@ -96,9 +172,6 @@ if [[ "$WITH_LLM" == "1" ]]; then
     echo "qgenie not found; skipping --with-llm check." >&2
   else
     QGENIE_LLM_CMD=(qgenie agent exec)
-    if qgenie codex-exec --help >/dev/null 2>&1; then
-      QGENIE_LLM_CMD=(qgenie codex-exec)
-    fi
     PROMPT="$(mktemp)"
     OUT="$(mktemp)"
     LOG="$(mktemp)"
@@ -106,16 +179,47 @@ if [[ "$WITH_LLM" == "1" ]]; then
     cat >"$PROMPT" <<'EOF'
 Return a minimal valid JSON object matching schema.
 EOF
-    set +e
-    timeout 90 "${QGENIE_LLM_CMD[@]}" \
-      --cd "$WATCH_PATH" \
-      --skip-git-repo-check \
-      --full-auto \
-      --output-schema "$ROOT/schemas/reviewer_findings.schema.json" \
-      --output-last-message "$OUT" \
-      - < "$PROMPT" >"$LOG" 2>&1
-    rc=$?
-    set -e
+    rc=1
+    if qgenie codex-exec --help >/dev/null 2>&1; then
+      build_model_candidates
+      if [[ "${#MODEL_CANDIDATES[@]}" -eq 0 ]]; then
+        MODEL_CANDIDATES=("azure::gpt-5.3-codex")
+      fi
+      per_model_timeout=$((90 / ${#MODEL_CANDIDATES[@]}))
+      if [[ "$per_model_timeout" -lt 30 ]]; then
+        per_model_timeout=30
+      fi
+      for model in "${MODEL_CANDIDATES[@]}"; do
+        echo "[suite] llm schema model attempt: $model" >&2
+        : >"$OUT"
+        : >"$LOG"
+        set +e
+        timeout "$per_model_timeout" qgenie codex-exec \
+          -m "$model" \
+          --cd "$WATCH_PATH" \
+          --skip-git-repo-check \
+          --full-auto \
+          --output-schema "$ROOT/schemas/reviewer_findings.schema.json" \
+          --output-last-message "$OUT" \
+          - < "$PROMPT" >"$LOG" 2>&1
+        rc=$?
+        set -e
+        if [[ $rc -eq 0 ]]; then
+          break
+        fi
+      done
+    else
+      set +e
+      timeout 90 "${QGENIE_LLM_CMD[@]}" \
+        --cd "$WATCH_PATH" \
+        --skip-git-repo-check \
+        --full-auto \
+        --output-schema "$ROOT/schemas/reviewer_findings.schema.json" \
+        --output-last-message "$OUT" \
+        - < "$PROMPT" >"$LOG" 2>&1
+      rc=$?
+      set -e
+    fi
     if [[ $rc -ne 0 ]]; then
       cat "$LOG" >&2
       echo "LLM schema smoke failed." >&2

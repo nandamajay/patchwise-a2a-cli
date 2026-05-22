@@ -48,9 +48,31 @@ class EmailBridgeTests(unittest.TestCase):
                 "Link: https://lore.kernel.org/r/20260413.1@foo",
                 [patch],
             )
-            self.assertIsNotNone(inferred)
-            self.assertEqual(inferred["command"], "run")
-            self.assertEqual(inferred["mode"], "attachment")
+        self.assertIsNotNone(inferred)
+        self.assertEqual(inferred["command"], "run")
+        self.assertEqual(inferred["mode"], "attachment")
+
+    def test_auto_infer_github_request_without_explicit_command(self) -> None:
+        inferred = _infer_auto_run_request(
+            "Review request",
+            "Please review: https://github.com/openai/sample/pull/42",
+            [],
+        )
+        self.assertIsNotNone(inferred)
+        self.assertEqual(inferred["command"], "run")
+        self.assertEqual(inferred["mode"], "github")
+        self.assertEqual(inferred["params"]["PR"], "https://github.com/openai/sample/pull/42")
+
+    def test_auto_infer_gerrit_request_without_explicit_command(self) -> None:
+        inferred = _infer_auto_run_request(
+            "Review request",
+            "Please review: https://review.example.com/c/project/+/12345/7",
+            [],
+        )
+        self.assertIsNotNone(inferred)
+        self.assertEqual(inferred["command"], "run")
+        self.assertEqual(inferred["mode"], "gerrit")
+        self.assertIn("CHANGE", inferred["params"])
 
     def test_parse_command_from_subject_with_body_params(self) -> None:
         parsed = parse_a2a_command(
@@ -181,6 +203,78 @@ class EmailBridgeTests(unittest.TestCase):
                 )
                 self.assertEqual(status, "error")
                 self.assertIn("No .patch/.diff attachments", response)
+            finally:
+                store.close()
+
+    def test_handle_run_github_schedules_loop(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg = load_bridge_config(
+                root,
+                {
+                    "state_db": str(root / ".a2a" / "email_bridge" / "bridge.db"),
+                    "inbox_dir": str(root / ".a2a" / "email_bridge" / "inbox"),
+                },
+            )
+            store = BridgeStore(cfg.state_db)
+            try:
+                with unittest.mock.patch(
+                    "a2a_cli.email_bridge._spawn_loop_and_track",
+                    return_value=(111, "sess-github", root / "run.log"),
+                ) as spawn_mock:
+                    status, response = handle_command(
+                        cfg,
+                        store,
+                        "user@example.com",
+                        {
+                            "command": "run",
+                            "mode": "github",
+                            "params": {"PR": "https://github.com/openai/sample/pull/42"},
+                        },
+                        [],
+                    )
+                self.assertEqual(status, "ok")
+                self.assertIn("GitHub PR review scheduled", response)
+                cmd = spawn_mock.call_args.args[3]
+                self.assertIn("--github-pr", cmd)
+            finally:
+                store.close()
+
+    def test_handle_run_gerrit_schedules_loop(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg = load_bridge_config(
+                root,
+                {
+                    "state_db": str(root / ".a2a" / "email_bridge" / "bridge.db"),
+                    "inbox_dir": str(root / ".a2a" / "email_bridge" / "inbox"),
+                },
+            )
+            store = BridgeStore(cfg.state_db)
+            try:
+                with unittest.mock.patch(
+                    "a2a_cli.email_bridge._spawn_loop_and_track",
+                    return_value=(112, "sess-gerrit", root / "run.log"),
+                ) as spawn_mock:
+                    status, response = handle_command(
+                        cfg,
+                        store,
+                        "user@example.com",
+                        {
+                            "command": "run",
+                            "mode": "gerrit",
+                            "params": {
+                                "CHANGE": "12345",
+                                "GERRIT_BASE_URL": "https://review.example.com",
+                            },
+                        },
+                        [],
+                    )
+                self.assertEqual(status, "ok")
+                self.assertIn("Gerrit change review scheduled", response)
+                cmd = spawn_mock.call_args.args[3]
+                self.assertIn("--gerrit-change", cmd)
+                self.assertIn("--gerrit-base-url", cmd)
             finally:
                 store.close()
 
