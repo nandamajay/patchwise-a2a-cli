@@ -89,6 +89,10 @@ _LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+")
 _PATCH_NEW_FILE_RE = re.compile(r"^\+\+\+ b/(.+)$")
 _DT_PROPERTY_ASSIGN_RE = re.compile(r"^([A-Za-z0-9,._+-]+)\s*=")
 _DTS_FILE_RE = re.compile(r"(^|/)arch/arm64/boot/dts/.+\.dtsi?$")
+_CHECKPATCH_TOTALS_RE = re.compile(
+    r"total:\s*(?P<errors>\d+)\s+errors?,\s*(?P<warnings>\d+)\s+warnings?,\s*(?P<checks>\d+)\s+checks?",
+    re.IGNORECASE,
+)
 _GITHUB_PR_URL_RE = re.compile(r"^https?://github\.com/(?P<owner>[^/\s]+)/(?P<repo>[^/\s]+)/pull/(?P<number>\d+)(?:[/?#].*)?$", re.IGNORECASE)
 _GITHUB_PR_SHORT_RE = re.compile(r"^(?P<owner>[^/\s]+)/(?P<repo>[^#\s]+)#(?P<number>\d+)$")
 _GERRIT_CHANGE_URL_RE = re.compile(r"^https?://(?P<host>[^/\s]+)/.*/\+/(?P<change>\d+)(?:[/?#].*)?$", re.IGNORECASE)
@@ -126,6 +130,7 @@ _DOWNSTREAM_DT_PROPERTIES = {
 _DOWNSTREAM_DT_LINE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r'^compatible\s*=\s*"qcom,swr-mstr"'), 'downstream-only compatible "qcom,swr-mstr"'),
 ]
+_SUGGESTED_BY_TRAILER_RE = re.compile(r"^\s*Suggested-by:\s*(.+?)\s*$", re.IGNORECASE)
 
 
 def _echo(*args: object, sep: str = " ", end: str = "\n") -> None:
@@ -995,6 +1000,99 @@ def _patchset_name_for_path(path: Path) -> str:
     return path.stem
 
 
+def _iter_patchset_artifacts(path: Path) -> list[Path]:
+    if not path.exists() or not path.is_dir():
+        return []
+
+    artifacts: list[Path] = []
+    artifacts.extend(sorted(p for p in path.rglob("*.patches") if p.is_dir()))
+    artifacts.extend(sorted(p for p in path.rglob("*.cover") if p.is_file()))
+    artifacts.extend(sorted(p for p in path.rglob("*.mbx") if p.is_file()))
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for artifact in artifacts:
+        key = str(artifact.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(artifact)
+    return deduped
+
+
+def _group_patchset_artifacts(path: Path) -> dict[str, list[Path]]:
+    grouped: dict[str, list[Path]] = {}
+    for artifact in _iter_patchset_artifacts(path):
+        key = _patchset_name_for_path(artifact)
+        grouped.setdefault(key, []).append(artifact)
+    return grouped
+
+
+def _versioned_patchset_families(path: Path) -> dict[str, list[Path]]:
+    grouped = _group_patchset_artifacts(path)
+    return {
+        name: artifacts
+        for name, artifacts in grouped.items()
+        if _extract_revision_from_name(name) > 0
+    }
+
+
+def _latest_patchset_family_mtime(artifacts: list[Path]) -> float:
+    latest = 0.0
+    for artifact in artifacts:
+        try:
+            latest = max(latest, float(artifact.stat().st_mtime))
+        except OSError:
+            continue
+    return latest
+
+
+def _select_canonical_patchset_family(path: Path, preferred: str | None = None) -> str:
+    versioned = _versioned_patchset_families(path)
+    if not versioned:
+        return ""
+    preferred_name = str(preferred or "").strip()
+    if preferred_name and preferred_name in versioned:
+        return preferred_name
+    ranked = sorted(
+        versioned.items(),
+        key=lambda row: (
+            _extract_revision_from_name(row[0]),
+            _latest_patchset_family_mtime(row[1]),
+            row[0],
+        ),
+    )
+    return ranked[-1][0]
+
+
+def _prune_stale_versioned_patchset_families(
+    path: Path,
+    preferred: str | None = None,
+) -> tuple[str, list[str]]:
+    if not path.exists() or not path.is_dir():
+        return "", []
+
+    versioned = _versioned_patchset_families(path)
+    if len(versioned) <= 1:
+        canonical = next(iter(versioned), "")
+        return canonical, []
+
+    canonical = _select_canonical_patchset_family(path, preferred=preferred)
+    pruned: list[str] = []
+    for family, artifacts in sorted(versioned.items()):
+        if family == canonical:
+            continue
+        for artifact in artifacts:
+            if not artifact.exists():
+                continue
+            if artifact.is_dir():
+                shutil.rmtree(artifact, ignore_errors=True)
+            else:
+                artifact.unlink(missing_ok=True)
+        pruned.append(family)
+    return canonical, pruned
+
+
 def _normalize_subject_body(body: str, *, version: int, index: int, total: int) -> str:
     tokens = [tok for tok in body.strip().split() if tok]
     kept: list[str] = []
@@ -1710,6 +1808,16 @@ def _generate_lore_next_version(root: Path, session: dict) -> dict:
     # Keep vN as a directory even when the source watch_path is a single patch file.
     copy_target = output / source.name if source.is_file() else output
     _copy_respin_source(source, copy_target, force=False)
+    source_patchset_name = _select_canonical_patchset_family(source)
+    canonical_patchset_name = ""
+    pruned_patchset_families: list[str] = []
+    if output.is_dir():
+        canonical_patchset_name, pruned_patchset_families = _prune_stale_versioned_patchset_families(
+            output,
+            preferred=source_patchset_name or None,
+        )
+        if not source_patchset_name:
+            source_patchset_name = canonical_patchset_name
     _materialize_cover_patch(output)
 
     patch_files = _collect_active_patch_files(output)
@@ -1754,6 +1862,8 @@ def _generate_lore_next_version(root: Path, session: dict) -> dict:
         "kind": "lore_copy",
         "session_id": session_id,
         "source_watch_path": str(source),
+        "source_patchset_name": source_patchset_name,
+        "pruned_patchset_families": pruned_patchset_families,
         "output_path": str(output),
         "patch_count": int(non_cover_patch_count),
         "next_version": next_version,
@@ -1860,6 +1970,7 @@ def _auto_generate_next_version(root: Path, session: dict) -> dict:
             "kind": "git_respin",
             "session_id": session_id,
             "source_watch_path": str(source_path) if source_raw else "",
+            "source_patchset_name": _select_canonical_patchset_family(source_path) if source_raw else "",
             "output_path": str(output_path),
             "patch_count": int(patch_count),
             "next_version": int(next_version),
@@ -1963,6 +2074,13 @@ def _validate_patchset_artifact_coherence(output_path: Path) -> list[str]:
     issues: list[str] = []
     if not output_path.exists():
         return [f"output path missing: {output_path}"]
+
+    versioned_families = sorted(_versioned_patchset_families(output_path).keys())
+    if len(versioned_families) > 1:
+        issues.append(
+            "multiple versioned patchset families detected in output: "
+            + ", ".join(versioned_families)
+        )
 
     patch_dirs = sorted(p for p in output_path.rglob("*.patches") if p.is_dir())
     if not patch_dirs:
@@ -2134,16 +2252,97 @@ def _validate_cover_changelog_quality(output_path: Path) -> list[str]:
     return issues
 
 
-def _validate_respin_delta(source_watch_path: Path, output_path: Path) -> list[str]:
-    issues: list[str] = []
+def _patchset_name_for_patch_file(path: Path, scope_root: Path) -> str:
     try:
-        source_patches = [p for p in _collect_active_patch_files(source_watch_path) if not _is_cover_patch_file(p)]
+        relative = path.resolve().relative_to(scope_root.resolve())
+    except Exception:
+        relative = None
+
+    parents = [path.parent, *path.parents]
+    for parent in parents:
+        if parent.name.endswith(".patches"):
+            return _patchset_name_for_path(parent)
+        if relative is not None and parent == scope_root:
+            break
+    return ""
+
+
+def _collect_non_cover_patch_files(
+    path: Path,
+    patchset_name: str | None = None,
+) -> tuple[list[Path], bool]:
+    all_patches = [p for p in _collect_active_patch_files(path) if not _is_cover_patch_file(p)]
+    wanted = str(patchset_name or "").strip()
+    if not wanted:
+        return all_patches, True
+
+    if path.is_dir():
+        targeted_dirs = sorted(
+            p
+            for p in path.rglob("*.patches")
+            if p.is_dir() and _patchset_name_for_path(p) == wanted
+        )
+        from_series: list[Path] = []
+        for patch_dir in targeted_dirs:
+            for entry in _canonical_series_patch_entries(patch_dir):
+                candidate = (patch_dir / entry).resolve()
+                if not candidate.is_file() or candidate.suffix != ".patch":
+                    continue
+                if _is_cover_patch_file(candidate):
+                    continue
+                from_series.append(candidate)
+        if from_series:
+            deduped: list[Path] = []
+            seen: set[str] = set()
+            for patch in from_series:
+                key = str(patch.resolve())
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(patch)
+            return deduped, True
+
+    filtered = [
+        patch
+        for patch in all_patches
+        if _patchset_name_for_patch_file(patch, path) == wanted
+    ]
+    if filtered:
+        return filtered, True
+    return all_patches, False
+
+
+def _validate_respin_delta(
+    source_watch_path: Path,
+    output_path: Path,
+    source_patchset_name: str | None = None,
+) -> list[str]:
+    issues: list[str] = []
+    wanted_patchset = str(source_patchset_name or "").strip()
+    try:
+        source_patches, source_family_matched = _collect_non_cover_patch_files(
+            source_watch_path,
+            patchset_name=wanted_patchset or None,
+        )
     except Exception as exc:
         return [f"cannot collect source patch files: {exc}"]
     try:
-        output_patches = [p for p in _collect_active_patch_files(output_path) if not _is_cover_patch_file(p)]
+        output_patches, output_family_matched = _collect_non_cover_patch_files(
+            output_path,
+            patchset_name=wanted_patchset or None,
+        )
     except Exception as exc:
         return [f"cannot collect generated patch files: {exc}"]
+
+    if wanted_patchset:
+        if not source_family_matched:
+            issues.append(
+                f"source patchset family '{wanted_patchset}' not found in {source_watch_path}"
+            )
+        if not output_family_matched:
+            issues.append(
+                f"output patchset family '{wanted_patchset}' not found in {output_path}"
+            )
 
     if len(source_patches) != len(output_patches):
         issues.append(
@@ -2349,6 +2548,9 @@ def _run_post_respin_reviewer_validation(
 def _run_post_respin_checkpatch(
     output_path: Path,
     kernel_root: Path | None,
+    *,
+    fail_on_warnings: bool = False,
+    fail_on_checks: bool = False,
 ) -> dict:
     payload: dict = {
         "ran": False,
@@ -2387,15 +2589,286 @@ def _run_post_respin_checkpatch(
         cmd = f"{shlex.quote(str(checkpatch))} --no-tree --strict {shlex.quote(str(patch))}"
         result = run_shell_command(cmd, cwd=kernel_root, env=dict(os.environ))
         rc = int(result.get("returncode", 1))
+        stdout = str(result.get("stdout") or "")
+        stderr = str(result.get("stderr") or "")
+        effective_ok, errors, warnings, checks = _is_checkpatch_effective_pass(
+            rc=rc,
+            stdout=stdout,
+            stderr=stderr,
+            fail_on_warnings=fail_on_warnings,
+            fail_on_checks=fail_on_checks,
+        )
         row = {
             "patch": str(patch),
             "returncode": rc,
-            "ok": rc == 0,
+            "ok": bool(effective_ok),
+            "errors": errors,
+            "warnings": warnings,
+            "checks": checks,
+            "normalized_pass": bool(rc != 0 and effective_ok),
         }
         payload["results"].append(row)
-        if rc != 0:
+        if not effective_ok:
             payload["ok"] = False
             payload["issues"].append(f"checkpatch failed for {patch.name} (rc={rc})")
+    return payload
+
+
+def _run_post_respin_trailer_hygiene(
+    output_path: Path,
+    report_dir: Path,
+    cfg: dict,
+) -> dict:
+    payload: dict = {
+        "ran": False,
+        "ok": True,
+        "files_checked": 0,
+        "suggested_by_total": 0,
+        "results": [],
+        "issues": [],
+    }
+    try:
+        patch_files = [p for p in _collect_active_patch_files(output_path) if not _is_cover_patch_file(p)]
+    except Exception as exc:
+        payload["issues"].append(f"cannot collect generated patch files: {exc}")
+        payload["ok"] = False
+        return payload
+    if not patch_files:
+        payload["issues"].append("no generated non-cover patch files found")
+        payload["ok"] = False
+        return payload
+
+    payload["ran"] = True
+    payload["files_checked"] = len(patch_files)
+    max_delta = int(cfg.get("post_respin_suggested_by_max_delta_lines", 120) or 120)
+
+    prior_actionable_emails: set[str] = set()
+    prior_comments_path = report_dir / "prior_comments.json"
+    if prior_comments_path.exists():
+        try:
+            prior_payload = load_json(prior_comments_path)
+            comments = prior_payload.get("comments", [])
+            if isinstance(comments, list):
+                for comment in comments:
+                    if not isinstance(comment, dict):
+                        continue
+                    if str(comment.get("comment_type") or "").strip().lower() != "actionable_review":
+                        continue
+                    sender = str(comment.get("from") or "").strip()
+                    email = parseaddr(sender)[1].strip().lower()
+                    if email:
+                        prior_actionable_emails.add(email)
+        except Exception:
+            pass
+
+    for patch in patch_files:
+        row: dict = {
+            "patch": str(patch),
+            "ok": True,
+            "suggested_by": [],
+            "delta_lines": 0,
+            "issues": [],
+        }
+        try:
+            lines = patch.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
+            row["ok"] = False
+            row["issues"].append(f"cannot read patch: {exc}")
+            payload["ok"] = False
+            payload["issues"].append(f"{patch.name}: cannot read patch: {exc}")
+            payload["results"].append(row)
+            continue
+
+        sep_idx = next((i for i, line in enumerate(lines) if line.strip() == "---"), -1)
+        message_lines = lines if sep_idx < 0 else lines[:sep_idx]
+        diff_lines = [] if sep_idx < 0 else lines[sep_idx + 1 :]
+
+        trailer_rows: list[tuple[int, str]] = []
+        for idx, line in enumerate(message_lines, start=1):
+            m = _SUGGESTED_BY_TRAILER_RE.match(line)
+            if m:
+                trailer_rows.append((idx, str(m.group(1) or "").strip()))
+        if not trailer_rows:
+            payload["results"].append(row)
+            continue
+
+        payload["suggested_by_total"] = int(payload["suggested_by_total"]) + len(trailer_rows)
+        body_lines = [ln for ln in message_lines if not _SUGGESTED_BY_TRAILER_RE.match(ln)]
+        body_text = "\n".join(body_lines).lower()
+
+        delta_lines = 0
+        for line in diff_lines:
+            if line.startswith(("+++", "---")):
+                continue
+            if line.startswith("+") or line.startswith("-"):
+                delta_lines += 1
+        row["delta_lines"] = delta_lines
+
+        if delta_lines > max_delta:
+            row["ok"] = False
+            row["issues"].append(
+                f"Suggested-by used on broad patch delta ({delta_lines} changed lines > {max_delta}); "
+                "use a focused patch for suggested change or drop Suggested-by trailer"
+            )
+
+        for msg_line, trailer_value in trailer_rows:
+            name, email = parseaddr(trailer_value)
+            email_l = email.strip().lower()
+            name_l = name.strip().lower()
+            row["suggested_by"].append({"line": msg_line, "value": trailer_value})
+
+            if not email_l:
+                row["ok"] = False
+                row["issues"].append(
+                    f"line {msg_line}: Suggested-by trailer missing valid email: {trailer_value!r}"
+                )
+                continue
+
+            if prior_actionable_emails and email_l not in prior_actionable_emails:
+                row["ok"] = False
+                row["issues"].append(
+                    f"line {msg_line}: Suggested-by email {email_l} not found in actionable prior comments"
+                )
+
+            has_scoped_rationale = (
+                ("suggest" in body_text)
+                and (email_l in body_text or (name_l and name_l in body_text))
+            )
+            if not has_scoped_rationale:
+                row["ok"] = False
+                row["issues"].append(
+                    f"line {msg_line}: Suggested-by present without scoped rationale in commit message body"
+                )
+
+        if not row["ok"]:
+            payload["ok"] = False
+            for issue in row["issues"]:
+                payload["issues"].append(f"{patch.name}: {issue}")
+
+        payload["results"].append(row)
+
+    return payload
+
+
+def _run_post_respin_applyability(
+    output_path: Path,
+    kernel_root: Path | None,
+) -> dict:
+    payload: dict = {
+        "ran": False,
+        "ok": True,
+        "kernel_root": str(kernel_root) if kernel_root else "",
+        "mode": "git-am-temp-worktree",
+        "files_checked": 0,
+        "results": [],
+        "issues": [],
+    }
+    if kernel_root is None:
+        payload["issues"].append("kernel tree not found; skipped applyability check")
+        payload["ok"] = False
+        return payload
+
+    is_git_repo = subprocess.run(
+        ["git", "-C", str(kernel_root), "rev-parse", "--is-inside-work-tree"],
+        text=True,
+        capture_output=True,
+    )
+    if is_git_repo.returncode != 0 or str(is_git_repo.stdout).strip().lower() != "true":
+        payload["issues"].append(f"kernel root is not a git work tree: {kernel_root}")
+        payload["ok"] = False
+        return payload
+
+    try:
+        patch_files = [p for p in _collect_active_patch_files(output_path) if not _is_cover_patch_file(p)]
+    except Exception as exc:
+        payload["issues"].append(f"cannot collect generated patch files: {exc}")
+        payload["ok"] = False
+        return payload
+    if not patch_files:
+        payload["issues"].append("no generated non-cover patch files found")
+        payload["ok"] = False
+        return payload
+
+    payload["ran"] = True
+    payload["files_checked"] = len(patch_files)
+
+    with tempfile.TemporaryDirectory(prefix="a2a-apply-check-") as td:
+        worktree = Path(td) / "apply-check"
+        add_proc = subprocess.run(
+            ["git", "-C", str(kernel_root), "worktree", "add", "--detach", str(worktree), "HEAD"],
+            text=True,
+            capture_output=True,
+        )
+        payload["results"].append(
+            {
+                "stage": "worktree_add",
+                "returncode": int(add_proc.returncode),
+                "ok": int(add_proc.returncode) == 0,
+            }
+        )
+        if add_proc.returncode != 0:
+            payload["ok"] = False
+            detail = (add_proc.stderr or add_proc.stdout or "").strip()
+            payload["issues"].append(
+                "unable to create temporary apply-check worktree"
+                + (f": {detail}" if detail else "")
+            )
+            return payload
+
+        try:
+            am_proc = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(worktree),
+                    "am",
+                    "--keep-cr",
+                    "--whitespace=nowarn",
+                    *[str(p) for p in patch_files],
+                ],
+                text=True,
+                capture_output=True,
+            )
+            payload["results"].append(
+                {
+                    "stage": "git_am",
+                    "returncode": int(am_proc.returncode),
+                    "ok": int(am_proc.returncode) == 0,
+                }
+            )
+            if am_proc.returncode != 0:
+                payload["ok"] = False
+                detail_lines = (am_proc.stderr or am_proc.stdout or "").splitlines()
+                detail = " | ".join(line.strip() for line in detail_lines[:6] if line.strip())
+                msg = "generated patch series does not apply cleanly with git am on target HEAD"
+                if detail:
+                    msg += f": {detail}"
+                payload["issues"].append(msg)
+        finally:
+            subprocess.run(
+                ["git", "-C", str(worktree), "am", "--abort"],
+                text=True,
+                capture_output=True,
+            )
+            remove_proc = subprocess.run(
+                ["git", "-C", str(kernel_root), "worktree", "remove", "--force", str(worktree)],
+                text=True,
+                capture_output=True,
+            )
+            payload["results"].append(
+                {
+                    "stage": "worktree_remove",
+                    "returncode": int(remove_proc.returncode),
+                    "ok": int(remove_proc.returncode) == 0,
+                }
+            )
+            if remove_proc.returncode != 0:
+                payload["ok"] = False
+                detail = (remove_proc.stderr or remove_proc.stdout or "").strip()
+                payload["issues"].append(
+                    "failed to remove temporary apply-check worktree"
+                    + (f": {detail}" if detail else "")
+                )
     return payload
 
 
@@ -2484,8 +2957,11 @@ def _run_post_respin_validation(
     cfg = _load_config_or_defaults(root)
     output_raw = str(next_version_payload.get("output_path") or "").strip()
     source_raw = str(next_version_payload.get("source_watch_path") or str(session.get("watch_path") or "")).strip()
+    source_patchset_name = str(next_version_payload.get("source_patchset_name") or "").strip()
     output_path = Path(output_raw).resolve() if output_raw else Path()
     source_path = Path(source_raw).resolve() if source_raw else Path()
+    if not source_patchset_name and source_path.exists():
+        source_patchset_name = _select_canonical_patchset_family(source_path)
 
     watch_raw = str(session.get("watch_path") or "").strip()
     kernel_root: Path | None = None
@@ -2506,9 +2982,15 @@ def _run_post_respin_validation(
 
     artifact_issues = _validate_patchset_artifact_coherence(output_path)
     changelog_issues = _validate_cover_changelog_quality(output_path)
-    delta_issues = _validate_respin_delta(source_path, output_path) if source_path.exists() else [
-        f"source watch path missing for delta check: {source_path}"
-    ]
+    delta_issues = (
+        _validate_respin_delta(
+            source_path,
+            output_path,
+            source_patchset_name=source_patchset_name or None,
+        )
+        if source_path.exists()
+        else [f"source watch path missing for delta check: {source_path}"]
+    )
 
     run_reviewer = bool(cfg.get("post_respin_run_reviewer", True))
     reviewer_payload = {
@@ -2526,6 +3008,31 @@ def _run_post_respin_validation(
         else:
             reviewer_payload = _run_post_respin_reviewer_validation(root, session, reviewer_cmd, output_path)
 
+    run_trailer_hygiene = bool(cfg.get("post_respin_trailer_hygiene", True))
+    trailer_hygiene_payload = {
+        "ran": False,
+        "ok": True,
+        "issues": [],
+    }
+    if run_trailer_hygiene:
+        trailer_hygiene_payload = _run_post_respin_trailer_hygiene(
+            output_path,
+            report_dir,
+            cfg,
+        )
+
+    run_applyability = bool(cfg.get("post_respin_applyability", True))
+    applyability_payload = {
+        "ran": False,
+        "ok": True,
+        "issues": [],
+    }
+    if run_applyability:
+        applyability_payload = _run_post_respin_applyability(
+            output_path,
+            kernel_root,
+        )
+
     run_checkpatch = bool(cfg.get("post_respin_checkpatch", True))
     checkpatch_payload = {
         "ran": False,
@@ -2536,6 +3043,8 @@ def _run_post_respin_validation(
         checkpatch_payload = _run_post_respin_checkpatch(
             output_path,
             kernel_root,
+            fail_on_warnings=bool(cfg.get("validation_gate_fail_on_warnings", False)),
+            fail_on_checks=bool(cfg.get("validation_gate_fail_on_checks", False)),
         )
 
     run_upstream_compat = bool(cfg.get("post_respin_upstream_compat", True))
@@ -2561,6 +3070,8 @@ def _run_post_respin_validation(
             "issues": delta_issues,
         },
         "reviewer_validation": reviewer_payload,
+        "trailer_hygiene": trailer_hygiene_payload,
+        "applyability": applyability_payload,
         "checkpatch": checkpatch_payload,
         "upstream_compatibility": upstream_compat_payload,
     }
@@ -2581,6 +3092,7 @@ def _run_post_respin_validation(
         "generated_at": _now_utc(),
         "output_path": str(output_path),
         "source_watch_path": str(source_path),
+        "source_patchset_name": source_patchset_name,
         "kernel_root": str(kernel_root) if kernel_root else "",
         "checks": checks,
         "failures": failures,
@@ -3699,11 +4211,52 @@ def _gate_artifacts(root: Path, session_id: str, round_no: int, reviewer_name: s
     }
 
 
+def _parse_checkpatch_totals(*streams: str) -> tuple[int | None, int | None, int | None]:
+    merged = "\n".join(str(s or "") for s in streams)
+    for line in merged.splitlines():
+        match = _CHECKPATCH_TOTALS_RE.search(line)
+        if not match:
+            continue
+        try:
+            errors = int(match.group("errors"))
+            warnings = int(match.group("warnings"))
+            checks = int(match.group("checks"))
+        except (TypeError, ValueError):
+            return None, None, None
+        return errors, warnings, checks
+    return None, None, None
+
+
+def _is_checkpatch_effective_pass(
+    *,
+    rc: int,
+    stdout: str,
+    stderr: str,
+    fail_on_warnings: bool,
+    fail_on_checks: bool,
+) -> tuple[bool, int | None, int | None, int | None]:
+    if rc == 0:
+        return True, 0, 0, 0
+
+    errors, warnings, checks = _parse_checkpatch_totals(stdout, stderr)
+    if errors is None:
+        # Could not parse totals; preserve original non-zero semantics.
+        return False, None, None, None
+
+    warning_violation = bool(fail_on_warnings and int(warnings or 0) > 0)
+    check_violation = bool(fail_on_checks and int(checks or 0) > 0)
+    if int(errors or 0) == 0 and not warning_violation and not check_violation:
+        return True, errors, warnings, checks
+    return False, errors, warnings, checks
+
+
 def _run_validation_gate(root: Path, session: dict, round_no: int) -> tuple[bool, bool]:
     cfg = _load_config_or_defaults(root)
     enabled = bool(cfg.get("validation_gate_enabled", True))
     strict = bool(cfg.get("validation_gate_strict", False))
     run_checkpatch = bool(cfg.get("validation_gate_checkpatch", True))
+    fail_on_warnings = bool(cfg.get("validation_gate_fail_on_warnings", False))
+    fail_on_checks = bool(cfg.get("validation_gate_fail_on_checks", False))
     timeout_sec = int(cfg.get("validation_gate_timeout_sec", 300))
     custom_cmd = str(cfg.get("validation_gate_command") or "").strip()
 
@@ -3793,11 +4346,29 @@ def _run_validation_gate(root: Path, session: dict, round_no: int) -> tuple[bool
         wrapped = f"timeout {timeout_sec} {command}" if timeout_sec > 0 else command
         result = run_shell_command(wrapped, cwd=cwd, env=dict(os.environ))
         rc = int(result["returncode"])
+        stdout = str(result.get("stdout") or "")
+        stderr = str(result.get("stderr") or "")
+        effective_ok = rc == 0
+        errors = warnings = checks = None
+        if str(cmd_info.get("name") or "") == "checkpatch":
+            effective_ok, errors, warnings, checks = _is_checkpatch_effective_pass(
+                rc=rc,
+                stdout=stdout,
+                stderr=stderr,
+                fail_on_warnings=fail_on_warnings,
+                fail_on_checks=fail_on_checks,
+            )
         cmd_record = dict(cmd_info)
         cmd_record["returncode"] = rc
-        cmd_record["ok"] = rc == 0
+        cmd_record["ok"] = effective_ok
+        if errors is not None:
+            cmd_record["errors"] = int(errors)
+            cmd_record["warnings"] = int(warnings or 0)
+            cmd_record["checks"] = int(checks or 0)
+            if rc != 0 and effective_ok:
+                cmd_record["normalized_pass"] = True
         payload["commands"].append(cmd_record)
-        if rc != 0:
+        if not effective_ok:
             gate_passed = False
             payload["failures"] = int(payload["failures"]) + 1
 
@@ -3807,12 +4378,13 @@ def _run_validation_gate(root: Path, session: dict, round_no: int) -> tuple[bool
                 f"cwd={cwd}",
                 f"command={wrapped}",
                 f"returncode={rc}",
+                f"effective_ok={effective_ok}",
                 "",
                 "stdout:",
-                result.get("stdout") or "",
+                stdout,
                 "",
                 "stderr:",
-                result.get("stderr") or "",
+                stderr,
                 "",
             ]
         )
@@ -3830,6 +4402,9 @@ def _run_validation_gate(root: Path, session: dict, round_no: int) -> tuple[bool
 
 
 def _run_lgtm_full_series_checkpatch(root: Path, session: dict, round_no: int, reviewer_name: str) -> dict:
+    cfg = _load_config_or_defaults(root)
+    fail_on_warnings = bool(cfg.get("lgtm_checkpatch_fail_on_warnings", False))
+    fail_on_checks = bool(cfg.get("lgtm_checkpatch_fail_on_checks", False))
     session_id = str(session.get("id") or "")
     report_dir = _round_files(root, session_id, round_no, reviewer_name)["report_dir"]
     report_path = report_dir / f"{_round_basename(round_no, 'lgtm-checkpatch')}.json"
@@ -3893,14 +4468,27 @@ def _run_lgtm_full_series_checkpatch(root: Path, session: dict, round_no: int, r
         cmd = f"{shlex.quote(str(checkpatch))} --no-tree --strict {shlex.quote(str(patch))}"
         result = run_shell_command(cmd, cwd=kernel_root, env=dict(os.environ))
         rc = int(result.get("returncode", 1))
+        stdout = str(result.get("stdout") or "")
+        stderr = str(result.get("stderr") or "")
+        effective_ok, errors, warnings, checks = _is_checkpatch_effective_pass(
+            rc=rc,
+            stdout=stdout,
+            stderr=stderr,
+            fail_on_warnings=fail_on_warnings,
+            fail_on_checks=fail_on_checks,
+        )
         payload["results"].append(
             {
                 "patch": str(patch),
                 "returncode": rc,
-                "ok": rc == 0,
+                "ok": bool(effective_ok),
+                "errors": errors,
+                "warnings": warnings,
+                "checks": checks,
+                "normalized_pass": bool(rc != 0 and effective_ok),
             }
         )
-        if rc != 0:
+        if not effective_ok:
             payload["ok"] = False
             payload["issues"].append(f"checkpatch failed for {patch.name} (rc={rc})")
 
@@ -4356,6 +4944,98 @@ def _finding_identity(finding: dict) -> str:
     return f"anon-{_finding_fingerprint(finding)[:12]}"
 
 
+def _findings_gate_policy(cfg: dict) -> tuple[str, bool, dict[str, int]]:
+    defaults = {"critical": 1, "high": 2, "medium": 2, "low": 3}
+    gate = cfg.get("findings_gate", {}) if isinstance(cfg, dict) else {}
+    mode = str(gate.get("mode", "quality")).strip().lower()
+    if mode not in {"quality", "strict"}:
+        mode = "quality"
+    always_block_prior = bool(gate.get("always_block_prior_comments", True))
+    raw_rounds = gate.get("persistence_rounds", {}) if isinstance(gate, dict) else {}
+    rounds = dict(defaults)
+    if isinstance(raw_rounds, dict):
+        for key in ("critical", "high", "medium", "low"):
+            val = raw_rounds.get(key)
+            try:
+                parsed = int(val)
+            except (TypeError, ValueError):
+                continue
+            if parsed >= 1:
+                rounds[key] = parsed
+    return mode, always_block_prior, rounds
+
+
+def _open_finding_map_from_rows(rows: list[dict]) -> dict[str, dict[str, str]]:
+    out: dict[str, dict[str, str]] = {}
+    for finding in rows:
+        if not isinstance(finding, dict):
+            continue
+        if str(finding.get("status", "")).lower() == "closed":
+            continue
+        fid = _finding_identity(finding)
+        out[fid] = {
+            "severity": str(finding.get("severity") or "low").strip().lower(),
+            "source_comment_id": str(finding.get("source_comment_id") or "").strip(),
+            "title": str(finding.get("title") or "").strip(),
+            "location": str(finding.get("location") or "").strip(),
+        }
+    return out
+
+
+def _quality_open_findings(
+    session: dict,
+    round_no: int,
+    findings: list[dict],
+    cfg: dict,
+) -> tuple[list[dict], list[dict]]:
+    mode, always_block_prior, persistence_rounds = _findings_gate_policy(cfg)
+    current_map = _open_finding_map_from_rows(findings)
+    if mode == "strict":
+        blocking = [dict(v, id=k, streak=1, required_streak=1) for k, v in current_map.items()]
+        return blocking, []
+
+    rounds = [
+        r for r in session.get("rounds", []) if int(r.get("round", 0) or 0) < int(round_no)
+    ]
+    rounds = sorted(rounds, key=lambda r: int(r.get("round", 0) or 0))
+    open_maps_by_round: dict[int, set[str]] = {}
+    for record in rounds:
+        rno = int(record.get("round", 0) or 0)
+        prior_rows = _extract_effective_round_findings(session, record)
+        open_maps_by_round[rno] = set(_open_finding_map_from_rows(prior_rows).keys())
+
+    blocking: list[dict] = []
+    advisory: list[dict] = []
+    for fid, meta in current_map.items():
+        severity = str(meta.get("severity") or "low").lower()
+        source_id = str(meta.get("source_comment_id") or "").strip()
+        required_streak = int(persistence_rounds.get(severity, persistence_rounds.get("low", 3)))
+
+        streak = 1
+        prev = int(round_no) - 1
+        while prev > 0 and fid in open_maps_by_round.get(prev, set()):
+            streak += 1
+            prev -= 1
+
+        entry = dict(meta)
+        entry["id"] = fid
+        entry["streak"] = streak
+        entry["required_streak"] = required_streak
+        if always_block_prior and _is_prior_source_id(source_id):
+            entry["required_streak"] = 1
+            blocking.append(entry)
+            continue
+
+        if streak >= required_streak:
+            blocking.append(entry)
+        else:
+            advisory.append(entry)
+
+    blocking.sort(key=lambda e: (_severity_rank(str(e.get("severity") or "")), str(e.get("id") or "")))
+    advisory.sort(key=lambda e: (_severity_rank(str(e.get("severity") or "")), str(e.get("id") or "")))
+    return blocking, advisory
+
+
 def _build_round_runtime_summary(
     root: Path,
     session: dict,
@@ -4599,6 +5279,7 @@ def _write_round_runtime_summary(root: Path, session: dict, round_no: int, summa
 
 def _run_agent_step(root: Path, session: dict, role: str, command: str, round_no: int) -> int:
     cfg = _load_config_or_defaults(root)
+    session = _ensure_session_worktrees(root, session)
     reviewer_name = str(session.get("reviewer_name", "aryabhatta"))
     builder_display_name = _resolve_builder_display_name(session=session, cfg=cfg)
     reviewer_display_name = _resolve_reviewer_display_name(session=session, cfg=cfg)
@@ -4624,6 +5305,23 @@ def _run_agent_step(root: Path, session: dict, role: str, command: str, round_no
 
     env = _agent_env(session, round_no, files, role, cfg)
     result = run_shell_command(command, cwd=cwd, env=env)
+    retried_after_timeout = False
+    first_result = result
+    if int(result.get("returncode", 1)) == 124:
+        base_timeout = 900
+        try:
+            base_timeout = int(env.get("A2A_LLM_TIMEOUT_SEC", "900"))
+        except (TypeError, ValueError):
+            base_timeout = 900
+        retry_timeout = max(1200, min(3600, base_timeout * 2))
+        retry_env = dict(env)
+        retry_env["A2A_LLM_TIMEOUT_SEC"] = str(retry_timeout)
+        retried_after_timeout = True
+        _echo(
+            f"{role_display_name} timed out (rc=124); retrying once with "
+            f"A2A_LLM_TIMEOUT_SEC={retry_timeout}."
+        )
+        result = run_shell_command(command, cwd=cwd, env=retry_env)
 
     with log_path.open("w", encoding="utf-8") as f:
         f.write(f"role={role}\n")
@@ -4631,6 +5329,10 @@ def _run_agent_step(root: Path, session: dict, role: str, command: str, round_no
         f.write(f"cwd={cwd}\n")
         f.write(f"command={command}\n")
         f.write(f"returncode={result['returncode']}\n\n")
+        if retried_after_timeout:
+            f.write("retry_after_timeout=true\n")
+            f.write(f"initial_returncode={first_result.get('returncode')}\n")
+            f.write(f"retry_returncode={result.get('returncode')}\n\n")
         f.write("stdout:\n")
         f.write(result["stdout"] or "")
         f.write("\n\nstderr:\n")
@@ -5799,6 +6501,69 @@ def _worktree_paths_for_session(session: dict) -> tuple[Path, Path]:
     return Path(str(builder_raw)).resolve(), Path(str(reviewer_raw)).resolve()
 
 
+def _ensure_session_worktrees(root: Path, session: dict) -> dict:
+    reviewer_name = str(session.get("reviewer_name", "aryabhatta"))
+    repo_raw = str(session.get("repo_path") or "").strip()
+    if not repo_raw:
+        raise RuntimeError("Session is missing repo_path; unable to prepare worktrees.")
+    repo = Path(repo_raw).expanduser().resolve()
+    if not repo.exists():
+        raise RuntimeError(f"Session repo_path not found: {repo}")
+    if not _git_ok(repo, "rev-parse", "--show-toplevel"):
+        raise RuntimeError(f"Session repo_path is not a git repository: {repo}")
+
+    worktrees = session.get("worktrees")
+    changed = False
+    if not isinstance(worktrees, dict):
+        worktrees = {}
+        session["worktrees"] = worktrees
+        changed = True
+
+    base_dir = root / A2A_DIRNAME / "worktrees"
+    builder_default = base_dir / "builder"
+    reviewer_default = base_dir / reviewer_name
+    builder_path = Path(str(worktrees.get("builder") or builder_default)).expanduser().resolve()
+    reviewer_path = Path(str(worktrees.get(reviewer_name) or reviewer_default)).expanduser().resolve()
+
+    if str(worktrees.get("builder") or "") != str(builder_path):
+        worktrees["builder"] = str(builder_path)
+        changed = True
+    if str(worktrees.get(reviewer_name) or "") != str(reviewer_path):
+        worktrees[reviewer_name] = str(reviewer_path)
+        changed = True
+
+    branch = str(session.get("branch") or "").strip()
+
+    def _ensure_one(path: Path, role: str) -> None:
+        if path.exists():
+            if not (path / ".git").exists():
+                raise RuntimeError(
+                    f"{role} worktree path exists but is not a git worktree: {path}. "
+                    "Run 'a2a prepare --force' to recreate worktrees."
+                )
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if role == "builder":
+            if branch and _git_ok(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"):
+                _git(repo, "worktree", "add", "--force", str(path), branch)
+            elif branch:
+                _git(repo, "worktree", "add", "--force", "-b", branch, str(path), "HEAD")
+            else:
+                _git(repo, "worktree", "add", "--force", str(path), "HEAD")
+        else:
+            target_ref = branch or "HEAD"
+            _git(repo, "worktree", "add", "--force", "--detach", str(path), target_ref)
+        _echo(f"Recovered missing {role} worktree: {path}")
+
+    _ensure_one(builder_path, "builder")
+    _ensure_one(reviewer_path, reviewer_name)
+
+    if changed and session.get("id"):
+        session["updated_at"] = _now_utc()
+        _write_session(root, session)
+    return session
+
+
 def _worktree_lock_path(root: Path, session: dict) -> Path:
     builder_path, reviewer_path = _worktree_paths_for_session(session)
     key = hashlib.sha1(f"{builder_path}|{reviewer_path}".encode("utf-8")).hexdigest()[:20]
@@ -6354,8 +7119,35 @@ def _advance_session(root: Path, session_id: str) -> int:
 
     round_files = _round_files(root, session_id, round_no, reviewer_name)
     reviewer_verdict = _reviewer_verdict_for_round(root, session_id, round_no, reviewer_name)
-    should_lgtm, lgtm_reason = should_issue_lgtm(str(round_files["findings"]), reviewer_verdict)
-    if should_lgtm and int(open_count) == 0:
+    gate_mode, _gate_prior_block, _gate_rounds = _findings_gate_policy(cfg_for_round)
+    blocking_open_items, advisory_open_items = _quality_open_findings(
+        session=session,
+        round_no=round_no,
+        findings=findings,
+        cfg=cfg_for_round,
+    )
+    effective_open_count = len(blocking_open_items)
+
+    if gate_mode == "strict":
+        should_lgtm, lgtm_reason = should_issue_lgtm(str(round_files["findings"]), reviewer_verdict)
+    else:
+        if effective_open_count > 0:
+            should_lgtm = False
+            lgtm_reason = (
+                f"quality findings gate: blocking findings = {effective_open_count} "
+                f"(raw open = {open_count})"
+            )
+        elif score_decision.get("low_quality_reviewer"):
+            should_lgtm = False
+            lgtm_reason = "reviewer confidence low — hold LGTM despite no persistent blocking findings"
+        else:
+            should_lgtm = True
+            lgtm_reason = (
+                f"quality findings gate: no persistent blocking findings "
+                f"(raw open = {open_count}, advisory = {len(advisory_open_items)})"
+            )
+
+    if should_lgtm and int(effective_open_count) == 0:
         guard_enabled = bool(cfg_for_round.get("reviewer_consistency_guard", True))
         if guard_enabled:
             reviewer_log = root / A2A_DIRNAME / "logs" / session_id / f"{_round_basename(round_no, 'reviewer')}.log"
@@ -6377,36 +7169,40 @@ def _advance_session(root: Path, session_id: str) -> int:
     if not should_lgtm:
         max_rounds_local = int(session.get("max_rounds", 1))
         next_round_hint = round_no + 1
+        findings_for_banner = findings if gate_mode == "strict" else blocking_open_items
         high_open = len(
             [
                 row
-                for row in findings
+                for row in findings_for_banner
                 if isinstance(row, dict)
-                and str(row.get("status", "open")).lower() != "closed"
                 and str(row.get("severity", "")).lower() in {"critical", "high"}
             ]
         )
         medium_open = len(
             [
                 row
-                for row in findings
+                for row in findings_for_banner
                 if isinstance(row, dict)
-                and str(row.get("status", "open")).lower() != "closed"
                 and str(row.get("severity", "")).lower() == "medium"
             ]
         )
         top_issue = ""
-        for row in findings:
+        for row in findings_for_banner:
             if not isinstance(row, dict):
-                continue
-            if str(row.get("status", "open")).lower() == "closed":
                 continue
             top_issue = str(row.get("title") or "")
             if top_issue:
                 break
         _echo("┌──────────────────────────────────────────────────────────────────────┐")
         _echo(f"│ LGTM blocked: {lgtm_reason}")
-        _echo(f"│ Open: {open_count}  ·  High: {high_open}  ·  Medium: {medium_open}")
+        if gate_mode == "strict":
+            _echo(f"│ Open: {open_count}  ·  High: {high_open}  ·  Medium: {medium_open}")
+        else:
+            _echo(
+                "│ Blocking: "
+                f"{effective_open_count} (raw open: {open_count}, advisory: {len(advisory_open_items)})"
+                f"  ·  High: {high_open}  ·  Medium: {medium_open}"
+            )
         if top_issue:
             _echo(f"│ Top issue: {top_issue[:56]}")
         if round_no < max_rounds_local:
@@ -6415,10 +7211,16 @@ def _advance_session(root: Path, session_id: str) -> int:
             _echo(f"│ At max rounds ({max_rounds_local}); stopping rules apply")
         _echo("└──────────────────────────────────────────────────────────────────────┘")
 
-    if score_decision.get("block_lgtm"):
+    if score_decision.get("low_quality_reviewer"):
         should_lgtm = False
-    if score_decision.get("force_extra_round") and open_count > 0:
-        should_lgtm = False
+    elif gate_mode == "strict":
+        if score_decision.get("block_lgtm"):
+            should_lgtm = False
+        if score_decision.get("force_extra_round") and open_count > 0:
+            should_lgtm = False
+    else:
+        if score_decision.get("force_extra_round") and effective_open_count > 0:
+            should_lgtm = False
 
     lgtm_checkpatch_payload: dict | None = None
     if should_lgtm and bool(cfg_for_round.get("lgtm_full_series_checkpatch", True)):
