@@ -3,7 +3,9 @@ import unittest
 from pathlib import Path
 
 from a2a_cli.main import (
+    _collect_post_respin_repair_findings,
     _extract_findings_from_agent_output,
+    _reviewer_verdict_from_text,
     _validate_cover_changelog_quality,
     _validate_patchset_artifact_coherence,
     _validate_respin_delta,
@@ -94,6 +96,21 @@ class PostRespinValidationTests(unittest.TestCase):
             issues = _validate_patchset_artifact_coherence(out)
             self.assertEqual([], issues)
 
+    def test_patchset_artifact_coherence_rejects_mixed_versioned_families(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "out"
+            v5_dir = out / "v5_demo.patches"
+            v6_dir = out / "v6_demo.patches"
+            _write(v5_dir / "0001-a.patch", "Subject: [PATCH v5 1/1] a\n\n---\n")
+            _write(v5_dir / "series", "0001-a.patch\n")
+            _write(v6_dir / "0001-b.patch", "Subject: [PATCH v6 1/1] b\n\n---\n")
+            _write(v6_dir / "series", "0001-b.patch\n")
+            _write(out / "v5_demo.cover", "Subject: [PATCH v5 0/1] v5\n")
+            _write(out / "v6_demo.cover", "Subject: [PATCH v6 0/1] v6\n")
+
+            issues = _validate_patchset_artifact_coherence(out)
+            self.assertTrue(any("multiple versioned patchset families detected" in issue for issue in issues))
+
     def test_cover_changelog_quality_detects_tool_meta_text(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "out"
@@ -129,6 +146,75 @@ class PostRespinValidationTests(unittest.TestCase):
             )
             issues = _validate_respin_delta(src, out)
             self.assertTrue(any("touched-file drift" in issue for issue in issues))
+
+    def test_respin_delta_uses_requested_patchset_family(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "src"
+            out = root / "out"
+
+            _write(src / "v5_demo.patches" / "0001-old.patch", "Subject: [PATCH v5 1/1] old\n\n---\n")
+            _write(src / "v5_demo.patches" / "series", "0001-old.patch\n")
+            _write(src / "v6_demo.patches" / "0001-new.patch", "Subject: [PATCH v6 1/1] demo\n\n---\ndiff --git a/a.c b/a.c\n")
+            _write(src / "v6_demo.patches" / "series", "0001-new.patch\n")
+
+            _write(out / "v5_demo.patches" / "0001-old.patch", "Subject: [PATCH v7 1/1] old\n\n---\n")
+            _write(out / "v5_demo.patches" / "series", "0001-old.patch\n")
+            _write(out / "v6_demo.patches" / "0001-new.patch", "Subject: [PATCH v7 1/1] demo\n\n---\ndiff --git a/a.c b/a.c\n")
+            _write(out / "v6_demo.patches" / "series", "0001-new.patch\n")
+
+            issues = _validate_respin_delta(src, out, source_patchset_name="v6_demo")
+            self.assertEqual([], issues)
+
+    def test_collect_post_respin_repair_findings_rebuilds_post_respin_check_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            report_dir = Path(td)
+            _write(
+                report_dir / "post-respin-findings.json",
+                (
+                    '{"findings":['
+                    '{"severity":"medium","title":"old applyability open","location":"applyability:1",'
+                    '"evidence":["old"],"required_action":"old","status":"open",'
+                    '"source_comment_id":"post-respin:applyability"},'
+                    '{"severity":"low","title":"unrelated finding","location":"demo.patch:1",'
+                    '"evidence":["x"],"required_action":"fix","status":"open",'
+                    '"source_comment_id":"subsys-scan:demo"}'
+                    "]}\n"
+                ),
+            )
+
+            validation_payload = {
+                "checks": {
+                    "reviewer_validation": {"ok": True, "issues": []},
+                    "applyability": {"ran": True, "ok": True, "issues": []},
+                    "delta_guard": {"ok": False, "issues": ["subject drift"]},
+                }
+            }
+
+            findings = _collect_post_respin_repair_findings(report_dir, validation_payload)
+            by_id = {
+                str(row.get("source_comment_id")): str(row.get("status"))
+                for row in findings
+                if isinstance(row, dict)
+            }
+
+            self.assertEqual(by_id.get("subsys-scan:demo"), "open")
+            self.assertEqual(by_id.get("post-respin:applyability"), "closed")
+            self.assertEqual(by_id.get("post-respin:delta_guard"), "open")
+            self.assertEqual(
+                len([row for row in findings if str(row.get("source_comment_id")) == "post-respin:applyability"]),
+                1,
+            )
+
+    def test_reviewer_verdict_parser_uses_explicit_verdict_section(self) -> None:
+        text = (
+            "# Round 2: Aryabhatta Review\n\n"
+            "## Findings\n"
+            "- This line says LGTM in prose but is not the verdict.\n\n"
+            "## Verdict\n"
+            "- pending\n"
+        )
+        self.assertEqual(_reviewer_verdict_from_text(text), "REJECT")
 
 
 if __name__ == "__main__":

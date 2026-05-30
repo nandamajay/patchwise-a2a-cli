@@ -3117,41 +3117,62 @@ def _next_post_respin_repair_base_round(report_dir: Path) -> int:
     return max(1000, highest + 1)
 
 
-def _post_respin_extra_open_findings(validation_payload: dict) -> list[dict]:
+def _post_respin_check_findings(validation_payload: dict) -> list[dict]:
     checks = validation_payload.get("checks", {}) if isinstance(validation_payload, dict) else {}
     if not isinstance(checks, dict):
         return []
     out: list[dict] = []
-    seen: set[str] = set()
-    for check_name, row in checks.items():
+    for check_name in sorted(checks.keys()):
+        row = checks.get(check_name)
         if check_name == "reviewer_validation":
             continue
         if not isinstance(row, dict):
             continue
-        if bool(row.get("ok", False)):
+
+        issues_raw = row.get("issues", [])
+        issues: list[str] = []
+        if isinstance(issues_raw, list):
+            for item in issues_raw:
+                text = str(item or "").strip()
+                if text:
+                    issues.append(text)
+        elif isinstance(issues_raw, str):
+            text = issues_raw.strip()
+            if text:
+                issues.append(text)
+
+        ran = row.get("ran")
+        if ran is False and not issues:
             continue
-        issues = row.get("issues", [])
-        if not isinstance(issues, list):
-            continue
-        for issue in issues:
-            text = str(issue or "").strip()
-            if not text:
-                continue
-            key = f"{check_name.lower()}::{text.lower()}"
-            if key in seen:
-                continue
-            seen.add(key)
+
+        check_ok = bool(row.get("ok", False))
+        if check_ok:
             out.append(
                 {
-                    "severity": "medium",
-                    "title": f"Post-respin {check_name} check failed",
+                    "severity": "low",
+                    "title": f"Post-respin {check_name} check passed",
                     "location": f"{check_name}:1",
-                    "evidence": [text],
-                    "required_action": text,
-                    "status": "open",
+                    "evidence": ["check passed in latest validation"],
+                    "required_action": "None.",
+                    "status": "closed",
                     "source_comment_id": f"post-respin:{check_name}",
                 }
             )
+            continue
+
+        if not issues:
+            issues = ["check reported failure without details"]
+        out.append(
+            {
+                "severity": "medium",
+                "title": f"Post-respin {check_name} check failed",
+                "location": f"{check_name}:1",
+                "evidence": issues,
+                "required_action": issues[0],
+                "status": "open",
+                "source_comment_id": f"post-respin:{check_name}",
+            }
+        )
     return out
 
 
@@ -3163,20 +3184,38 @@ def _collect_post_respin_repair_findings(report_dir: Path, validation_payload: d
             base_findings = _load_findings_payload(findings_path)
         except Exception:
             base_findings = []
-    merged: list[dict] = []
-    seen: set[str] = set()
-    for row in base_findings + _post_respin_extra_open_findings(validation_payload):
+
+    merged_rows: list[dict] = []
+    for row in base_findings:
+        if not isinstance(row, dict):
+            continue
+        source_id = str(row.get("source_comment_id") or "").strip().lower()
+        # Keep all reviewer findings, but rebuild post-respin check rows from latest validation
+        # so stale/duplicate check-state rows do not churn across repair rounds.
+        if source_id.startswith("post-respin:"):
+            continue
+        merged_rows.append(dict(row))
+
+    merged_rows.extend(_post_respin_check_findings(validation_payload))
+
+    merged_by_key: dict[str, dict] = {}
+    order: list[str] = []
+    for row in merged_rows:
         if not isinstance(row, dict):
             continue
         source_id = str(row.get("source_comment_id") or "").strip()
         title = str(row.get("title") or "").strip()
         location = str(row.get("location") or "").strip()
-        key = f"{source_id}::{title}::{location}".lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(dict(row))
-    return merged
+        if source_id.lower().startswith("post-respin:"):
+            key = source_id.lower()
+        else:
+            key = f"{source_id}::{title}::{location}".lower()
+        if key not in merged_by_key:
+            order.append(key)
+        # Last row wins for the same key to avoid open/closed duplicates in one round.
+        merged_by_key[key] = dict(row)
+
+    return [merged_by_key[key] for key in order]
 
 
 def _write_post_respin_repair_findings_seed(
@@ -3200,37 +3239,45 @@ def _run_post_respin_auto_repair(
     initial_validation_payload: dict,
 ) -> dict:
     cfg = _load_config_or_defaults(root)
+    sid = str(session.get("id") or "")
+    report_dir = _report_dir(root, sid)
+    validation_report = report_dir / "post_respin_validation.json"
+
+    def _persist_validation(payload: dict) -> dict:
+        if isinstance(payload, dict):
+            payload["report"] = str(validation_report)
+            dump_json(validation_report, payload)
+        return payload
+
     if not bool(cfg.get("post_respin_auto_repair", True)):
         payload = dict(initial_validation_payload) if isinstance(initial_validation_payload, dict) else {}
         payload["auto_repair"] = {
             "enabled": False,
             "attempts": 0,
         }
-        return payload
+        return _persist_validation(payload)
 
-    sid = str(session.get("id") or "")
     reviewer_name = str(session.get("reviewer_name", "aryabhatta"))
-    report_dir = _report_dir(root, sid)
     output_raw = str(next_version_payload.get("output_path") or "").strip()
     output_path = Path(output_raw).resolve() if output_raw else Path()
     if not output_raw or not output_path.exists():
-        return {
+        return _persist_validation({
             "status": "failed",
             "issues": [f"post-respin auto-repair cannot start: output_path missing: {output_path}"],
             "auto_repair": {"enabled": True, "attempts": 0},
-        }
+        })
     if not str(builder_cmd or "").strip():
-        return {
+        return _persist_validation({
             "status": "failed",
             "issues": ["post-respin auto-repair cannot start: builder command is empty"],
             "auto_repair": {"enabled": True, "attempts": 0},
-        }
+        })
     if not str(reviewer_cmd or "").strip():
-        return {
+        return _persist_validation({
             "status": "failed",
             "issues": ["post-respin auto-repair cannot start: reviewer command is empty"],
             "auto_repair": {"enabled": True, "attempts": 0},
-        }
+        })
 
     repair_round_budget = int(cfg.get("post_respin_repair_max_rounds", 5) or 5)
     if repair_round_budget < 1:
@@ -3264,7 +3311,7 @@ def _run_post_respin_auto_repair(
 
         rc = _run_agent_step(root, session_for_repair, "builder", builder_cmd, repair_round)
         if rc != 0:
-            return {
+            return _persist_validation({
                 "status": "failed",
                 "issues": [f"builder failed during post-respin auto-repair round {attempt} (rc={rc})"],
                 "auto_repair": {
@@ -3274,7 +3321,7 @@ def _run_post_respin_auto_repair(
                     "base_round": base_round,
                     "failed_stage": "builder",
                 },
-            }
+            })
 
         latest_validation = _run_post_respin_validation(
             root,
@@ -3296,7 +3343,7 @@ def _run_post_respin_auto_repair(
                 "base_round": base_round,
                 "result": "resolved",
             }
-            return latest_validation
+            return _persist_validation(latest_validation)
 
         attempt += 1
 
@@ -3316,7 +3363,7 @@ def _run_post_respin_auto_repair(
         "base_round": base_round,
         "result": "exhausted",
     }
-    return payload
+    return _persist_validation(payload)
 
 
 def _run_auto_respin_if_requested(
@@ -3722,20 +3769,38 @@ def _reviewer_verdict_for_round(root: Path, session_id: str, round_no: int, revi
 
 
 def _reviewer_verdict_from_text(text: str) -> str:
-    # Prefer explicit verdict section from reviewer markdown.
-    for line in text.splitlines():
-        m = re.match(r"^\s*-\s*(LGTM|REJECT|PENDING)\s*$", line.strip(), re.IGNORECASE)
-        if m:
-            token = m.group(1).strip().upper()
-            if token == "PENDING":
-                return "REJECT"
-            return token
-    # Fallback: keyword scan.
-    upper = text.upper()
-    if "LGTM" in upper:
-        return "LGTM"
-    if "REJECT" in upper or "PENDING" in upper:
-        return "REJECT"
+    raw = str(text or "")
+    if not raw.strip():
+        return ""
+
+    section_match = re.search(r"(?ims)^\s*##\s*Verdict\b(.*?)(?=^\s*##\s+|\Z)", raw)
+    candidates: list[str] = []
+    if section_match:
+        candidates.append(section_match.group(1))
+    # Conservative fallback only when the file has no explicit section.
+    if not candidates:
+        candidates.append(raw)
+
+    for block in candidates:
+        for line in block.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            direct = re.match(r"^\s*[-*]\s*(LGTM|REJECT|PENDING)\s*$", stripped, re.IGNORECASE)
+            if direct:
+                token = direct.group(1).strip().upper()
+                return "REJECT" if token == "PENDING" else token
+
+            tagged = re.match(
+                r"^\s*[-*]?\s*Verdict\s*[:|-]\s*(LGTM|REJECT|PENDING)\s*$",
+                stripped,
+                re.IGNORECASE,
+            )
+            if tagged:
+                token = tagged.group(1).strip().upper()
+                return "REJECT" if token == "PENDING" else token
+
     return ""
 
 
@@ -7060,6 +7125,9 @@ def _advance_session(root: Path, session_id: str) -> int:
 
     _append_summary_round(root, session_id, round_no, len(findings), open_count)
     fsum = round_summary.get("findings", {})
+    round_files = _round_files(root, session_id, round_no, reviewer_name)
+    reviewer_verdict = _reviewer_verdict_for_round(root, session_id, round_no, reviewer_name)
+    table_verdict = reviewer_verdict if reviewer_verdict else ("LGTM" if open_count == 0 else "REJECT")
     _echo(
         render_round_table(
             {
@@ -7069,7 +7137,7 @@ def _advance_session(root: Path, session_id: str) -> int:
                 "builder_confidence": builder_confidence,
                 "reviewer_confidence": reviewer_confidence,
                 "builder_patch_gauge": builder_patch_gauge,
-                "verdict": "LGTM" if open_count == 0 else "REJECT",
+                "verdict": table_verdict,
                 "findings": fsum,
                 "prior_comments": round_summary.get("prior_comments", {}),
                 "round_elapsed_seconds": round_summary.get("timing", {}).get("elapsed_seconds"),
@@ -7117,8 +7185,6 @@ def _advance_session(root: Path, session_id: str) -> int:
         _echo(str(score_decision.get("abort_reason") or "Session aborted by score engine."))
         return 1
 
-    round_files = _round_files(root, session_id, round_no, reviewer_name)
-    reviewer_verdict = _reviewer_verdict_for_round(root, session_id, round_no, reviewer_name)
     gate_mode, _gate_prior_block, _gate_rounds = _findings_gate_policy(cfg_for_round)
     blocking_open_items, advisory_open_items = _quality_open_findings(
         session=session,
@@ -7140,6 +7206,13 @@ def _advance_session(root: Path, session_id: str) -> int:
         elif score_decision.get("low_quality_reviewer"):
             should_lgtm = False
             lgtm_reason = "reviewer confidence low — hold LGTM despite no persistent blocking findings"
+        elif reviewer_verdict != "LGTM":
+            verdict_display = reviewer_verdict or "MISSING"
+            should_lgtm = False
+            lgtm_reason = (
+                f"Aryabhata verdict = {verdict_display} "
+                f"(must be explicit LGTM)"
+            )
         else:
             should_lgtm = True
             lgtm_reason = (
