@@ -25,9 +25,10 @@ ALLOW_FALLBACK="${A2A_ALLOW_FALLBACK:-0}"
 FALLBACK_CMD="${A2A_FALLBACK_REVIEWER_CMD:-}"
 LLM_TIMEOUT_SEC="${A2A_LLM_TIMEOUT_SEC:-900}"
 LLM_TIMEOUT_PER_MODEL_SEC="${A2A_LLM_TIMEOUT_PER_MODEL_SEC:-$LLM_TIMEOUT_SEC}"
+STABLE_MODE="${A2A_STABLE_MODE:-1}"
 
 run_fallback() {
-  if [[ "$ALLOW_FALLBACK" == "1" && -n "$FALLBACK_CMD" ]]; then
+  if [[ ( "$ALLOW_FALLBACK" == "1" || "$STABLE_MODE" == "1" ) && -n "$FALLBACK_CMD" ]]; then
     echo "[aryabhatta-llm] LLM call failed, using fallback reviewer command"
     bash -lc "$FALLBACK_CMD"
     return 0
@@ -43,9 +44,19 @@ if ! command -v qgenie >/dev/null 2>&1; then
   exit 1
 fi
 
-QGENIE_SUBCMD="agent-exec"
-if qgenie codex-exec --help >/dev/null 2>&1; then
+QGENIE_SUBCMD=""
+if qgenie agent exec --help >/dev/null 2>&1; then
+  QGENIE_SUBCMD="agent-exec"
+elif qgenie codex-exec --help >/dev/null 2>&1; then
   QGENIE_SUBCMD="codex-exec"
+fi
+
+if [[ -z "$QGENIE_SUBCMD" ]]; then
+  if run_fallback; then
+    exit 0
+  fi
+  echo "[aryabhatta-llm] qgenie subcommand unavailable (agent/codex-exec)" >&2
+  exit 1
 fi
 
 if ! [[ "$LLM_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [[ "$LLM_TIMEOUT_SEC" -le 0 ]]; then
@@ -109,14 +120,19 @@ build_model_candidates() {
   if [[ -n "${A2A_LLM_MODEL_PRIORITY:-}" ]]; then
     for token in ${A2A_LLM_MODEL_PRIORITY//,/ }; do
       add_unique_model "$token"
+      if [[ "$STABLE_MODE" == "1" ]]; then
+        break
+      fi
     done
   fi
   if [[ "${#MODEL_CANDIDATES[@]}" -eq 0 ]]; then
     resolved_default="$(resolve_qgenie_default_model)"
-    add_unique_model "anthropic::claude-4-6-sonnet"
-    add_unique_model "anthropic::claude-4-5-sonnet"
     add_unique_model "$resolved_default"
-    add_unique_model "azure::gpt-5.3-codex"
+    if [[ "$STABLE_MODE" != "1" ]]; then
+      add_unique_model "anthropic::claude-4-6-sonnet"
+      add_unique_model "anthropic::claude-4-5-sonnet"
+      add_unique_model "azure::gpt-5.3-codex"
+    fi
   fi
 }
 
@@ -200,7 +216,7 @@ cat "$PROMPT_TEMPLATE" >"$PROMPT_FILE"
 cat >>"$PROMPT_FILE" <<EOF
 
 Runtime context:
-- Review patch files under: ${A2A_WATCH_PATH:-<unset>}
+- Review repository/worktree under: ${A2A_WATCH_PATH:-<unset>}
 - Focus issues: ${A2A_FOCUS_ISSUES:-<none>}
 - Prior review context: ${A2A_PRIOR_COMMENTS_FILE:-<none>}
 - Round: ${A2A_ROUND:-?}
@@ -228,6 +244,7 @@ Strict requirements:
 13) Flag unchecked __must_check runtime-PM calls in touched code (e.g. devm_pm_runtime_enable) and track maintainer-requested subject/message wording fixes.
 14) If focus issues are provided, include at least one explicit finding/advisory row with source_comment_id prefix focus-issue: and concrete patch_file:line evidence.
 15) Keep source_comment_id stable for unchanged concerns across rounds; do not invent new subsys-scan ids for unchanged closed advisories.
+16) If no *.patch files exist under the review path, evaluate repository diffs in this worktree; do not read unrelated patch files outside this path.
 EOF
 
 set +e
@@ -250,6 +267,7 @@ if [[ $RC -ne 0 ]]; then
   exit $RC
 fi
 
+set +e
 python - "$OUT_FILE" "$A2A_FINDINGS_FILE" "$A2A_REVIEW_FILE" "${A2A_ROUND:-?}" "${A2A_WATCH_PATH:-}" "${A2A_REQUIRE_INDEPENDENT_SCAN:-0}" "${A2A_PRIOR_COMMENTS_TOTAL:-0}" <<'PY'
 import json
 import os
@@ -457,3 +475,13 @@ print(f"[aryabhatta-llm] findings_total={len(findings)} open={open_count} closed
 print(f"[aryabhatta-llm] findings_file={out_findings}")
 print(f"[aryabhatta-llm] review_file={out_review}")
 PY
+PARSE_RC=$?
+set -e
+
+if [[ $PARSE_RC -ne 0 ]]; then
+  if run_fallback; then
+    exit 0
+  fi
+  echo "[aryabhatta-llm] failed to normalize reviewer output (rc=$PARSE_RC)" >&2
+  exit $PARSE_RC
+fi

@@ -32,9 +32,10 @@ ALLOW_FALLBACK="${A2A_ALLOW_FALLBACK:-0}"
 FALLBACK_CMD="${A2A_FALLBACK_BUILDER_CMD:-}"
 LLM_TIMEOUT_SEC="${A2A_LLM_TIMEOUT_SEC:-900}"
 LLM_TIMEOUT_PER_MODEL_SEC="${A2A_LLM_TIMEOUT_PER_MODEL_SEC:-$LLM_TIMEOUT_SEC}"
+STABLE_MODE="${A2A_STABLE_MODE:-1}"
 
 run_fallback() {
-  if [[ "$ALLOW_FALLBACK" == "1" && -n "$FALLBACK_CMD" ]]; then
+  if [[ ( "$ALLOW_FALLBACK" == "1" || "$STABLE_MODE" == "1" ) && -n "$FALLBACK_CMD" ]]; then
     echo "[builder-llm] LLM call failed, using fallback builder command"
     bash -lc "$FALLBACK_CMD"
     return 0
@@ -50,9 +51,19 @@ if ! command -v qgenie >/dev/null 2>&1; then
   exit 1
 fi
 
-QGENIE_SUBCMD="agent-exec"
-if qgenie codex-exec --help >/dev/null 2>&1; then
+QGENIE_SUBCMD=""
+if qgenie agent exec --help >/dev/null 2>&1; then
+  QGENIE_SUBCMD="agent-exec"
+elif qgenie codex-exec --help >/dev/null 2>&1; then
   QGENIE_SUBCMD="codex-exec"
+fi
+
+if [[ -z "$QGENIE_SUBCMD" ]]; then
+  if run_fallback; then
+    exit 0
+  fi
+  echo "[builder-llm] qgenie subcommand unavailable (agent/codex-exec)" >&2
+  exit 1
 fi
 
 if ! [[ "$LLM_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [[ "$LLM_TIMEOUT_SEC" -le 0 ]]; then
@@ -116,13 +127,18 @@ build_model_candidates() {
   if [[ -n "${A2A_LLM_MODEL_PRIORITY:-}" ]]; then
     for token in ${A2A_LLM_MODEL_PRIORITY//,/ }; do
       add_unique_model "$token"
+      if [[ "$STABLE_MODE" == "1" ]]; then
+        break
+      fi
     done
   fi
   if [[ "${#MODEL_CANDIDATES[@]}" -eq 0 ]]; then
     resolved_default="$(resolve_qgenie_default_model)"
     add_unique_model "$resolved_default"
-    add_unique_model "azure::gpt-5.3-codex"
-    add_unique_model "anthropic::claude-4-6-sonnet"
+    if [[ "$STABLE_MODE" != "1" ]]; then
+      add_unique_model "azure::gpt-5.3-codex"
+      add_unique_model "anthropic::claude-4-6-sonnet"
+    fi
   fi
 }
 
@@ -224,6 +240,7 @@ Execution requirements:
 6) Always include a `## Residual Risks` section with explicit yes/no risk statements and evidence.
 7) Never ignore fallible __must_check runtime-PM APIs in changed code; fix or justify maintainer-requested commit subject/message wording updates.
 8) If focus issues are provided, address each explicitly with concrete patch_file:line evidence.
+9) If no *.patch files exist under the review path, operate on repository diffs in this worktree and do not reference unrelated patch files outside this path.
 EOF
 
 set +e
@@ -246,6 +263,7 @@ if [[ $RC -ne 0 ]]; then
   exit $RC
 fi
 
+set +e
 python - "$OUT_FILE" "$A2A_BUILDER_FILE" <<'PY'
 import sys
 from pathlib import Path
@@ -291,3 +309,13 @@ out.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8
 
 print(f"[builder-llm] wrote builder report: {out}")
 PY
+PARSE_RC=$?
+set -e
+
+if [[ $PARSE_RC -ne 0 ]]; then
+  if run_fallback; then
+    exit 0
+  fi
+  echo "[builder-llm] failed to normalize builder output (rc=$PARSE_RC)" >&2
+  exit $PARSE_RC
+fi
