@@ -2,10 +2,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+import subprocess
 
 from a2a_cli.main import (
     _as_json,
     _detect_kernel_repo_root,
+    _run_post_respin_applyability,
     _run_post_respin_validation,
     _resolve_gate_patch_scope,
     _resolve_gate_patch_targets,
@@ -15,6 +17,14 @@ from a2a_cli.main import (
 
 
 class ValidationGateTests(unittest.TestCase):
+    def _git(self, repo: Path, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
     def test_detect_kernel_repo_root(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -106,6 +116,133 @@ class ValidationGateTests(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertIn("kernel tree not found", " ".join(payload["issues"]))
 
+    def test_post_respin_applyability_passes_for_clean_series(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            kernel = root / "kernel"
+            output = root / "patches"
+            kernel.mkdir(parents=True, exist_ok=True)
+            output.mkdir(parents=True, exist_ok=True)
+
+            self.assertEqual(self._git(kernel, "init").returncode, 0)
+            self.assertEqual(self._git(kernel, "config", "user.name", "Test User").returncode, 0)
+            self.assertEqual(self._git(kernel, "config", "user.email", "test@example.com").returncode, 0)
+
+            (kernel / "demo.txt").write_text("base\n", encoding="utf-8")
+            self.assertEqual(self._git(kernel, "add", "demo.txt").returncode, 0)
+            self.assertEqual(self._git(kernel, "commit", "-m", "base").returncode, 0)
+
+            (kernel / "demo.txt").write_text("base\nnext\n", encoding="utf-8")
+            self.assertEqual(self._git(kernel, "add", "demo.txt").returncode, 0)
+            self.assertEqual(self._git(kernel, "commit", "-m", "change").returncode, 0)
+
+            fmt = self._git(kernel, "format-patch", "-1", "--stdout")
+            self.assertEqual(fmt.returncode, 0)
+            (output / "0001-change.patch").write_text(fmt.stdout, encoding="utf-8")
+
+            self.assertEqual(self._git(kernel, "reset", "--hard", "HEAD~1").returncode, 0)
+
+            payload = _run_post_respin_applyability(output, kernel)
+            self.assertTrue(payload["ran"])
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["files_checked"], 1)
+
+    def test_post_respin_applyability_fails_for_non_applying_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            kernel = root / "kernel"
+            output = root / "patches"
+            kernel.mkdir(parents=True, exist_ok=True)
+            output.mkdir(parents=True, exist_ok=True)
+
+            self.assertEqual(self._git(kernel, "init").returncode, 0)
+            self.assertEqual(self._git(kernel, "config", "user.name", "Test User").returncode, 0)
+            self.assertEqual(self._git(kernel, "config", "user.email", "test@example.com").returncode, 0)
+            (kernel / "README").write_text("x\n", encoding="utf-8")
+            self.assertEqual(self._git(kernel, "add", "README").returncode, 0)
+            self.assertEqual(self._git(kernel, "commit", "-m", "base").returncode, 0)
+
+            (output / "0001-invalid.patch").write_text("this is not a mail patch\n", encoding="utf-8")
+
+            payload = _run_post_respin_applyability(output, kernel)
+            self.assertTrue(payload["ran"])
+            self.assertFalse(payload["ok"])
+            self.assertTrue(any("does not apply cleanly" in issue for issue in payload["issues"]))
+
+    def test_post_respin_applyability_uses_cover_base_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            kernel = root / "kernel"
+            output = root / "patches"
+            kernel.mkdir(parents=True, exist_ok=True)
+            output.mkdir(parents=True, exist_ok=True)
+
+            self.assertEqual(self._git(kernel, "init").returncode, 0)
+            self.assertEqual(self._git(kernel, "config", "user.name", "Test User").returncode, 0)
+            self.assertEqual(self._git(kernel, "config", "user.email", "test@example.com").returncode, 0)
+
+            (kernel / "demo.txt").write_text("base\n", encoding="utf-8")
+            self.assertEqual(self._git(kernel, "add", "demo.txt").returncode, 0)
+            self.assertEqual(self._git(kernel, "commit", "-m", "base").returncode, 0)
+            base_commit = self._git(kernel, "rev-parse", "HEAD").stdout.strip()
+
+            (kernel / "demo.txt").write_text("base\nnext\n", encoding="utf-8")
+            self.assertEqual(self._git(kernel, "add", "demo.txt").returncode, 0)
+            self.assertEqual(self._git(kernel, "commit", "-m", "change").returncode, 0)
+
+            fmt = self._git(kernel, "format-patch", "-1", "--stdout")
+            self.assertEqual(fmt.returncode, 0)
+            patch_file = output / "v2-0001-change.patch"
+            patch_file.write_text(fmt.stdout, encoding="utf-8")
+            (output / "v2-0000-cover-letter.patch").write_text(
+                "\n".join(
+                    [
+                        "From: Tester <tester@example.com>",
+                        "Subject: [PATCH v2 0/1] test",
+                        "",
+                        "---",
+                        f"base-commit: {base_commit}",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            payload = _run_post_respin_applyability(output, kernel)
+            self.assertTrue(payload["ran"])
+            self.assertTrue(payload["ok"])
+            self.assertEqual(str(payload.get("baseline_ref") or ""), base_commit)
+            self.assertEqual(str(payload.get("baseline_source") or ""), "cover:v2-0000-cover-letter.patch")
+
+    def test_post_respin_applyability_already_applied_series_is_ok(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            kernel = root / "kernel"
+            output = root / "patches"
+            kernel.mkdir(parents=True, exist_ok=True)
+            output.mkdir(parents=True, exist_ok=True)
+
+            self.assertEqual(self._git(kernel, "init").returncode, 0)
+            self.assertEqual(self._git(kernel, "config", "user.name", "Test User").returncode, 0)
+            self.assertEqual(self._git(kernel, "config", "user.email", "test@example.com").returncode, 0)
+
+            (kernel / "demo.txt").write_text("base\n", encoding="utf-8")
+            self.assertEqual(self._git(kernel, "add", "demo.txt").returncode, 0)
+            self.assertEqual(self._git(kernel, "commit", "-m", "base").returncode, 0)
+
+            (kernel / "demo.txt").write_text("base\nnext\n", encoding="utf-8")
+            self.assertEqual(self._git(kernel, "add", "demo.txt").returncode, 0)
+            self.assertEqual(self._git(kernel, "commit", "-m", "change").returncode, 0)
+
+            fmt = self._git(kernel, "format-patch", "-1", "--stdout")
+            self.assertEqual(fmt.returncode, 0)
+            (output / "0001-change.patch").write_text(fmt.stdout, encoding="utf-8")
+
+            payload = _run_post_respin_applyability(output, kernel)
+            self.assertTrue(payload["ran"])
+            self.assertTrue(payload["ok"])
+            self.assertIn("already-applied", str(payload.get("mode") or ""))
+
     def test_post_respin_upstream_compat_flags_deprecated_din_dout(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             output = Path(td) / "patches"
@@ -161,7 +298,10 @@ class ValidationGateTests(unittest.TestCase):
             root = Path(td)
             a2a = root / ".a2a"
             (a2a / "reports" / "sess-test").mkdir(parents=True, exist_ok=True)
-            (a2a / "config.json").write_text(_as_json({"post_respin_checkpatch": True}), encoding="utf-8")
+            (a2a / "config.json").write_text(
+                _as_json({"post_respin_checkpatch": True, "post_respin_applyability": False}),
+                encoding="utf-8",
+            )
 
             kernel_root = root / "kernel"
             scripts = kernel_root / "scripts"

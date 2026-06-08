@@ -87,6 +87,7 @@ _PATCHSET_VERSION_DIR_RE = re.compile(r"^v(?P<num>\d+)$", re.IGNORECASE)
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 _LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+")
 _PATCH_NEW_FILE_RE = re.compile(r"^\+\+\+ b/(.+)$")
+_BASE_COMMIT_TRAILER_RE = re.compile(r"^\s*base-commit:\s*([0-9a-fA-F]{7,40})\s*$", re.IGNORECASE | re.MULTILINE)
 _DT_PROPERTY_ASSIGN_RE = re.compile(r"^([A-Za-z0-9,._+-]+)\s*=")
 _DTS_FILE_RE = re.compile(r"(^|/)arch/arm64/boot/dts/.+\.dtsi?$")
 _CHECKPATCH_TOTALS_RE = re.compile(
@@ -968,6 +969,47 @@ def _collect_active_patch_files(path: Path) -> list[Path]:
         return deduped
 
     return sorted(p for p in path.rglob("*.patch") if p.is_file())
+
+
+def _find_cover_patch_file(path: Path) -> Path | None:
+    if path.is_file():
+        return path if path.suffix == ".patch" and _is_cover_patch_file(path) else None
+    if not path.is_dir():
+        return None
+
+    # Prefer series-declared cover patch if available.
+    try:
+        for patch in _collect_active_patch_files(path):
+            if patch.is_file() and patch.suffix == ".patch" and _is_cover_patch_file(patch):
+                return patch
+    except Exception:
+        pass
+
+    candidates = sorted(
+        p for p in path.rglob("*.patch")
+        if p.is_file() and _is_cover_patch_file(p)
+    )
+    return candidates[0] if candidates else None
+
+
+def _extract_base_commit_from_cover_patch(cover_patch: Path) -> str | None:
+    try:
+        text = cover_patch.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    m = _BASE_COMMIT_TRAILER_RE.search(text)
+    if not m:
+        return None
+    return str(m.group(1) or "").strip().lower() or None
+
+
+def _git_commit_exists(repo: Path, commit: str) -> bool:
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "-e", f"{commit}^{{commit}}"],
+        text=True,
+        capture_output=True,
+    )
+    return proc.returncode == 0
 
 
 def _materialize_cover_patch(output: Path) -> Path | None:
@@ -2759,6 +2801,8 @@ def _run_post_respin_applyability(
         "ok": True,
         "kernel_root": str(kernel_root) if kernel_root else "",
         "mode": "git-am-temp-worktree",
+        "baseline_ref": "HEAD",
+        "baseline_source": "target_head",
         "files_checked": 0,
         "results": [],
         "issues": [],
@@ -2792,10 +2836,30 @@ def _run_post_respin_applyability(
     payload["ran"] = True
     payload["files_checked"] = len(patch_files)
 
+    baseline_ref = "HEAD"
+    cover_patch = _find_cover_patch_file(output_path)
+    if cover_patch is not None:
+        base_commit = _extract_base_commit_from_cover_patch(cover_patch)
+        if base_commit:
+            if _git_commit_exists(kernel_root, base_commit):
+                baseline_ref = base_commit
+                payload["baseline_source"] = f"cover:{cover_patch.name}"
+            else:
+                payload["results"].append(
+                    {
+                        "stage": "base_commit_probe",
+                        "ok": False,
+                        "commit": base_commit,
+                        "detail": "base-commit trailer not present in kernel repository; falling back to HEAD",
+                    }
+                )
+
+    payload["baseline_ref"] = baseline_ref
+
     with tempfile.TemporaryDirectory(prefix="a2a-apply-check-") as td:
         worktree = Path(td) / "apply-check"
         add_proc = subprocess.run(
-            ["git", "-C", str(kernel_root), "worktree", "add", "--detach", str(worktree), "HEAD"],
+            ["git", "-C", str(kernel_root), "worktree", "add", "--detach", str(worktree), baseline_ref],
             text=True,
             capture_output=True,
         )
@@ -2837,13 +2901,45 @@ def _run_post_respin_applyability(
                 }
             )
             if am_proc.returncode != 0:
-                payload["ok"] = False
-                detail_lines = (am_proc.stderr or am_proc.stdout or "").splitlines()
-                detail = " | ".join(line.strip() for line in detail_lines[:6] if line.strip())
-                msg = "generated patch series does not apply cleanly with git am on target HEAD"
-                if detail:
-                    msg += f": {detail}"
-                payload["issues"].append(msg)
+                # If series is already present on the chosen baseline, treat it as applyable.
+                subprocess.run(
+                    ["git", "-C", str(worktree), "am", "--abort"],
+                    text=True,
+                    capture_output=True,
+                )
+                reverse_failures: list[str] = []
+                for patch in patch_files:
+                    reverse_proc = subprocess.run(
+                        ["git", "-C", str(worktree), "apply", "--reverse", "--check", str(patch)],
+                        text=True,
+                        capture_output=True,
+                    )
+                    if reverse_proc.returncode != 0:
+                        reverse_failures.append(str(patch.name))
+
+                already_applied = not reverse_failures
+                payload["results"].append(
+                    {
+                        "stage": "already_applied_probe",
+                        "returncode": 0 if already_applied else 1,
+                        "ok": already_applied,
+                        "failed_patches": reverse_failures[:20],
+                    }
+                )
+
+                if already_applied:
+                    payload["mode"] = "git-am-temp-worktree(already-applied)"
+                else:
+                    payload["ok"] = False
+                    detail_lines = (am_proc.stderr or am_proc.stdout or "").splitlines()
+                    detail = " | ".join(line.strip() for line in detail_lines[:6] if line.strip())
+                    msg = (
+                        "generated patch series does not apply cleanly with git am on baseline "
+                        f"{baseline_ref}"
+                    )
+                    if detail:
+                        msg += f": {detail}"
+                    payload["issues"].append(msg)
         finally:
             subprocess.run(
                 ["git", "-C", str(worktree), "am", "--abort"],
