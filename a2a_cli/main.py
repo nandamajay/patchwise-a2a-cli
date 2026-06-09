@@ -3378,6 +3378,15 @@ def _run_post_respin_auto_repair(
     repair_round_budget = int(cfg.get("post_respin_repair_max_rounds", 5) or 5)
     if repair_round_budget < 1:
         repair_round_budget = 1
+    max_total_rounds = int(cfg.get("post_respin_repair_max_total_rounds", 15) or 15)
+    if max_total_rounds < repair_round_budget:
+        max_total_rounds = repair_round_budget
+    max_no_progress = int(cfg.get("post_respin_repair_max_no_progress", 2) or 2)
+    if max_no_progress < 1:
+        max_no_progress = 1
+    max_rate_limit = int(cfg.get("post_respin_repair_max_rate_limit", 2) or 2)
+    if max_rate_limit < 1:
+        max_rate_limit = 1
 
     base_round = _next_post_respin_repair_base_round(report_dir)
     seed_round = base_round - 1
@@ -3387,8 +3396,39 @@ def _run_post_respin_auto_repair(
     attempt = 1
     current_budget = repair_round_budget
     latest_validation = dict(initial_validation_payload) if isinstance(initial_validation_payload, dict) else {}
+    no_progress_streak = 0
+    rate_limit_streak = 0
+    previous_open_signature: tuple[str, ...] = ()
+
+    def _open_findings_signature(findings: list[dict]) -> tuple[str, ...]:
+        parts: list[str] = []
+        for row in findings:
+            if not isinstance(row, dict):
+                continue
+            status = str(row.get("status") or "").strip().lower()
+            if status == "closed":
+                continue
+            source_id = str(row.get("source_comment_id") or "").strip().lower()
+            title = " ".join(str(row.get("title") or "").strip().lower().split())
+            location = str(row.get("location") or "").strip().lower()
+            parts.append(f"{source_id}::{title}::{location}")
+        return tuple(sorted(parts))
+
+    def _log_has_rate_limit(log_path: Path) -> bool:
+        if not log_path.exists():
+            return False
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        return (
+            "429 too many requests" in text.lower()
+            or "exceeded retry limit" in text.lower()
+        )
 
     while True:
+        if attempt > max_total_rounds:
+            break
         if attempt > current_budget:
             if _prompt_continue_post_respin_repair(
                 session_id=sid,
@@ -3431,6 +3471,23 @@ def _run_post_respin_auto_repair(
         round_findings = _collect_post_respin_repair_findings(report_dir, latest_validation)
         _write_post_respin_repair_findings_seed(root, sid, reviewer_name, repair_round, round_findings)
 
+        open_signature = _open_findings_signature(round_findings)
+        changed_paths = _load_round_changed_paths(root, sid, repair_round, reviewer_name)
+        has_changes = bool(changed_paths)
+        if (not has_changes) and open_signature and open_signature == previous_open_signature:
+            no_progress_streak += 1
+        else:
+            no_progress_streak = 0
+        previous_open_signature = open_signature
+
+        logs_dir = root / A2A_DIRNAME / "logs" / sid
+        builder_log = logs_dir / f"{_round_basename(repair_round, 'builder')}.log"
+        reviewer_log = logs_dir / "post-respin-reviewer.log"
+        if _log_has_rate_limit(builder_log) or _log_has_rate_limit(reviewer_log):
+            rate_limit_streak += 1
+        else:
+            rate_limit_streak = 0
+
         if str(latest_validation.get("status", "")).lower() == "ok":
             latest_validation["auto_repair"] = {
                 "enabled": True,
@@ -3440,6 +3497,50 @@ def _run_post_respin_auto_repair(
                 "result": "resolved",
             }
             return _persist_validation(latest_validation)
+
+        if no_progress_streak >= max_no_progress:
+            payload = dict(latest_validation) if isinstance(latest_validation, dict) else {}
+            payload["status"] = "failed"
+            issues = payload.get("issues")
+            if not isinstance(issues, list):
+                issues = []
+            issues.append(
+                "post-respin auto-repair stopped: no-progress churn detected "
+                f"({no_progress_streak} consecutive round(s) with zero changes and unchanged open findings)"
+            )
+            payload["issues"] = issues
+            payload["auto_repair"] = {
+                "enabled": True,
+                "attempts": attempt,
+                "max_rounds_used": current_budget,
+                "max_total_rounds": max_total_rounds,
+                "base_round": base_round,
+                "result": "churn_stopped",
+                "no_progress_streak": no_progress_streak,
+            }
+            return _persist_validation(payload)
+
+        if rate_limit_streak >= max_rate_limit:
+            payload = dict(latest_validation) if isinstance(latest_validation, dict) else {}
+            payload["status"] = "failed"
+            issues = payload.get("issues")
+            if not isinstance(issues, list):
+                issues = []
+            issues.append(
+                "post-respin auto-repair stopped: repeated provider rate-limit failures "
+                f"({rate_limit_streak} consecutive round(s) with HTTP 429/exceeded retry limit)"
+            )
+            payload["issues"] = issues
+            payload["auto_repair"] = {
+                "enabled": True,
+                "attempts": attempt,
+                "max_rounds_used": current_budget,
+                "max_total_rounds": max_total_rounds,
+                "base_round": base_round,
+                "result": "rate_limit_stopped",
+                "rate_limit_streak": rate_limit_streak,
+            }
+            return _persist_validation(payload)
 
         attempt += 1
 
@@ -3456,6 +3557,7 @@ def _run_post_respin_auto_repair(
         "enabled": True,
         "attempts": attempt - 1,
         "max_rounds_used": current_budget,
+        "max_total_rounds": max_total_rounds,
         "base_round": base_round,
         "result": "exhausted",
     }
@@ -6846,22 +6948,31 @@ def _prior_seed_message_ids(session: dict) -> list[str]:
     return []
 
 
-def _session_source_context(session: dict) -> dict | None:
+def _session_source_context(session: dict, cfg: dict | None = None) -> dict | None:
     source = session.get("review_source")
     if isinstance(source, dict):
         kind = str(source.get("kind") or "").strip().lower()
         if kind:
+            if cfg:
+                source.setdefault("sashiko_ingest", bool(cfg.get("sashiko_ingest", True)))
+                if cfg.get("sashiko_base_url"):
+                    source.setdefault("sashiko_base_url", str(cfg.get("sashiko_base_url")))
             return source
 
     lore = session.get("lore")
     if isinstance(lore, dict):
         message_id = str(lore.get("message_id") or "").strip()
         if message_id:
-            return {
+            ctx = {
                 "kind": "lore",
                 "message_id": message_id,
                 "url": f"https://lore.kernel.org/r/{message_id}",
             }
+            if cfg:
+                ctx["sashiko_ingest"] = bool(cfg.get("sashiko_ingest", True))
+                if cfg.get("sashiko_base_url"):
+                    ctx["sashiko_base_url"] = str(cfg.get("sashiko_base_url"))
+            return ctx
     return None
 
 
@@ -6887,7 +6998,7 @@ def _ingest_prior_review_for_session(root: Path, session: dict, cfg: dict | None
         search_if_missing=search_if_missing,
         max_comments=max_comments,
         seed_message_ids=_prior_seed_message_ids(session),
-        source_context=_session_source_context(session),
+        source_context=_session_source_context(session, cfg_local),
     )
 
 

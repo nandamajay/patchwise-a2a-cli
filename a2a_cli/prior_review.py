@@ -15,6 +15,7 @@ from pathlib import Path
 
 
 _USER_AGENT = "A2A-CLI/0.1"
+_SASHIKO_BASE_URL = "https://sashiko.dev"
 _PATCH_SUBJECT_RE = re.compile(
     r"\[PATCH(?:\s+v(?P<version>\d+))?(?:\s+\d+/\d+)?\]\s*(?P<title>.*)", re.IGNORECASE
 )
@@ -289,7 +290,150 @@ def _collect_external_prior_comments(source_context: dict | None, *, max_comment
         return _load_github_prior_comments(source_context, max_comments=max_comments)
     if kind == "gerrit_change":
         return _load_gerrit_prior_comments(source_context, max_comments=max_comments)
+    if kind in ("lore", "sashiko"):
+        return _load_sashiko_prior_comments(source_context, max_comments=max_comments)
     return [], []
+
+
+def _load_sashiko_prior_comments(source_context: dict, *, max_comments: int) -> tuple[list[dict], list[dict]]:
+    message_id = str(source_context.get("message_id") or "").strip()
+    if not message_id:
+        url = str(source_context.get("url") or "").strip()
+        if url:
+            message_id = _message_id_from_link(url) or ""
+    if not message_id:
+        return [], []
+
+    if source_context.get("sashiko_ingest") is False:
+        return [], []
+
+    base_url = str(source_context.get("sashiko_base_url") or "").strip() or _SASHIKO_BASE_URL
+    base_url = base_url.rstrip("/")
+
+    patchset_url = f"{base_url}/api/patchset?id={urllib.parse.quote(message_id, safe='@._+-')}"
+    try:
+        patchset = _fetch_json(patchset_url)
+    except OSError:
+        return [], []
+    if not isinstance(patchset, dict):
+        return [], []
+
+    patches = patchset.get("patches") or []
+    patch_by_id: dict[int, dict] = {}
+    for p in patches:
+        if isinstance(p, dict) and isinstance(p.get("id"), int):
+            patch_by_id[p["id"]] = p
+
+    sources = [
+        {
+            "kind": "sashiko",
+            "message_id": message_id,
+            "source": f"{base_url}/#/patchset/{urllib.parse.quote(message_id)}",
+            "fetch_url": patchset_url,
+        }
+    ]
+
+    comments: list[dict] = []
+    seen_ids: set[str] = set()
+    reviews = patchset.get("reviews") or []
+    for review in reviews:
+        if not isinstance(review, dict):
+            continue
+        review_id = review.get("id")
+        if not isinstance(review_id, int):
+            continue
+
+        review_url = f"{base_url}/api/review?id={review_id}"
+        try:
+            review_payload = _fetch_json(review_url)
+        except OSError:
+            continue
+        if not isinstance(review_payload, dict):
+            continue
+
+        output = review_payload.get("output")
+        if not isinstance(output, str) or not output.strip():
+            continue
+
+        try:
+            output_json = json.loads(output)
+        except json.JSONDecodeError:
+            continue
+
+        findings = output_json.get("findings") or []
+        if not isinstance(findings, list):
+            continue
+
+        patch_id = review.get("patch_id")
+        patch_meta = patch_by_id.get(patch_id, {}) if isinstance(patch_id, int) else {}
+        part_index = patch_meta.get("part_index")
+        part_subject = str(patch_meta.get("subject") or "").strip()
+        part_msgid = str(patch_meta.get("message_id") or "").strip()
+        part_suffix = f" part {part_index}" if isinstance(part_index, int) else ""
+        source_link = f"{base_url}/#/patchset/{urllib.parse.quote(message_id)}"
+        if isinstance(part_index, int):
+            source_link = f"{source_link}?part={part_index}"
+
+        for idx, finding in enumerate(findings, 1):
+            if not isinstance(finding, dict):
+                continue
+            severity = str(finding.get("severity") or "Unknown").strip()
+            desc = str(
+                finding.get("description")
+                or finding.get("title")
+                or finding.get("id")
+                or "Sashiko finding"
+            ).strip()
+            locs = finding.get("locations") or []
+            loc_lines: list[str] = []
+            reason_lines: list[str] = []
+            if isinstance(locs, list):
+                for loc in locs[:3]:
+                    if not isinstance(loc, dict):
+                        continue
+                    loc_file = str(loc.get("file") or "").strip()
+                    loc_line = loc.get("line")
+                    loc_label = loc_file
+                    if isinstance(loc_line, int) and loc_line > 0:
+                        loc_label = f"{loc_label}:{loc_line}" if loc_label else f"line {loc_line}"
+                    if loc_label:
+                        loc_lines.append(loc_label)
+                    why = str(loc.get("why_this_location_matters") or "").strip()
+                    if why:
+                        reason_lines.append(why)
+
+            excerpt_parts = [desc]
+            if loc_lines:
+                excerpt_parts.append("Locations: " + ", ".join(loc_lines))
+            if reason_lines:
+                excerpt_parts.append("Reason: " + " ".join(reason_lines))
+            excerpt = _truncate_comment_excerpt(" ".join(excerpt_parts))
+
+            comment_id = f"sashiko:{review_id}:{idx}"
+            if comment_id in seen_ids:
+                continue
+            seen_ids.add(comment_id)
+
+            subject = f"Sashiko {severity} finding{part_suffix}"
+            if part_subject:
+                subject = f"{subject} - {part_subject}"
+
+            comments.append(
+                {
+                    "id": comment_id,
+                    "message_id": part_msgid or message_id,
+                    "from": "sashiko-bot",
+                    "subject": subject,
+                    "date": str(review_payload.get("created_at") or "").strip(),
+                    "excerpt": excerpt,
+                    "source": source_link,
+                    "source_kind": "sashiko_finding",
+                }
+            )
+            if len(comments) >= max_comments:
+                return sources, comments
+
+    return sources, comments
 
 
 def _load_github_prior_comments(source_context: dict, *, max_comments: int) -> tuple[list[dict], list[dict]]:
