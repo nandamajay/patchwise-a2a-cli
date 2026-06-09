@@ -4067,9 +4067,7 @@ def _agent_env(
             "A2A_FALLBACK_REVIEWER_CMD": fallback_reviewer_cmd,
             "A2A_LLM_TIMEOUT_SEC": str(llm_timeout_sec),
             "A2A_EXTRA_SCRUTINY": "1" if bool(session.get("extra_scrutiny_next_round")) else "0",
-            "A2A_REQUIRE_INDEPENDENT_SCAN": (
-                "1" if requires_full_subsystem_review(session, cfg) else "0"
-            ),
+            "A2A_REQUIRE_INDEPENDENT_SCAN": "1",
             "A2A_FOCUS_ISSUES": "",
             "A2A_FOCUS_ISSUES_JSON": "[]",
             "CODEX_HOME": str(codex_home),

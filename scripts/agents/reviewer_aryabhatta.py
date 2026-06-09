@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import re
 
 
 @dataclass
@@ -367,9 +368,13 @@ def _scan_duplicate_macro_define(docs: list[PatchDoc]) -> dict[str, Any] | None:
 
 def build_independent_scan_findings(docs: list[PatchDoc]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    rows.extend(_scan_resource_pairing(docs))
     duplicate = _scan_duplicate_macro_define(docs)
     if duplicate:
         rows.append(duplicate)
+        return rows
+
+    if rows:
         return rows
 
     location = f"{docs[0].path.name}:1" if docs else "unknown.patch:1"
@@ -386,6 +391,109 @@ def build_independent_scan_findings(docs: list[PatchDoc]) -> list[dict[str, Any]
             "source_comment_id": "subsys-scan:baseline",
         }
     )
+    return rows
+
+
+_CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+
+
+def _iter_added_lines(doc: PatchDoc) -> list[str]:
+    added: list[str] = []
+    for raw in doc.lines:
+        if raw.startswith("+++ ") or raw.startswith("@@ "):
+            continue
+        if raw.startswith("+") and not raw.startswith("+++"):
+            added.append(raw[1:])
+    return added
+
+
+def _scan_resource_pairing(docs: list[PatchDoc]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if not docs:
+        return rows
+
+    exact_pairs = {
+        "pm_runtime_resume_and_get": ["pm_runtime_put", "pm_runtime_put_autosuspend", "pm_runtime_put_sync", "pm_runtime_put_noidle"],
+        "pm_runtime_get_sync": ["pm_runtime_put", "pm_runtime_put_autosuspend", "pm_runtime_put_sync", "pm_runtime_put_noidle"],
+        "clk_prepare_enable": ["clk_disable_unprepare"],
+        "clk_enable": ["clk_disable", "clk_unprepare"],
+        "clk_prepare": ["clk_unprepare"],
+        "regulator_enable": ["regulator_disable"],
+        "enable_irq": ["disable_irq", "disable_irq_nosync"],
+    }
+
+    suffix_pairs = {
+        "_get": ["_put", "_put_sync", "_put_autosuspend", "_put_noidle"],
+        "_enable": ["_disable", "_unprepare"],
+        "_prepare": ["_unprepare"],
+        "_alloc": ["_free", "_release", "_destroy", "_put"],
+        "_register": ["_unregister", "_remove", "_destroy"],
+        "_request": ["_free", "_release", "_put"],
+        "_map": ["_unmap"],
+        "_open": ["_close", "_release"],
+        "_start": ["_stop", "_shutdown"],
+        "_assign": ["_unassign"],
+        "_attach": ["_detach"],
+    }
+
+    for doc in docs:
+        added = _iter_added_lines(doc)
+        if not added:
+            continue
+
+        text = doc.text
+        for line in added:
+            for match in _CALL_RE.finditer(line):
+                func = match.group(1)
+                if not func or func.startswith("devm_"):
+                    continue
+
+                # Exact pair checks
+                if func in exact_pairs:
+                    expected = exact_pairs[func]
+                    if any(exp in text for exp in expected):
+                        continue
+                    location = f"{doc.path.name}:{find_line(doc, func) or 1}"
+                    rows.append(
+                        {
+                            "severity": "medium",
+                            "title": f"Independent scan: missing release for {func}",
+                            "location": location,
+                            "evidence": [
+                                f"Added {func}() call without a matching release helper in the patch context.",
+                                f"Expected one of: {', '.join(expected)}.",
+                            ],
+                            "required_action": "Confirm balanced enable/get/alloc pairs or add the matching release path.",
+                            "status": "open",
+                            "source_comment_id": f"subsys-scan:pair:{func}",
+                        }
+                    )
+                    continue
+
+                # Suffix pair checks
+                for suffix, releases in suffix_pairs.items():
+                    if not func.endswith(suffix):
+                        continue
+                    base = func[: -len(suffix)]
+                    expected = [base + rel for rel in releases]
+                    if any(exp in text for exp in expected):
+                        break
+                    location = f"{doc.path.name}:{find_line(doc, func) or 1}"
+                    rows.append(
+                        {
+                            "severity": "low",
+                            "title": f"Independent scan: unpaired call {func}",
+                            "location": location,
+                            "evidence": [
+                                f"Added {func}() call but did not see a matching release/unwind call in the patch context.",
+                                f"Expected one of: {', '.join(expected)}.",
+                            ],
+                            "required_action": "Check resource lifetime, error paths, and teardown logic for balance.",
+                            "status": "open",
+                            "source_comment_id": f"subsys-scan:pair:{func}",
+                        }
+                    )
+                    break
     return rows
 
 
@@ -438,7 +546,7 @@ def main() -> int:
         prior_comments_total = int(os.environ.get("A2A_PRIOR_COMMENTS_TOTAL", "0").strip() or "0")
     except ValueError:
         prior_comments_total = len(prior_comments)
-    if require_independent and prior_comments_total > 0 and not _has_independent_scan_row(findings):
+    if require_independent and not _has_independent_scan_row(findings):
         findings.extend(build_independent_scan_findings(docs))
 
     save_json(findings_file, {"findings": findings})
