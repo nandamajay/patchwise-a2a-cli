@@ -90,6 +90,9 @@ _PATCH_NEW_FILE_RE = re.compile(r"^\+\+\+ b/(.+)$")
 _BASE_COMMIT_TRAILER_RE = re.compile(r"^\s*base-commit:\s*([0-9a-fA-F]{7,40})\s*$", re.IGNORECASE | re.MULTILINE)
 _DT_PROPERTY_ASSIGN_RE = re.compile(r"^([A-Za-z0-9,._+-]+)\s*=")
 _DTS_FILE_RE = re.compile(r"(^|/)arch/arm64/boot/dts/.+\.dtsi?$")
+_TRAILER_LINE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]*:\s+.+$")
+_SIGNED_OFF_BY_RE = re.compile(r"^Signed-off-by:\s+.+<[^>]+>\s*$", re.IGNORECASE)
+_PATCH_TODO_RE = re.compile(r"\b(?:TODO|FIXME|WIP|XXX)\b")
 _CHECKPATCH_TOTALS_RE = re.compile(
     r"total:\s*(?P<errors>\d+)\s+errors?,\s*(?P<warnings>\d+)\s+warnings?,\s*(?P<checks>\d+)\s+checks?",
     re.IGNORECASE,
@@ -3865,6 +3868,195 @@ def _validate_findings(findings: list[dict], strict_evidence: bool) -> tuple[lis
     return errors, open_count
 
 
+def _extract_patch_commit_lines(lines: list[str]) -> list[str]:
+    start = 0
+    for idx, line in enumerate(lines):
+        if not line.strip():
+            start = idx + 1
+            break
+    end = len(lines)
+    for idx in range(start, len(lines)):
+        line = lines[idx]
+        if line == "---" or line.startswith("diff --git "):
+            end = idx
+            break
+    return lines[start:end]
+
+
+def _collect_surgical_series_findings(watch_path: Path, *, max_findings: int = 80) -> list[dict]:
+    findings: list[dict] = []
+    if max_findings < 1:
+        max_findings = 1
+
+    try:
+        patch_files = [p for p in _collect_active_patch_files(watch_path) if not _is_cover_patch_file(p)]
+    except Exception:
+        return findings
+
+    for patch in patch_files:
+        try:
+            lines = patch.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+
+        if not any(line.startswith("diff --git ") for line in lines):
+            findings.append(
+                {
+                    "severity": "high",
+                    "title": f"Patch payload looks malformed: no diff section in {patch.name}",
+                    "location": f"{patch.name}:1",
+                    "evidence": [f"{patch.name}: missing 'diff --git' section"],
+                    "required_action": "Regenerate patch with git format-patch and re-verify applyability.",
+                    "status": "open",
+                    "source_comment_id": f"independent-scan:malformed:{patch.name}",
+                }
+            )
+            if len(findings) >= max_findings:
+                break
+            continue
+
+        commit_lines = _extract_patch_commit_lines(lines)
+        has_signoff = any(_SIGNED_OFF_BY_RE.match(line.strip()) for line in commit_lines)
+        has_body = any(
+            stripped and not _TRAILER_LINE_RE.match(stripped) and stripped != "---"
+            for stripped in (line.strip() for line in commit_lines)
+        )
+        if not has_signoff:
+            findings.append(
+                {
+                    "severity": "high",
+                    "title": f"Missing Signed-off-by trailer in {patch.name}",
+                    "location": f"{patch.name}:1",
+                    "evidence": [f"{patch.name}: no Signed-off-by trailer found in commit message block"],
+                    "required_action": "Add a proper Signed-off-by trailer per Developer's Certificate of Origin.",
+                    "status": "open",
+                    "source_comment_id": f"independent-scan:signoff:{patch.name}",
+                }
+            )
+            if len(findings) >= max_findings:
+                break
+        if not has_body:
+            findings.append(
+                {
+                    "severity": "medium",
+                    "title": f"Commit message body is empty in {patch.name}",
+                    "location": f"{patch.name}:1",
+                    "evidence": [f"{patch.name}: commit message has trailers but no rationale body"],
+                    "required_action": "Add a short rationale/body explaining problem, approach, and impact.",
+                    "status": "open",
+                    "source_comment_id": f"independent-scan:message-body:{patch.name}",
+                }
+            )
+            if len(findings) >= max_findings:
+                break
+
+        current_file = ""
+        todo_hits = 0
+        for idx, line in enumerate(lines, start=1):
+            m = _PATCH_NEW_FILE_RE.match(line)
+            if m:
+                current_file = str(m.group(1) or "").strip()
+                continue
+
+            if not line.startswith("+") or line.startswith("+++"):
+                continue
+            content = line[1:].strip()
+
+            if _PATCH_TODO_RE.search(content):
+                todo_hits += 1
+                if todo_hits <= 3:
+                    findings.append(
+                        {
+                            "severity": "medium",
+                            "title": f"Temporary marker added in patch ({patch.name})",
+                            "location": f"{patch.name}:{idx}",
+                            "evidence": [f"added line contains TODO/FIXME/WIP/XXX: {content[:200]}"],
+                            "required_action": "Resolve or remove temporary markers before upstream submission.",
+                            "status": "open",
+                            "source_comment_id": f"independent-scan:todo:{patch.name}:{todo_hits}",
+                        }
+                    )
+                    if len(findings) >= max_findings:
+                        break
+
+            if not current_file or not _DTS_FILE_RE.search(current_file):
+                continue
+
+            prop_match = _DT_PROPERTY_ASSIGN_RE.match(content)
+            prop_name = str(prop_match.group(1) or "") if prop_match else ""
+            if prop_name in _DEPRECATED_DT_PROPERTIES:
+                findings.append(
+                    {
+                        "severity": "high",
+                        "title": f"Deprecated DT property added: {prop_name}",
+                        "location": f"{patch.name}:{idx}",
+                        "evidence": [f"{current_file}: adds deprecated property {prop_name!r}"],
+                        "required_action": "Replace deprecated DT property with supported upstream binding.",
+                        "status": "open",
+                        "source_comment_id": f"independent-scan:dt-deprecated:{patch.name}:{idx}",
+                    }
+                )
+                if len(findings) >= max_findings:
+                    break
+            if prop_name in _DOWNSTREAM_DT_PROPERTIES:
+                findings.append(
+                    {
+                        "severity": "high",
+                        "title": f"Downstream-only DT property added: {prop_name}",
+                        "location": f"{patch.name}:{idx}",
+                        "evidence": [f"{current_file}: adds downstream-only property {prop_name!r}"],
+                        "required_action": "Avoid downstream-only DT properties in upstream series.",
+                        "status": "open",
+                        "source_comment_id": f"independent-scan:dt-downstream:{patch.name}:{idx}",
+                    }
+                )
+                if len(findings) >= max_findings:
+                    break
+            for pat, reason in _DOWNSTREAM_DT_LINE_PATTERNS:
+                if pat.search(content):
+                    findings.append(
+                        {
+                            "severity": "high",
+                            "title": "Downstream-only DT pattern added",
+                            "location": f"{patch.name}:{idx}",
+                            "evidence": [f"{current_file}: {reason}; line={content[:220]}"],
+                            "required_action": "Replace downstream-only compatible/property usage with upstream-supported binding.",
+                            "status": "open",
+                            "source_comment_id": f"independent-scan:dt-pattern:{patch.name}:{idx}",
+                        }
+                    )
+                    if len(findings) >= max_findings:
+                        break
+            if len(findings) >= max_findings:
+                break
+        if len(findings) >= max_findings:
+            break
+
+    return findings
+
+
+def _merge_findings_by_source_id(findings: list[dict], extras: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in findings:
+        if not isinstance(row, dict):
+            continue
+        sid = str(row.get("source_comment_id") or "").strip()
+        if sid:
+            seen.add(sid)
+        out.append(row)
+    for row in extras:
+        if not isinstance(row, dict):
+            continue
+        sid = str(row.get("source_comment_id") or "").strip()
+        if sid and sid in seen:
+            continue
+        if sid:
+            seen.add(sid)
+        out.append(row)
+    return out
+
+
 def should_issue_lgtm(findings_json_path: str, reviewer_verdict: str) -> tuple[bool, str]:
     """
     LGTM requires ALL THREE conditions simultaneously:
@@ -7215,6 +7407,19 @@ def _validate_round_only(
                         encoding="utf-8",
                     )
 
+    if bool(cfg.get("surgical_review_parity_mode", True)):
+        watch_path_raw = str(session.get("watch_path") or "").strip()
+        if watch_path_raw:
+            max_scan_findings = int(cfg.get("surgical_scan_max_findings", 80) or 80)
+            extra_findings = _collect_surgical_series_findings(
+                Path(watch_path_raw),
+                max_findings=max_scan_findings,
+            )
+            if extra_findings:
+                findings = _merge_findings_by_source_id(findings, extra_findings)
+
+    findings_path.write_text(_as_json({"findings": findings}), encoding="utf-8")
+
     errors, open_count = _validate_findings(findings, strict)
     return session, open_count, findings, errors, findings_path
 
@@ -7734,6 +7939,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
         github_pr = str(getattr(args, "github_pr", "") or "").strip()
         gerrit_change = str(getattr(args, "gerrit_change", "") or "").strip()
         gerrit_base_url = str(getattr(args, "gerrit_base_url", "") or "").strip()
+        source_msgid = str(getattr(args, "source_msgid", "") or "").strip()
         fetch_out_dir = str(getattr(args, "fetch_out_dir", "") or "").strip()
         lore_input = lore_msgid or lore_url
         lore_source_msgid = _extract_lore_message_id(lore_input) if lore_input else None
@@ -7756,6 +7962,12 @@ def cmd_loop(args: argparse.Namespace) -> int:
             return 1
         if selected_external_sources > 1:
             _echo("Use only one external source: --lore-url/--lore-msgid, --github-pr, or --gerrit-change.")
+            return 1
+        if source_msgid and lore_input:
+            _echo("Use either --source-msgid or --lore-url/--lore-msgid, not both.")
+            return 1
+        if source_msgid and (github_pr or gerrit_change):
+            _echo("--source-msgid is only supported with --watch-path/local patch input.")
             return 1
 
         if lore_input:
@@ -7810,6 +8022,12 @@ def cmd_loop(args: argparse.Namespace) -> int:
             )
             watch_path = str(fetched_dir)
             _echo(f"Gerrit change fetched to: {watch_path}")
+        elif source_msgid:
+            source_context = {
+                "kind": "lore",
+                "message_id": source_msgid,
+                "url": f"https://lore.kernel.org/r/{source_msgid}",
+            }
 
         if not single_series_mode and not args.session and watch_path:
             wp = Path(watch_path)
@@ -7897,6 +8115,15 @@ def cmd_loop(args: argparse.Namespace) -> int:
                 session, added = _merge_session_focus_issues(root, session, focus_issues)
                 if added > 0:
                     _echo(f"Session {sid}: added {added} focus issue(s).")
+            if source_msgid:
+                session["review_source"] = {
+                    "kind": "lore",
+                    "message_id": source_msgid,
+                    "url": f"https://lore.kernel.org/r/{source_msgid}",
+                }
+                session["lore"] = {"message_id": source_msgid}
+                session["updated_at"] = _now_utc()
+                _write_session(root, session)
         else:
             if not args.task:
                 _echo("Missing --task for new autonomous session.")
@@ -9069,6 +9296,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_loop.add_argument(
         "--lore-msgid",
         help="Lore message-id root to fetch patch series via b4 for this new loop session.",
+    )
+    p_loop.add_argument(
+        "--source-msgid",
+        help="Use lore message-id as prior/bot review source context while reviewing local --watch-path patches.",
     )
     p_loop.add_argument(
         "--lore-out-dir",

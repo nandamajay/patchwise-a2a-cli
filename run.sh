@@ -30,16 +30,19 @@ Options:
   --max-iterations <n>       Cap rounds for this invocation
   --lore-out-dir <path>      Output directory for b4 lore fetch
   --fetch-out-dir <path>     Output directory for externally fetched patch sources
+  --source-msgid <id>        Attach lore message-id context for local path runs (enables prior/bot ingest)
   --github-pr <ref>          GitHub PR source (URL or owner/repo#number)
   --gerrit-change <ref>      Gerrit change source (URL, change number, or Change-Id)
   --gerrit-base-url <url>    Gerrit base URL for non-URL --gerrit-change values
+  --kernel-workspace <path>  Kernel repo path; runs 'a2a prepare --repo <path> --force' before loop/watch
+  --prepare-branch <name>    Branch for 'a2a prepare' when --kernel-workspace is used
   --builder-cmd <cmd>        Override builder command
   --reviewer-cmd <cmd>       Override reviewer command
   --focus-issue <text>       Force explicit coverage of issue/topic (repeatable)
   --auto-respin              Enable auto next-version generation after LGTM
   --no-auto-respin           Disable auto next-version generation after LGTM
   --watch-replies            Run lore watcher mode (a2a watch)
-  --msgid <id>               Lore thread message-id for watcher mode
+  --msgid <id>               Lore thread message-id for watcher mode (or local path source context)
   --poll <sec>               Poll interval for watcher mode (default: 300)
   --max-loops <n>            Optional loop cap for watcher mode
   --auto-followup            On new replies, trigger a2a loop automatically
@@ -256,6 +259,38 @@ default_prepare_branch() {
   printf '%s' "$branch"
 }
 
+existing_prepare_branch() {
+  "$PYTHON_BIN" - <<'PY' "$ROOT_DIR"
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+path = root / ".a2a" / "prepare.json"
+if not path.exists():
+    raise SystemExit(0)
+
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+
+branch = str(payload.get("branch") or "").strip() if isinstance(payload, dict) else ""
+if branch:
+    print(branch)
+PY
+}
+
+prepare_with_kernel_workspace() {
+  local repo_path="$1"
+  local branch="$2"
+  local -a cmd=("$PYTHON_BIN" -m a2a_cli.main prepare --repo "$repo_path" --branch "$branch" --force)
+  echo "Preparing A2A worktrees:"
+  printf '  %q' "${cmd[@]}"
+  echo
+  (cd "$ROOT_DIR" && "${cmd[@]}")
+}
+
 ensure_prepare() {
   if [[ -f "$ROOT_DIR/.a2a/prepare.json" ]]; then
     return 0
@@ -282,9 +317,12 @@ EXTEND_ROUNDS=""
 MAX_ITERATIONS=""
 LORE_OUT_DIR=""
 FETCH_OUT_DIR=""
+SOURCE_MSGID=""
 GITHUB_PR=""
 GERRIT_CHANGE=""
 GERRIT_BASE_URL=""
+KERNEL_WORKSPACE=""
+PREPARE_BRANCH_OVERRIDE=""
 BUILDER_CMD=""
 REVIEWER_CMD=""
 FOCUS_ISSUES=()
@@ -345,6 +383,11 @@ while (($#)); do
       FETCH_OUT_DIR="$2"
       shift 2
       ;;
+    --source-msgid)
+      (($# >= 2)) || die "--source-msgid requires a value"
+      SOURCE_MSGID="$2"
+      shift 2
+      ;;
     --github-pr)
       (($# >= 2)) || die "--github-pr requires a value"
       GITHUB_PR="$2"
@@ -358,6 +401,16 @@ while (($#)); do
     --gerrit-base-url)
       (($# >= 2)) || die "--gerrit-base-url requires a value"
       GERRIT_BASE_URL="$2"
+      shift 2
+      ;;
+    --kernel-workspace)
+      (($# >= 2)) || die "--kernel-workspace requires a value"
+      KERNEL_WORKSPACE="$2"
+      shift 2
+      ;;
+    --prepare-branch)
+      (($# >= 2)) || die "--prepare-branch requires a value"
+      PREPARE_BRANCH_OVERRIDE="$2"
       shift 2
       ;;
     --builder-cmd)
@@ -434,6 +487,24 @@ done
 
 if [[ "$WIZARD_MODE" == "true" ]]; then
   exec "$PYTHON_BIN" "$ROOT_DIR/scripts/a2a_loop_wizard.py"
+fi
+
+if [[ -n "$PREPARE_BRANCH_OVERRIDE" && -z "$KERNEL_WORKSPACE" ]]; then
+  die "--prepare-branch requires --kernel-workspace."
+fi
+
+if [[ -n "$KERNEL_WORKSPACE" ]]; then
+  KERNEL_WORKSPACE="$(resolve_path "$KERNEL_WORKSPACE")"
+  [[ -d "$KERNEL_WORKSPACE" ]] || die "Kernel workspace path not found: $KERNEL_WORKSPACE"
+  if ! git -C "$KERNEL_WORKSPACE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    die "Not a git repository: $KERNEL_WORKSPACE"
+  fi
+
+  PREPARE_BRANCH="${PREPARE_BRANCH_OVERRIDE:-$(existing_prepare_branch)}"
+  if [[ -z "$PREPARE_BRANCH" ]]; then
+    PREPARE_BRANCH="$(default_prepare_branch)"
+  fi
+  prepare_with_kernel_workspace "$KERNEL_WORKSPACE" "$PREPARE_BRANCH"
 fi
 
 if [[ "$WATCH_REPLIES" == "true" ]]; then
@@ -518,8 +589,14 @@ SOURCE_KIND=""
 if [[ -n "$GITHUB_PR" && -n "$GERRIT_CHANGE" ]]; then
   die "Use only one of --github-pr or --gerrit-change."
 fi
+if [[ -n "$SOURCE_MSGID" && -n "$SESSION_ID" ]]; then
+  die "--source-msgid cannot be combined with --session."
+fi
 if [[ -n "$SESSION_ID" && ( -n "$GITHUB_PR" || -n "$GERRIT_CHANGE" ) ]]; then
   die "--session cannot be combined with --github-pr/--gerrit-change."
+fi
+if [[ -n "$SOURCE_MSGID" && ( -n "$GITHUB_PR" || -n "$GERRIT_CHANGE" ) ]]; then
+  die "--source-msgid is only supported with local path runs."
 fi
 
 if [[ -n "$GITHUB_PR" ]]; then
@@ -596,6 +673,11 @@ fi
 
 [[ -n "$SOURCE_KIND" ]] || die "Could not determine input type. Pass lore URL/msgid/session/path."
 
+# Backward-compatible shortcut: in local path mode, allow --msgid to seed prior/bot source context.
+if [[ "$WATCH_REPLIES" != "true" && "$SOURCE_KIND" == "path" && -z "$SOURCE_MSGID" && -n "$WATCH_MSGID" ]]; then
+  SOURCE_MSGID="$WATCH_MSGID"
+fi
+
 ensure_prepare
 
 CMD=("$PYTHON_BIN" -m a2a_cli.main loop)
@@ -661,6 +743,9 @@ else
       ;;
     path)
       CMD+=(--watch-path "$SOURCE")
+      if [[ -n "$SOURCE_MSGID" ]]; then
+        CMD+=(--source-msgid "$SOURCE_MSGID")
+      fi
       ;;
     *)
       die "Unsupported source kind: $SOURCE_KIND"

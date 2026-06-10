@@ -94,6 +94,8 @@ def default_config() -> dict:
         "prior_review_max_comments": 120,
         "sashiko_ingest": True,
         "sashiko_base_url": "https://sashiko.dev",
+        "surgical_review_parity_mode": True,
+        "surgical_scan_max_findings": 80,
         "reviewer_consistency_guard": True,
         "full_subsystem_review_required": True,
         "lore_fetch_dir": "",
