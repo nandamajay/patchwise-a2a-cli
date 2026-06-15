@@ -445,6 +445,47 @@ def _write_series_manifest(out_dir: Path) -> Path | None:
     return series
 
 
+def _render_mbox_from_patch_files(patch_files: list[Path]) -> str:
+    chunks: list[str] = []
+    for patch in patch_files:
+        text = patch.read_text(encoding="utf-8", errors="replace").rstrip("\n")
+        chunks.append("From git@z Thu Jan  1 00:00:00 1970\n" + text + "\n")
+    return "\n".join(chunks) + ("\n" if chunks else "")
+
+
+def _artifact_stem(source_dir: Path, out_dir: Path) -> str:
+    for pattern in ("*.mbx", "*.cover"):
+        for candidate in sorted(source_dir.glob(pattern)):
+            if candidate.is_file():
+                return candidate.stem
+    return out_dir.name
+
+
+def _materialize_lore_artifacts(source_dir: Path, out_dir: Path) -> tuple[Path | None, Path | None]:
+    patch_files = sorted(p for p in out_dir.glob("*.patch") if p.is_file())
+    if not patch_files:
+        return None, None
+
+    cover_patch = next((p for p in patch_files if _is_cover_patch(p)), None)
+    non_cover = [p for p in patch_files if not _is_cover_patch(p)]
+    stem = _artifact_stem(source_dir, out_dir)
+
+    cover_out: Path | None = None
+    if cover_patch is not None:
+        cover_out = out_dir / f"{stem}.cover"
+        cover_out.write_text(
+            cover_patch.read_text(encoding="utf-8", errors="replace"),
+            encoding="utf-8",
+        )
+
+    mbox_out: Path | None = None
+    if non_cover:
+        mbox_out = out_dir / f"{stem}.mbx"
+        mbox_out.write_text(_render_mbox_from_patch_files(non_cover), encoding="utf-8")
+
+    return cover_out, mbox_out
+
+
 def _normalize_subject_body(body: str, *, version: int, index: int, total: int) -> str:
     tokens = [tok for tok in body.strip().split() if tok]
     kept: list[str] = []
@@ -737,6 +778,7 @@ def respin(
             _refresh_cover_letter_headers(cover_path)
         for cover_path in sorted(out_dir.rglob("*.cover")):
             _refresh_cover_letter_headers(cover_path)
+        _materialize_lore_artifacts(source_dir, out_dir)
 
         if output_copy_dir.exists():
             shutil.rmtree(output_copy_dir)

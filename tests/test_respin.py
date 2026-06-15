@@ -204,7 +204,8 @@ class RespinTests(unittest.TestCase):
 
     def test_output_copied_to_a2a_output(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            root, sid, _patches = self._bootstrap_workspace(td)
+            root, sid, patches = self._bootstrap_workspace(td)
+            (patches / "demo.cover").write_text("Subject: [PATCH v2 0/2] demo\n", encoding="utf-8")
 
             def fake_git(_repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
                 if args[:3] == ("rev-parse", "--verify", "origin/main"):
@@ -213,12 +214,31 @@ class RespinTests(unittest.TestCase):
                     return subprocess.CompletedProcess(args, 0, "main\n", "")
                 if args[:2] == ("status", "--porcelain"):
                     return subprocess.CompletedProcess(args, 0, "", "")
+                if args and args[0] == "format-patch":
+                    out_dir = Path(args[args.index("--output-directory") + 1])
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    (out_dir / "0000-cover-letter.patch").write_text(
+                        "Subject: [PATCH 0/2] demo\n\ncover\n",
+                        encoding="utf-8",
+                    )
+                    (out_dir / "0001-a.patch").write_text(
+                        "Subject: [PATCH 1/2] a\n\ndiff --git a/a b/a\n",
+                        encoding="utf-8",
+                    )
+                    (out_dir / "0002-b.patch").write_text(
+                        "Subject: [PATCH 2/2] b\n\ndiff --git a/b b/b\n",
+                        encoding="utf-8",
+                    )
                 return subprocess.CompletedProcess(args, 0, "", "")
 
             with mock.patch("a2a_cli.respin._run_git", side_effect=fake_git):
                 result = respin(root, sid, dry_run=False)
 
-            self.assertTrue(Path(result["output_copy_dir"]).exists())
+            output_copy = Path(result["output_copy_dir"])
+            self.assertTrue(output_copy.exists())
+            self.assertTrue((output_copy / "demo.cover").exists())
+            self.assertTrue((output_copy / "demo.mbx").exists())
+            self.assertIn("Subject: [PATCH v3 1/2] a", (output_copy / "demo.mbx").read_text(encoding="utf-8"))
 
     def test_respin_blocked_if_session_not_lgtm(self) -> None:
         with tempfile.TemporaryDirectory() as td:
