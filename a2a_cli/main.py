@@ -543,14 +543,26 @@ def _extract_lore_message_id(value: str) -> str:
     if not path:
         raise RuntimeError(f"Cannot extract message-id from lore URL: {value}")
 
-    for prefix in ("r/", "all/"):
-        if path.startswith(prefix):
-            token = path[len(prefix) :].split("/", 1)[0].strip().strip("<>").strip()
-            if token:
-                return unquote(token)
-    token = path.split("/", 1)[0].strip().strip("<>").strip()
+    segments = [seg.strip().strip("<>").strip() for seg in path.split("/") if seg.strip()]
+    if not segments:
+        raise RuntimeError(f"Cannot extract message-id from lore URL: {value}")
+
+    # Canonical lore forms usually start with /r/<msgid> or /all/<msgid>.
+    if segments[0] in {"r", "all"} and len(segments) > 1:
+        token = unquote(segments[1]).strip().strip("<>").strip()
+        if token:
+            return token
+
+    # List-scoped lore forms look like /linux-arm-msm/<msgid>/T/.
+    for seg in segments:
+        decoded = unquote(seg).strip().strip("<>").strip()
+        if "@" in decoded:
+            return decoded
+
+    # Fallback to first token for compatibility with older URL styles.
+    token = unquote(segments[0]).strip().strip("<>").strip()
     if token:
-        return unquote(token)
+        return token
     raise RuntimeError(f"Cannot extract message-id from lore URL: {value}")
 
 

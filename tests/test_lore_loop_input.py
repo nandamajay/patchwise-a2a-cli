@@ -18,6 +18,12 @@ class LoreLoopInputTests(unittest.TestCase):
         mid = _extract_lore_message_id("<20260504-abc@example.com>")
         self.assertEqual(mid, "20260504-abc@example.com")
 
+    def test_extract_lore_message_id_from_list_scoped_url(self) -> None:
+        mid = _extract_lore_message_id(
+            "https://lore.kernel.org/linux-arm-msm/20260610155708.151067-1-prasad.kumpatla@oss.qualcomm.com/"
+        )
+        self.assertEqual(mid, "20260610155708.151067-1-prasad.kumpatla@oss.qualcomm.com")
+
     def test_lore_fetch_base_dir_prefers_configured_kernel_tree(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             kernel_tree = Path(td) / "linux-next"
