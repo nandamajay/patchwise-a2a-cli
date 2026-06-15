@@ -24,6 +24,28 @@ From repo root:
 python -m pip install -e .
 ```
 
+This installs the `a2a` console command from `pyproject.toml`:
+
+```toml
+[project.scripts]
+a2a = "a2a_cli.main:main"
+```
+
+If your shell cannot find `a2a` after install, make sure the Python scripts
+directory used by `pip` is in `PATH`. For a per-user install, this is commonly:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+If you want to run directly from a source checkout without installing the
+package, add this alias to your shell startup file (`~/.bashrc`, `~/.zshrc`, or
+equivalent):
+
+```bash
+alias a2a='python -m a2a_cli.main'
+```
+
 Then use either form:
 
 ```bash
