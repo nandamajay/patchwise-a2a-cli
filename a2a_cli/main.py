@@ -68,6 +68,7 @@ from .static_analysis import run_gate as run_static_analysis_gate
 from .submission_mailer import build_patchset_summary
 from .types import StatusView
 from .upstream_evidence import enrich_findings_with_evidence, kernel_tree_exists
+from .driver_gap_analyzer import analyze_driver_gap, write_gap_analysis_reports
 
 try:
     from rich.console import Console
@@ -7952,6 +7953,40 @@ def _advance_session(root: Path, session_id: str) -> int:
     return 0
 
 
+def _stop_session_with_reason(
+    root: Path,
+    session_id: str,
+    reason: str,
+    *,
+    round_no: int | None = None,
+) -> None:
+    reason_text = str(reason or "loop stopped due to runtime failure").strip()
+    if not reason_text:
+        reason_text = "loop stopped due to runtime failure"
+    session = _load_session(root, session_id)
+    previous_status = str(session.get("status") or "")
+    if previous_status == "lgtm":
+        return
+
+    session["status"] = "stopped"
+    session["stop_reason"] = reason_text
+    if round_no is not None:
+        session["stopped_round"] = int(round_no)
+    session["updated_at"] = _now_utc()
+    _write_session(root, session)
+
+    state_path = root / A2A_DIRNAME / "state.json"
+    state = load_json(state_path)
+    if state.get("active_session_id") == session_id:
+        state["active_session_id"] = None
+        state["last_updated"] = _now_utc()
+        dump_json(state_path, state)
+
+    _set_summary_status(root, session_id, "stopped")
+    _append_summary_verdict(root, session_id, f"STOPPED ({reason_text})")
+    _echo(f"Session {session_id}: stopped. Reason: {reason_text}")
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     try:
         root = _must_find_root()
@@ -8343,42 +8378,84 @@ def cmd_loop(args: argparse.Namespace) -> int:
                 session["round_started_round"] = round_no
                 session["updated_at"] = round_started_at
                 _write_session(root, session)
-
-                rc = _run_agent_step(root, session, "builder", builder_cmd, round_no)
-                if rc != 0:
-                    _auto_write_session_html_report(root, sid)
-                    return rc
-
-                gate_ok, _gate_ran = _run_validation_gate(root, session, round_no)
-                _echo(render_gate_status(gate_ok))
-                if not gate_ok:
-                    _auto_write_session_html_report(root, sid)
-                    return 1
-
-                sa_result = _run_static_analysis(root, session, round_no)
-                if not sa_result.get("gate_passed", True):
-                    missing_tools = sa_result.get("missing_required_tools", [])
-                    if isinstance(missing_tools, list) and missing_tools:
-                        _echo(
-                            "Static analysis gate: required tool(s) missing: "
-                            + ", ".join(str(x) for x in missing_tools)
+                try:
+                    rc = _run_agent_step(root, session, "builder", builder_cmd, round_no)
+                    if rc != 0:
+                        _stop_session_with_reason(
+                            root,
+                            sid,
+                            f"{builder_display_name} step failed with rc={rc}",
+                            round_no=round_no,
                         )
-                    else:
-                        _echo("Static analysis gate: blocking findings present.")
+                        _auto_write_session_html_report(root, sid)
+                        return rc
+
+                    gate_ok, _gate_ran = _run_validation_gate(root, session, round_no)
+                    _echo(render_gate_status(gate_ok))
+                    if not gate_ok:
+                        _stop_session_with_reason(
+                            root,
+                            sid,
+                            f"validation gate failed in round {round_no}",
+                            round_no=round_no,
+                        )
+                        _auto_write_session_html_report(root, sid)
+                        return 1
+
+                    sa_result = _run_static_analysis(root, session, round_no)
+                    if not sa_result.get("gate_passed", True):
+                        missing_tools = sa_result.get("missing_required_tools", [])
+                        if isinstance(missing_tools, list) and missing_tools:
+                            _echo(
+                                "Static analysis gate: required tool(s) missing: "
+                                + ", ".join(str(x) for x in missing_tools)
+                            )
+                            stop_reason = (
+                                "static analysis gate failed; missing required tools: "
+                                + ", ".join(str(x) for x in missing_tools)
+                            )
+                        else:
+                            _echo("Static analysis gate: blocking findings present.")
+                            stop_reason = f"static analysis gate failed in round {round_no}"
+                        _stop_session_with_reason(root, sid, stop_reason, round_no=round_no)
+                        _auto_write_session_html_report(root, sid)
+                        return 1
+                    elif not sa_result.get("skipped", False):
+                        _echo("Static analysis gate: passed.")
+
+                    rc = _run_agent_step(root, session, "reviewer", reviewer_cmd, round_no)
+                    if rc != 0:
+                        _stop_session_with_reason(
+                            root,
+                            sid,
+                            f"{reviewer_display_name} step failed with rc={rc}",
+                            round_no=round_no,
+                        )
+                        _auto_write_session_html_report(root, sid)
+                        return rc
+
+                    rc = _advance_session(root, sid)
+                    session = _load_session(root, sid)
+                    status = str(session.get("status", "in_progress"))
+                    if rc != 0 and status not in {"lgtm", "stopped"}:
+                        _stop_session_with_reason(
+                            root,
+                            sid,
+                            f"round {round_no} advance failed",
+                            round_no=round_no,
+                        )
+                        session = _load_session(root, sid)
+                        status = str(session.get("status", "in_progress"))
+                    iterations += 1
+                except Exception as exc:
+                    _stop_session_with_reason(
+                        root,
+                        sid,
+                        f"unexpected loop error in round {round_no}: {exc.__class__.__name__}: {exc}",
+                        round_no=round_no,
+                    )
                     _auto_write_session_html_report(root, sid)
                     return 1
-                elif not sa_result.get("skipped", False):
-                    _echo("Static analysis gate: passed.")
-
-                rc = _run_agent_step(root, session, "reviewer", reviewer_cmd, round_no)
-                if rc != 0:
-                    _auto_write_session_html_report(root, sid)
-                    return rc
-
-                rc = _advance_session(root, sid)
-                session = _load_session(root, sid)
-                status = str(session.get("status", "in_progress"))
-                iterations += 1
 
                 if status == "lgtm":
                     rc = _run_auto_respin_if_requested(
@@ -9182,6 +9259,72 @@ def cmd_report(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_gap_analyze(args: argparse.Namespace) -> int:
+    try:
+        try:
+            aura_root = _must_find_root()
+        except RuntimeError:
+            aura_root = Path.cwd().resolve()
+
+        downstream_root = Path(str(args.downstream_root)).expanduser().resolve()
+        upstream_root = Path(str(args.upstream_root)).expanduser().resolve()
+        if not downstream_root.exists():
+            _echo(f"downstream_root not found: {downstream_root}")
+            return 1
+        if not upstream_root.exists():
+            _echo(f"upstream_root not found: {upstream_root}")
+            return 1
+
+        subsystem = str(args.subsystem or "").strip().lower()
+        if not subsystem:
+            _echo("subsystem is required")
+            return 1
+
+        if args.output_dir:
+            output_dir = Path(str(args.output_dir)).expanduser().resolve()
+        else:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            safe_driver = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(args.driver_name or "driver")).strip("_") or "driver"
+            output_dir = (aura_root / ".a2a" / "driver_gap_reports" / f"{safe_driver}-{stamp}").resolve()
+
+        result = analyze_driver_gap(
+            downstream_root=downstream_root,
+            upstream_root=upstream_root,
+            subsystem=subsystem,
+            aura_root=aura_root,
+            driver_name=str(args.driver_name or "").strip() or None,
+        )
+        files = write_gap_analysis_reports(result, output_dir)
+
+        _echo("Driver_Gap_Analyzer_V1 completed.")
+        _echo(f"Output directory: {output_dir}")
+        _echo(
+            "Summary: missing_interfaces={missing} vendor_hooks={vendor} deprecated_apis={deprecated} overall_risk={risk}".format(
+                missing=(result.get("missing_upstream_interfaces", {}) or {}).get("count", 0),
+                vendor=(result.get("vendor_hook_inventory", {}) or {}).get("count", 0),
+                deprecated=(result.get("deprecated_downstream_apis", {}) or {}).get("count", 0),
+                risk=(result.get("risk_assessment", {}) or {}).get("overall", "unknown"),
+            )
+        )
+        for key in [
+            "api_gap_report",
+            "upstreaming_roadmap",
+            "patch_sequence",
+            "risk_assessment",
+            "architecture_document",
+            "implementation_plan",
+            "mvp_scope",
+            "first_executable_milestone",
+        ]:
+            path = files.get(key)
+            if path:
+                _echo(f"- {key}: {path}")
+        return 0
+    except RuntimeError as exc:
+        _echo(str(exc))
+        return 1
+
+
 def _load_status_view(root: Path) -> StatusView:
     a2a_dir = root / A2A_DIRNAME
     state_path = a2a_dir / "state.json"
@@ -9750,6 +9893,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write output to file path instead of stdout.",
     )
     p_report.set_defaults(func=cmd_report)
+
+    p_gap = sub.add_parser(
+        "gap-analyze",
+        help="Run Driver_Gap_Analyzer_V1 against downstream/upstream trees and generate upstreaming plan artifacts.",
+    )
+    p_gap.add_argument(
+        "--downstream-root",
+        required=True,
+        help="Path to downstream driver source tree (typically downstream kernel tree root).",
+    )
+    p_gap.add_argument(
+        "--upstream-root",
+        required=True,
+        help="Path to upstream kernel source tree root.",
+    )
+    p_gap.add_argument(
+        "--subsystem",
+        required=True,
+        help="Subsystem type (audio, camera, drm, networking, etc.).",
+    )
+    p_gap.add_argument(
+        "--driver-name",
+        help="Optional driver label used in reports (e.g. wsa884x).",
+    )
+    p_gap.add_argument(
+        "--output-dir",
+        help="Output directory for generated artifacts (default: .a2a/driver_gap_reports/<driver>-<timestamp>).",
+    )
+    p_gap.set_defaults(func=cmd_gap_analyze)
 
     return parser
 
