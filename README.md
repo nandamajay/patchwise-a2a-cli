@@ -148,7 +148,27 @@ a2a report --session <session-id> --format html --output /abs/path/report.html
 
 When multiple loops target the same prepared worktrees, `a2a loop` now serializes them with a worktree lock under `.a2a/locks/worktrees/` to avoid concurrent write contention.
 
-### 6) Optional submission gate
+### 6) Analyze downstream-to-upstream driver gaps
+
+```bash
+a2a gap-analyze \
+  --downstream-root /path/to/downstream/kernel \
+  --upstream-root /path/to/upstream/kernel \
+  --subsystem audio \
+  --driver-name wsa884x \
+  --output-dir /path/to/output/reports
+```
+
+Generated artifacts include:
+- API gap and missing upstream interfaces
+- deprecated downstream APIs
+- vendor hook inventory
+- DT/Kconfig/Makefile/architecture differences
+- dependency graph
+- upstreaming roadmap, patch sequence, difficulty and risk
+- architecture document, implementation plan, MVP scope, and first executable milestone
+
+### 7) Optional submission gate
 
 ```bash
 a2a submit --session <session-id>
