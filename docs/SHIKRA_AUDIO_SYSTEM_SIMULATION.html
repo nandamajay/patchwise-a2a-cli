@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Shikra Audio System Simulation</title>
+  <style>
+    :root {
+      --bg: #eef4ff;
+      --panel: #ffffff;
+      --ink: #11233d;
+      --muted: #4b5f7c;
+      --line: #d0ddef;
+      --clk: #0b78d1;
+      --pwr: #0d9a74;
+      --rst: #d08c00;
+      --gpio: #7d53b2;
+      --audio: #f26022;
+      --i2c: #1b9b7d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Aptos", "Gill Sans", "Noto Sans", sans-serif;
+      color: var(--ink);
+      background: linear-gradient(180deg, #dde8ff 0%, var(--bg) 260px);
+      line-height: 1.45;
+    }
+    .wrap {
+      max-width: 1360px;
+      margin: 0 auto;
+      padding: 18px;
+    }
+    .hero, .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: 0 10px 28px rgba(10, 25, 51, 0.08);
+    }
+    .hero { padding: 16px; margin-bottom: 12px; }
+    .panel { padding: 14px; margin-top: 12px; }
+    h1 { margin: 0 0 6px; font-size: 1.65rem; }
+    h2 { margin: 0 0 8px; font-size: 1.2rem; }
+    h3 { margin: 0 0 6px; font-size: 0.95rem; }
+    p { margin: 7px 0; }
+    .muted { color: var(--muted); }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-top: 8px;
+    }
+    button {
+      border: 1px solid #b4c8e8;
+      background: #fff;
+      color: #173055;
+      border-radius: 8px;
+      padding: 6px 10px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button:hover { background: #f1f6ff; }
+
+    .diagram {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #f8fbff;
+      padding: 10px;
+      overflow-x: auto;
+    }
+    .sim {
+      min-width: 1120px;
+      display: grid;
+      grid-template-columns: 1.2fr 1.35fr 1fr 0.95fr;
+      gap: 10px;
+    }
+    .blk {
+      border: 1px solid #c6d7ef;
+      border-radius: 10px;
+      background: #fff;
+      padding: 8px;
+      margin-bottom: 7px;
+    }
+    .sub {
+      border: 1px solid #d3e0f0;
+      border-radius: 7px;
+      background: #f8fbff;
+      padding: 4px 6px;
+      margin-bottom: 5px;
+      font-size: 0.8rem;
+    }
+    .status {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      font-size: 0.8rem;
+      color: #304765;
+      margin-top: 4px;
+    }
+    .status span { display: inline-flex; gap: 5px; align-items: center; }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #acb8cc;
+      box-shadow: 0 0 0 3px rgba(172,184,204,0.25);
+      animation: dotPwr 14s linear infinite;
+    }
+    .dot.clk { animation-name: dotClk; }
+    .dot.rst { animation-name: dotRst; }
+    .dot.gpio { animation-name: dotGpio; }
+    .dot.stream { animation-name: dotStream; }
+    @keyframes dotPwr { 0%,8% { background:#acb8cc; box-shadow:0 0 0 3px rgba(172,184,204,.25);} 10%,100% { background:var(--pwr); box-shadow:0 0 0 4px rgba(13,154,116,.24);} }
+    @keyframes dotClk { 0%,21% { background:#acb8cc; box-shadow:0 0 0 3px rgba(172,184,204,.25);} 23%,100% { background:var(--clk); box-shadow:0 0 0 4px rgba(11,120,209,.24);} }
+    @keyframes dotRst { 0%,34% { background:#acb8cc; box-shadow:0 0 0 3px rgba(172,184,204,.25);} 36%,100% { background:var(--rst); box-shadow:0 0 0 4px rgba(208,140,0,.24);} }
+    @keyframes dotGpio { 0%,47% { background:#acb8cc; box-shadow:0 0 0 3px rgba(172,184,204,.25);} 49%,100% { background:var(--gpio); box-shadow:0 0 0 4px rgba(125,83,178,.22);} }
+    @keyframes dotStream { 0%,62% { background:#acb8cc; box-shadow:0 0 0 3px rgba(172,184,204,.25);} 64%,100% { background:var(--audio); box-shadow:0 0 0 4px rgba(242,96,34,.22);} }
+
+    .bus {
+      border: 1px solid #cad8ef;
+      border-radius: 10px;
+      background: #f8fbff;
+      padding: 8px;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 170px 1fr 170px;
+      align-items: center;
+      gap: 8px;
+      margin: 7px 0;
+    }
+    .net {
+      border: 1px solid #cfdeef;
+      border-radius: 8px;
+      background: #fff;
+      text-align: center;
+      padding: 5px 6px;
+      font-size: 0.77rem;
+      color: #2f4663;
+    }
+    .wire {
+      position: relative;
+      height: 4px;
+      border-radius: 99px;
+      background: #b8c8e7;
+      overflow: hidden;
+    }
+    .wire.clock { background: linear-gradient(90deg, #8ec6ba, #77bbe8); }
+    .wire.data { background: linear-gradient(90deg, #f5ba9c, #f9d8c6); }
+    .wire.gpio { background: linear-gradient(90deg, #c2a8e2, #dfd0f0); }
+    .wire.i2c { background: linear-gradient(90deg, #9fd4c4, #cfe9e0); }
+    .wire.audio { background: linear-gradient(90deg, #f48e5d, #fbc09f); }
+    .pulse {
+      position: absolute;
+      top: -4px;
+      left: -14px;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--clk);
+      box-shadow: 0 0 0 4px rgba(11,120,209,.2);
+      animation: flowFwd 14s linear infinite;
+    }
+    .pulse.rev {
+      left: calc(100% + 14px);
+      background: var(--audio);
+      box-shadow: 0 0 0 4px rgba(242,96,34,.2);
+      animation-name: flowRev;
+    }
+    .pulse.p2 { animation-delay: 2.8s; }
+    .pulse.p3 { animation-delay: 5.6s; }
+    .pulse.p4 { animation-delay: 8.4s; }
+    @keyframes flowFwd { 0%,14% { left:-14px; opacity:0; } 16%,23% { opacity:1; } 28% { left:calc(100% + 14px); opacity:0; } 100% { left:calc(100% + 14px); opacity:0; } }
+    @keyframes flowRev { 0%,14% { left:calc(100% + 14px); opacity:0; } 16%,23% { opacity:1; } 28% { left:-14px; opacity:0; } 100% { left:-14px; opacity:0; } }
+
+    .endpoint {
+      border: 1px solid #c7d6ee;
+      border-radius: 10px;
+      background: #fff;
+      padding: 8px;
+      margin-bottom: 8px;
+      font-size: 0.82rem;
+    }
+    .endpoint strong { display:block; margin-bottom:4px; }
+
+    .steps {
+      margin-top: 10px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
+      gap: 8px;
+    }
+    .step {
+      border: 1px solid #c8d6ee;
+      border-radius: 8px;
+      background: #fff;
+      padding: 7px 8px;
+      font-size: 0.82rem;
+      color: #2d4360;
+      opacity: 0.2;
+      animation: stepFlash 14s linear infinite;
+    }
+    .step.t1 { animation-delay: 0.3s; }
+    .step.t2 { animation-delay: 2.0s; }
+    .step.t3 { animation-delay: 3.7s; }
+    .step.t4 { animation-delay: 5.4s; }
+    .step.t5 { animation-delay: 7.1s; }
+    .step.t6 { animation-delay: 8.8s; }
+    .step.t7 { animation-delay: 10.5s; }
+    .step.t8 { animation-delay: 12.2s; }
+    @keyframes stepFlash { 0%,4% { opacity:.2; transform:translateY(0);} 8%,14% { opacity:1; transform:translateY(-2px);} 22%,100% { opacity:.2; transform:translateY(0);} }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 9px;
+      font-size: 0.92rem;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 8px 9px;
+      vertical-align: top;
+    }
+    th { background: #eef4ff; }
+
+    .schem-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 10px;
+      margin-top: 8px;
+    }
+    .schem {
+      border: 1px solid #c9d6ef;
+      border-radius: 10px;
+      background: #fff;
+      padding: 8px;
+    }
+    .schem img {
+      width: 100%;
+      height: auto;
+      border: 1px solid #d5e0f0;
+      border-radius: 8px;
+      display: block;
+    }
+    .schem small { color: var(--muted); display:block; margin-top:6px; }
+
+    body.paused .dot,
+    body.paused .pulse,
+    body.paused .step {
+      animation-play-state: paused !important;
+    }
+
+    @media (max-width: 900px) {
+      .wrap { padding: 12px; }
+      .sim { min-width: 980px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>Shikra Audio System Simulation</h1>
+      <p class="muted">
+        Dedicated simulation page for Shikra audio bring-up: LPASS sub-blocks, SoundWire master/slave links,
+        GPIO/I2C control, and headset/speaker endpoints with staged animation.
+      </p>
+      <div class="toolbar">
+        <button id="toggleAnim">Pause Animations</button>
+        <button id="replaySystem">Replay Sequence</button>
+        <span class="muted">Sequence: power -> clock -> reset release -> GPIO/IRQ -> enum -> stream.</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Board Simulation</h2>
+      <div class="diagram">
+        <div class="sim">
+          <div>
+            <div class="blk">
+              <h3>Shikra SoC / LPASS</h3>
+              <div class="sub"><strong>audiocorecc</strong> (root clocks + SWR reset controls)</div>
+              <div class="sub"><strong>rxmacro</strong> <code>codec@A040000</code> (<code>mclk</code>, <code>npl</code>, <code>fsgen</code>)</div>
+              <div class="sub"><strong>vamacro</strong> <code>codec@a078000</code> (<code>mclk</code>, <code>npl</code>)</div>
+              <div class="sub"><strong>swr1</strong> <code>soundwire@a060000</code> (RX controller)</div>
+              <div class="sub"><strong>swr0</strong> <code>soundwire@a080000</code> (VA_TX controller)</div>
+            </div>
+            <div class="status">
+              <span><i class="dot"></i>Power</span>
+              <span><i class="dot clk"></i>Clock</span>
+              <span><i class="dot rst"></i>Reset</span>
+              <span><i class="dot gpio"></i>GPIO/IRQ</span>
+              <span><i class="dot stream"></i>Audio Stream</span>
+            </div>
+          </div>
+
+          <div class="bus">
+            <div class="row"><span class="net">SWR_RX_CLK_R</span><div class="wire clock"><span class="pulse p1"></span><span class="pulse p3 rev"></span></div><span class="net">SWR_RX_CLK</span></div>
+            <div class="row"><span class="net">SWR_RX_DATA0_R</span><div class="wire data"><span class="pulse p2"></span><span class="pulse p4 rev"></span></div><span class="net">SWR_RX_DATA0</span></div>
+            <div class="row"><span class="net">SWR_RX_DATA1_R</span><div class="wire data"><span class="pulse p3"></span><span class="pulse p2 rev"></span></div><span class="net">SWR_RX_DATA1</span></div>
+            <div class="row"><span class="net">SWR_TX_CLK_R</span><div class="wire clock"><span class="pulse p1"></span><span class="pulse p3 rev"></span></div><span class="net">SWR_TX_CLK</span></div>
+            <div class="row"><span class="net">SWR_TX_DATA0_R</span><div class="wire data"><span class="pulse p2"></span><span class="pulse p4 rev"></span></div><span class="net">SWR_TX_DATA0</span></div>
+            <div class="row"><span class="net">CODEC_INT</span><div class="wire gpio"><span class="pulse p3 rev"></span></div><span class="net">PM4125 IRQ</span></div>
+            <div class="row"><span class="net">I2C3</span><div class="wire i2c"><span class="pulse p1"></span><span class="pulse p2 rev"></span></div><span class="net">wsa885x_i2c@c</span></div>
+            <div class="row"><span class="net">powerdown-gpio</span><div class="wire gpio"><span class="pulse p4"></span></div><span class="net">WSA885x PWDN</span></div>
+            <div class="row"><span class="net">Playback route</span><div class="wire audio"><span class="pulse p2"></span></div><span class="net">Headset/Speaker</span></div>
+            <div class="row"><span class="net">Capture route</span><div class="wire audio"><span class="pulse p4 rev"></span></div><span class="net">Mic -> SoC</span></div>
+          </div>
+
+          <div>
+            <div class="blk">
+              <h3>PM4125 Codec (SoundWire Slave)</h3>
+              <div class="sub"><strong>Slave attach</strong> + init-complete handshake</div>
+              <div class="sub"><strong>Playback sub-blocks:</strong> HPH_L / HPH_R / LO</div>
+              <div class="sub"><strong>Capture sub-blocks:</strong> ADC1 / DMIC paths</div>
+              <div class="sub"><strong>Control:</strong> MBHC + IRQ signaling</div>
+              <div class="sub">Board links via <code>R40770..R40774</code> (0R)</div>
+            </div>
+            <div class="blk">
+              <h3>WSA885x Amplifier Path</h3>
+              <div class="sub"><code>wsa885x_i2c@c</code> on I2C3 sideband control</div>
+              <div class="sub"><code>interrupt-gpios</code> and <code>powerdown-gpios</code> sequencing</div>
+              <div class="sub">Speaker amplifier enable/config independent of SWR timing</div>
+            </div>
+          </div>
+
+          <div>
+            <div class="endpoint"><strong>Headset Endpoint</strong> HPHL/HPHR playback + headset mic capture + jack events.</div>
+            <div class="endpoint"><strong>Speaker Endpoint</strong> WSA885x-driven output path.</div>
+            <div class="endpoint"><strong>Board Mic Endpoint</strong> ADC/DMIC capture routed back to LPASS.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="steps">
+        <div class="step t1"><strong>T0</strong> Rails up (for example <code>VREG_L15A_1P8</code>)</div>
+        <div class="step t2"><strong>T1</strong> LPASS enables SWR interface clocks</div>
+        <div class="step t3"><strong>T2</strong> <code>swr_audio_cgcr</code> reset release</div>
+        <div class="step t4"><strong>T3</strong> SWR clock/data valid on board nets</div>
+        <div class="step t5"><strong>T4</strong> PM4125 enum/attach completes</div>
+        <div class="step t6"><strong>T5</strong> GPIO/IRQ path active (<code>CODEC_INT</code>)</div>
+        <div class="step t7"><strong>T6</strong> WSA I2C + powerdown-gpio programmed</div>
+        <div class="step t8"><strong>T7</strong> Stable playback/capture on endpoints</div>
+      </div>
+
+      <table>
+        <thead><tr><th>Path</th><th>Signals / nodes</th><th>If broken, likely symptom</th></tr></thead>
+        <tbody>
+          <tr><td>SoundWire physical</td><td><code>SWR_RX_CLK/DATA0/DATA1</code>, <code>SWR_TX_CLK/DATA0</code></td><td><code>-110</code> init timeout, port mismatch logs</td></tr>
+          <tr><td>Clock/reset chain</td><td><code>audiocorecc</code>, macro <code>mclk/npl/fsgen</code>, <code>swr_audio_cgcr</code></td><td>frame-gen transition failures</td></tr>
+          <tr><td>GPIO/IRQ</td><td><code>CODEC_INT</code>, WSA <code>interrupt-gpios</code></td><td>probe stalls / late runtime failures</td></tr>
+          <tr><td>I2C sideband</td><td><code>i2c3 -> wsa885x_i2c@c</code>, <code>powerdown-gpios</code></td><td>speaker path dead while SWR seems fine</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>Schematic Snapshots Used</h2>
+      <div class="schem-grid">
+        <div class="schem">
+          <img src="assets/shikra_ld20_93536_100_sheet12.png" alt="Shikra sheet 12 PM225 codec and SWR nets" />
+          <small>LD20-93536-100 sheet 12: PM225 codec region with SWR nets and 0R links.</small>
+        </div>
+        <div class="schem">
+          <img src="assets/shikra_ld20_93536_100_sheet36.png" alt="Shikra sheet 36 I2S mux and SWR links" />
+          <small>LD20-93536-100 sheet 36: I2S0 mux labels crossing with SWR_*_R signals.</small>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    (function () {
+      var btn = document.getElementById('toggleAnim');
+      var replay = document.getElementById('replaySystem');
+      var paused = false;
+
+      btn.addEventListener('click', function () {
+        paused = !paused;
+        if (paused) {
+          document.body.classList.add('paused');
+          btn.textContent = 'Resume Animations';
+        } else {
+          document.body.classList.remove('paused');
+          btn.textContent = 'Pause Animations';
+        }
+      });
+
+      replay.addEventListener('click', function () {
+        var nodes = document.querySelectorAll('.dot, .pulse, .step');
+        nodes.forEach(function (n) { n.style.animation = 'none'; });
+        void document.body.offsetWidth;
+        nodes.forEach(function (n) { n.style.animation = ''; });
+      });
+    })();
+  </script>
+</body>
+</html>

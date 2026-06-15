@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from a2a_cli.main import (
+    _auto_generate_next_version,
     _build_suggested_replies_markdown,
     _complete_builder_diff_changelog_rows,
     _generate_lore_next_version,
@@ -170,6 +171,35 @@ def test_generate_lore_next_version_single_patch_watch_path_creates_vn_directory
         assert Path(payload["report"]).exists()
 
 
+def test_auto_generate_next_version_persists_fallback_reason() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        watch = root / "watch"
+        watch.mkdir(parents=True, exist_ok=True)
+        (watch / "0001-test.patch").write_text(
+            "\n".join(
+                [
+                    "From: Author <author@example.com>",
+                    "Subject: [PATCH 1/1] fallback test",
+                    "",
+                    "---",
+                    "diff --git a/a b/a",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        session = {"id": "sess-fallback", "watch_path": str(watch)}
+        with mock.patch("a2a_cli.main.run_respin", side_effect=RuntimeError("dirty tree")):
+            payload = _auto_generate_next_version(root, session)
+        assert payload["kind"] == "watch_copy"
+        assert payload["fallback_reason"] == "dirty tree"
+        report = Path(payload["report"])
+        report_payload = json.loads(report.read_text(encoding="utf-8"))
+        assert report_payload["kind"] == "watch_copy"
+        assert report_payload["fallback_reason"] == "dirty tree"
+
+
 def test_generate_lore_next_version_respects_cover_version_and_series_count() -> None:
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -256,6 +286,74 @@ def test_generate_lore_next_version_respects_cover_version_and_series_count() ->
         assert "Subject: [PATCH v3 1/2]" in out_mbx_text
         assert "Subject: [PATCH v3 2/2]" in out_mbx_text
         assert "Subject: [PATCH v3 3/3]" not in out_mbx_text
+
+
+def test_generate_lore_next_version_prunes_stale_versioned_families() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        watch = root / "lore-watch"
+        watch.mkdir(parents=True, exist_ok=True)
+
+        v5_dir = watch / "v5_demo.patches"
+        v6_dir = watch / "v6_demo.patches"
+        v5_dir.mkdir(parents=True, exist_ok=True)
+        v6_dir.mkdir(parents=True, exist_ok=True)
+
+        (watch / "v5_demo.cover").write_text(
+            "Subject: [PATCH v5 0/1] old demo\nFrom: Author <author@example.com>\n",
+            encoding="utf-8",
+        )
+        (watch / "v5_demo.mbx").write_text(
+            "Subject: [PATCH v5 1/1] old patch\n",
+            encoding="utf-8",
+        )
+        (v5_dir / "0001-old.patch").write_text(
+            "Subject: [PATCH v5 1/1] old patch\n\n---\n",
+            encoding="utf-8",
+        )
+        (v5_dir / "series").write_text("0001-old.patch\n", encoding="utf-8")
+
+        (watch / "v6_demo.cover").write_text(
+            "Subject: [PATCH v6 0/2] new demo\nFrom: Author <author@example.com>\n",
+            encoding="utf-8",
+        )
+        (watch / "v6_demo.mbx").write_text(
+            "\n".join(
+                [
+                    "Subject: [PATCH v6 1/2] patch-a",
+                    "",
+                    "Subject: [PATCH v6 2/2] patch-b",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (v6_dir / "0001-a.patch").write_text(
+            "Subject: [PATCH v6 1/2] patch-a\n\n---\n",
+            encoding="utf-8",
+        )
+        (v6_dir / "0002-b.patch").write_text(
+            "Subject: [PATCH v6 2/2] patch-b\n\n---\n",
+            encoding="utf-8",
+        )
+        (v6_dir / "series").write_text("0001-a.patch\n0002-b.patch\n", encoding="utf-8")
+
+        session = {
+            "id": "sess-lore-prune-families",
+            "watch_path": str(watch),
+            "lore": {"message_id": "20260504-seed@example.com"},
+        }
+        payload = _generate_lore_next_version(root, session)
+        out_path = Path(payload["output_path"])
+
+        assert out_path.exists()
+        assert payload["source_patchset_name"] == "v6_demo"
+        assert payload["pruned_patchset_families"] == ["v5_demo"]
+        assert (out_path / "v6_demo.patches").is_dir()
+        assert not (out_path / "v5_demo.patches").exists()
+        assert not (out_path / "v5_demo.cover").exists()
+        assert not (out_path / "v5_demo.mbx").exists()
+        assert int(payload["patch_count"]) == 2
 
 
 def test_generate_lore_next_version_refreshes_cover_thread_headers() -> None:

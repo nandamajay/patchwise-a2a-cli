@@ -1,0 +1,1746 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SoundWire Codec Deep Dive (Visual + Practical)</title>
+  <style>
+    :root {
+      --bg: #f3f7ff;
+      --panel: #ffffff;
+      --ink: #102038;
+      --muted: #53627b;
+      --line: #d7dfed;
+      --brand: #005ec2;
+      --brand2: #0a987a;
+      --warn: #b17100;
+      --bad: #b62e2e;
+      --dark: #0f1827;
+      --dark-ink: #e6edf9;
+      --pulse: #ff5f1f;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Noto Sans", "Liberation Sans", sans-serif;
+      color: var(--ink);
+      background: linear-gradient(180deg, #e6efff 0%, var(--bg) 240px);
+      line-height: 1.55;
+    }
+    .wrap {
+      max-width: 1220px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    .hero, .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: 0 8px 24px rgba(9, 23, 48, 0.06);
+    }
+    .hero {
+      padding: 22px;
+      margin-bottom: 14px;
+    }
+    .panel {
+      padding: 18px;
+      margin-top: 14px;
+    }
+    h1 { margin: 0 0 8px; font-size: 1.95rem; }
+    h2 {
+      margin: 0 0 10px;
+      font-size: 1.32rem;
+      border-bottom: 2px solid #ebf0f8;
+      padding-bottom: 7px;
+    }
+    h3 { margin: 12px 0 8px; font-size: 1.06rem; }
+    p { margin: 9px 0; }
+    .muted { color: var(--muted); }
+    .chips { margin: 10px 0 0; }
+    .chip {
+      display: inline-block;
+      margin: 0 6px 6px 0;
+      border: 1px solid var(--line);
+      background: #f6faff;
+      border-radius: 999px;
+      font-size: 0.83rem;
+      padding: 3px 9px;
+    }
+    .toolbar {
+      margin-top: 10px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+    button {
+      border: 1px solid #b6c7e6;
+      background: #ffffff;
+      color: #173156;
+      border-radius: 8px;
+      padding: 6px 10px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button:hover { background: #f2f7ff; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 12px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      background: #fcfdff;
+      border-radius: 10px;
+      padding: 12px;
+    }
+
+    .diagram {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #f9fbff;
+      padding: 12px;
+      overflow-x: auto;
+    }
+
+    .pipeline {
+      min-width: 980px;
+      position: relative;
+      padding: 28px 16px 52px;
+    }
+    .pipeline .line {
+      position: absolute;
+      left: 72px;
+      right: 72px;
+      top: 86px;
+      height: 4px;
+      background: linear-gradient(90deg, #98b4ea 0%, #75d5bf 100%);
+      border-radius: 99px;
+    }
+    .stage-row {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 10px;
+      position: relative;
+      z-index: 2;
+    }
+    .stage {
+      border: 1px solid #b7c9ea;
+      background: #ffffff;
+      border-radius: 10px;
+      padding: 10px;
+      min-height: 104px;
+      text-align: center;
+    }
+    .stage small { color: var(--muted); display: block; }
+    .packet {
+      position: absolute;
+      top: 80px;
+      left: 72px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--pulse);
+      box-shadow: 0 0 0 4px rgba(255, 95, 31, 0.2);
+      animation: flowPacket 8s linear infinite;
+      z-index: 3;
+    }
+    .packet.p2 {
+      animation-delay: 2.7s;
+      background: #0f9b88;
+      box-shadow: 0 0 0 4px rgba(15, 155, 136, 0.2);
+    }
+    @keyframes flowPacket {
+      0%   { left: 72px; opacity: 0; }
+      5%   { opacity: 1; }
+      90%  { opacity: 1; }
+      100% { left: calc(100% - 86px); opacity: 0; }
+    }
+
+    .lanes {
+      min-width: 980px;
+      position: relative;
+      padding: 10px 6px 16px;
+    }
+    .lane {
+      position: relative;
+      border: 1px solid #cad7ef;
+      border-radius: 10px;
+      background: #fff;
+      padding: 10px 10px 20px;
+      margin-bottom: 10px;
+      min-height: 80px;
+    }
+    .lane .track {
+      position: absolute;
+      left: 130px;
+      right: 24px;
+      top: 38px;
+      height: 3px;
+      border-radius: 99px;
+      background: #b8c8e7;
+    }
+    .lane .token {
+      position: absolute;
+      top: 31px;
+      left: 130px;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      z-index: 3;
+    }
+    .lane.audio .token {
+      background: #f45d1f;
+      box-shadow: 0 0 0 4px rgba(244, 93, 31, 0.2);
+      animation: tokenRight 6s linear infinite;
+    }
+    .lane.ctrl .token {
+      background: #005ec2;
+      box-shadow: 0 0 0 4px rgba(0, 94, 194, 0.2);
+      animation: tokenLeft 5.2s linear infinite;
+    }
+    @keyframes tokenRight {
+      0% { left: 130px; opacity: 0; }
+      8% { opacity: 1; }
+      100% { left: calc(100% - 38px); opacity: 0; }
+    }
+    @keyframes tokenLeft {
+      0% { left: calc(100% - 38px); opacity: 0; }
+      8% { opacity: 1; }
+      100% { left: 130px; opacity: 0; }
+    }
+
+    .sequence {
+      min-width: 980px;
+      position: relative;
+      padding: 10px 6px 14px;
+    }
+    .swim {
+      display: grid;
+      grid-template-columns: 22% 26% 26% 26%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: hidden;
+      background: #fff;
+    }
+    .swim .head {
+      background: #eef4ff;
+      border-right: 1px solid var(--line);
+      padding: 8px;
+      font-weight: 700;
+      text-align: center;
+    }
+    .swim .head:last-child { border-right: 0; }
+    .swim .col {
+      border-right: 1px solid var(--line);
+      min-height: 300px;
+      position: relative;
+      padding: 12px 8px;
+    }
+    .swim .col:last-child { border-right: 0; }
+    .evt {
+      position: relative;
+      margin-bottom: 8px;
+      border: 1px solid #c2d2ec;
+      border-radius: 8px;
+      background: #f8fbff;
+      padding: 6px 7px;
+      font-size: 0.9rem;
+      opacity: 0;
+      animation: stepFade 12s linear infinite;
+    }
+    .evt.s1 { animation-delay: 0.2s; }
+    .evt.s2 { animation-delay: 1.4s; }
+    .evt.s3 { animation-delay: 2.8s; }
+    .evt.s4 { animation-delay: 4.2s; }
+    .evt.s5 { animation-delay: 5.6s; }
+    .evt.s6 { animation-delay: 7.0s; }
+    .evt.s7 { animation-delay: 8.4s; }
+    .evt.s8 { animation-delay: 9.8s; }
+    @keyframes stepFade {
+      0% { opacity: 0; transform: translateY(4px); }
+      8% { opacity: 1; transform: translateY(0); }
+      20% { opacity: 1; }
+      27% { opacity: 0; }
+      100% { opacity: 0; }
+    }
+
+    .clk-sheet {
+      min-width: 1020px;
+      border: 1px solid #c9d6ef;
+      border-radius: 10px;
+      background: #fff;
+      padding: 10px;
+    }
+    .clk-row {
+      display: grid;
+      grid-template-columns: 180px 1fr 160px 1fr 150px 1fr 160px;
+      gap: 6px;
+      align-items: center;
+      margin: 8px 0;
+    }
+    .clk-node {
+      border: 1px solid #bfd0ec;
+      border-radius: 8px;
+      padding: 8px 7px;
+      text-align: center;
+      font-size: 0.86rem;
+      background: #f8fbff;
+      min-height: 56px;
+    }
+    .clk-node.src { background: #eef5ff; font-weight: 700; }
+    .clk-node.sink { background: #eefcf8; }
+    .clk-track {
+      position: relative;
+      height: 4px;
+      border-radius: 99px;
+      background: #b4c6e8;
+      overflow: hidden;
+    }
+    .clk-burst {
+      position: absolute;
+      top: -4px;
+      left: -16px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--brand);
+      box-shadow: 0 0 0 4px rgba(0, 94, 194, 0.2);
+      animation: clkBurst 4.6s linear infinite;
+    }
+    .clk-burst.d2 { animation-delay: 0.9s; background: #0a987a; box-shadow: 0 0 0 4px rgba(10, 152, 122, 0.2); }
+    .clk-burst.d3 { animation-delay: 1.8s; background: #f45d1f; box-shadow: 0 0 0 4px rgba(244, 93, 31, 0.2); }
+    @keyframes clkBurst {
+      0% { left: -14px; opacity: 0; }
+      8% { opacity: 1; }
+      100% { left: calc(100% + 14px); opacity: 0; }
+    }
+
+    .frame-sheet {
+      min-width: 1020px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .frame-grid {
+      position: relative;
+      border: 1px solid #c9d6ef;
+      border-radius: 10px;
+      background: #fff;
+      padding: 10px 10px 42px;
+      overflow: hidden;
+    }
+    .frame-title {
+      font-weight: 700;
+      margin-bottom: 8px;
+      font-size: 0.9rem;
+    }
+    .slot-index {
+      display: grid;
+      grid-template-columns: repeat(16, 1fr);
+      gap: 2px;
+      margin-bottom: 3px;
+      font-size: 0.74rem;
+      color: #4f607b;
+      text-align: center;
+    }
+    .slot-grid {
+      display: grid;
+      grid-template-columns: repeat(16, 1fr);
+      gap: 2px;
+      position: relative;
+      z-index: 1;
+    }
+    .slot {
+      border: 1px solid #d3deef;
+      background: #f7fbff;
+      height: 28px;
+      border-radius: 4px;
+    }
+    .window-bar {
+      position: absolute;
+      top: 53px;
+      height: 28px;
+      border-radius: 4px;
+      background: rgba(245, 93, 31, 0.35);
+      border: 1px solid #ea6a38;
+      z-index: 2;
+      pointer-events: none;
+    }
+    .scanline {
+      position: absolute;
+      top: 42px;
+      bottom: 40px;
+      width: 2px;
+      background: rgba(0, 94, 194, 0.5);
+      left: 10px;
+      z-index: 3;
+      animation: scanSlots 6s linear infinite;
+    }
+    @keyframes scanSlots {
+      0% { left: 10px; opacity: 0; }
+      8% { opacity: 1; }
+      100% { left: calc(100% - 10px); opacity: 0; }
+    }
+    .meta-line {
+      margin-top: 9px;
+      font-size: 0.84rem;
+      color: #415670;
+    }
+    .port-matrix {
+      min-width: 1020px;
+      border: 1px solid #c9d6ef;
+      border-radius: 10px;
+      background: #fff;
+      padding: 10px;
+      margin-top: 10px;
+    }
+    .matrix-title {
+      font-weight: 700;
+      margin-bottom: 8px;
+      font-size: 0.9rem;
+    }
+    .matrix-grid {
+      display: grid;
+      grid-template-columns: 120px repeat(16, minmax(22px, 1fr));
+      gap: 2px;
+      font-size: 0.78rem;
+      text-align: center;
+      align-items: center;
+    }
+    .matrix-grid .head {
+      background: #eef4ff;
+      border: 1px solid #d2deef;
+      border-radius: 4px;
+      padding: 4px 2px;
+      font-weight: 600;
+    }
+    .matrix-grid .port {
+      background: #f7fbff;
+      border: 1px solid #d2deef;
+      border-radius: 4px;
+      padding: 4px 2px;
+      font-weight: 600;
+    }
+    .matrix-grid .cell {
+      height: 22px;
+      border: 1px solid #d6e0ef;
+      border-radius: 4px;
+      background: #f8fbff;
+    }
+    .matrix-grid .cell.on-rx {
+      background: rgba(244, 93, 31, 0.30);
+      border-color: #eb7a52;
+    }
+    .matrix-grid .cell.on-tx {
+      background: rgba(10, 152, 122, 0.30);
+      border-color: #4da794;
+    }
+    .mono-small {
+      font-family: "DejaVu Sans Mono", "Consolas", monospace;
+      font-size: 0.82rem;
+    }
+    .pill {
+      display: inline-block;
+      border: 1px solid #c8d7ef;
+      border-radius: 999px;
+      background: #f4f8ff;
+      font-size: 0.78rem;
+      padding: 2px 8px;
+      margin-right: 6px;
+    }
+    .na {
+      color: #6a7b97;
+      font-style: italic;
+    }
+    .schem-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 10px;
+      margin-top: 8px;
+    }
+    .schem-card {
+      border: 1px solid #c9d6ef;
+      border-radius: 10px;
+      background: #fff;
+      padding: 9px;
+    }
+    .schem-card img {
+      width: 100%;
+      height: auto;
+      border: 1px solid #d5e0f0;
+      border-radius: 8px;
+      display: block;
+    }
+    .schem-cap {
+      margin-top: 6px;
+      font-size: 0.84rem;
+      color: #405470;
+    }
+    .enum-board {
+      min-width: 1020px;
+      display: grid;
+      grid-template-columns: 270px 1fr 270px;
+      gap: 10px;
+      align-items: start;
+    }
+    .enum-chip {
+      border: 1px solid #c7d6ee;
+      border-radius: 10px;
+      background: #ffffff;
+      padding: 10px;
+    }
+    .enum-chip h3 {
+      margin: 0 0 8px;
+      font-size: 0.96rem;
+    }
+    .enum-chip ul {
+      margin: 7px 0 0 18px;
+      padding: 0;
+      font-size: 0.86rem;
+    }
+    .enum-leds {
+      display: grid;
+      gap: 5px;
+      margin-top: 6px;
+    }
+    .enum-led-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.82rem;
+      color: #304460;
+    }
+    .enum-led {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      background: #adb7ca;
+      box-shadow: 0 0 0 3px rgba(173, 183, 202, 0.25);
+      animation: enumLedBoot 12s linear infinite;
+    }
+    .enum-led.clk {
+      animation-name: enumLedClock;
+    }
+    .enum-led.enum {
+      animation-name: enumLedEnum;
+    }
+    @keyframes enumLedBoot {
+      0%, 8% { background: #adb7ca; box-shadow: 0 0 0 3px rgba(173, 183, 202, 0.25); }
+      10%, 100% { background: #0a987a; box-shadow: 0 0 0 4px rgba(10, 152, 122, 0.25); }
+    }
+    @keyframes enumLedClock {
+      0%, 24% { background: #adb7ca; box-shadow: 0 0 0 3px rgba(173, 183, 202, 0.25); }
+      26%, 100% { background: #005ec2; box-shadow: 0 0 0 4px rgba(0, 94, 194, 0.22); }
+    }
+    @keyframes enumLedEnum {
+      0%, 48% { background: #adb7ca; box-shadow: 0 0 0 3px rgba(173, 183, 202, 0.25); }
+      50%, 100% { background: #f45d1f; box-shadow: 0 0 0 4px rgba(244, 93, 31, 0.22); }
+    }
+    .enum-bus {
+      border: 1px solid #cad7ee;
+      border-radius: 10px;
+      background: #f8fbff;
+      padding: 8px;
+    }
+    .enum-row {
+      display: grid;
+      grid-template-columns: 160px 1fr 160px;
+      align-items: center;
+      gap: 8px;
+      margin: 7px 0;
+    }
+    .enum-net {
+      font-size: 0.8rem;
+      color: #304663;
+      text-align: center;
+      border: 1px solid #d1deef;
+      border-radius: 8px;
+      background: #ffffff;
+      padding: 4px 6px;
+    }
+    .enum-wire {
+      position: relative;
+      height: 4px;
+      border-radius: 999px;
+      background: #b8c8e7;
+      overflow: hidden;
+    }
+    .enum-pulse {
+      position: absolute;
+      top: -4px;
+      left: -16px;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #005ec2;
+      box-shadow: 0 0 0 4px rgba(0, 94, 194, 0.2);
+      animation: enumPulseFwd 12s linear infinite;
+    }
+    .enum-pulse.rev {
+      left: calc(100% + 14px);
+      background: #f45d1f;
+      box-shadow: 0 0 0 4px rgba(244, 93, 31, 0.2);
+      animation-name: enumPulseRev;
+    }
+    .enum-pulse.clk {
+      background: #0a987a;
+      box-shadow: 0 0 0 4px rgba(10, 152, 122, 0.2);
+      animation-delay: 2.3s;
+    }
+    .enum-pulse.data {
+      animation-delay: 4.9s;
+    }
+    .enum-pulse.ack {
+      animation-delay: 7.4s;
+    }
+    @keyframes enumPulseFwd {
+      0%, 16% { left: -14px; opacity: 0; }
+      18%, 26% { opacity: 1; }
+      30% { left: calc(100% + 14px); opacity: 0; }
+      100% { left: calc(100% + 14px); opacity: 0; }
+    }
+    @keyframes enumPulseRev {
+      0%, 16% { left: calc(100% + 14px); opacity: 0; }
+      18%, 26% { opacity: 1; }
+      30% { left: -14px; opacity: 0; }
+      100% { left: -14px; opacity: 0; }
+    }
+    .enum-steps {
+      margin-top: 10px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 8px;
+    }
+    .enum-step {
+      border: 1px solid #c8d6ee;
+      border-radius: 8px;
+      background: #ffffff;
+      padding: 7px 8px;
+      font-size: 0.83rem;
+      color: #2d425f;
+      opacity: 0.2;
+      animation: enumStepFlash 12s linear infinite;
+    }
+    .enum-step.s1 { animation-delay: 0.2s; }
+    .enum-step.s2 { animation-delay: 2.0s; }
+    .enum-step.s3 { animation-delay: 3.8s; }
+    .enum-step.s4 { animation-delay: 5.6s; }
+    .enum-step.s5 { animation-delay: 7.4s; }
+    .enum-step.s6 { animation-delay: 9.2s; }
+    @keyframes enumStepFlash {
+      0%, 4% { opacity: 0.2; transform: translateY(0); }
+      8%, 14% { opacity: 1; transform: translateY(-2px); }
+      22%, 100% { opacity: 0.2; transform: translateY(0); }
+    }
+    .sys-sim {
+      min-width: 1080px;
+      display: grid;
+      grid-template-columns: 1.1fr 1.3fr 1fr 0.9fr;
+      gap: 10px;
+      align-items: start;
+    }
+    .sys-box {
+      border: 1px solid #c8d6ee;
+      border-radius: 10px;
+      background: #ffffff;
+      padding: 9px;
+      margin-bottom: 8px;
+    }
+    .sys-box h3 {
+      margin: 0 0 7px;
+      font-size: 0.95rem;
+    }
+    .sys-sub {
+      border: 1px solid #d4e0f0;
+      border-radius: 7px;
+      background: #f8fbff;
+      padding: 5px 6px;
+      margin-bottom: 5px;
+      font-size: 0.8rem;
+    }
+    .sys-status {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      font-size: 0.8rem;
+      color: #324865;
+      margin-top: 4px;
+    }
+    .sys-status span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .sys-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #a9b7cc;
+      box-shadow: 0 0 0 3px rgba(169, 183, 204, 0.25);
+      animation: sysDotPwr 14s linear infinite;
+    }
+    .sys-dot.clk { animation-name: sysDotClk; }
+    .sys-dot.rst { animation-name: sysDotRst; }
+    .sys-dot.gpio { animation-name: sysDotGpio; }
+    .sys-dot.stream { animation-name: sysDotStream; }
+    @keyframes sysDotPwr {
+      0%, 8% { background: #a9b7cc; box-shadow: 0 0 0 3px rgba(169, 183, 204, 0.25); }
+      10%, 100% { background: #0a987a; box-shadow: 0 0 0 4px rgba(10, 152, 122, 0.22); }
+    }
+    @keyframes sysDotClk {
+      0%, 21% { background: #a9b7cc; box-shadow: 0 0 0 3px rgba(169, 183, 204, 0.25); }
+      23%, 100% { background: #005ec2; box-shadow: 0 0 0 4px rgba(0, 94, 194, 0.22); }
+    }
+    @keyframes sysDotRst {
+      0%, 34% { background: #a9b7cc; box-shadow: 0 0 0 3px rgba(169, 183, 204, 0.25); }
+      36%, 100% { background: #f2a400; box-shadow: 0 0 0 4px rgba(242, 164, 0, 0.22); }
+    }
+    @keyframes sysDotGpio {
+      0%, 46% { background: #a9b7cc; box-shadow: 0 0 0 3px rgba(169, 183, 204, 0.25); }
+      48%, 100% { background: #7a4fb3; box-shadow: 0 0 0 4px rgba(122, 79, 179, 0.22); }
+    }
+    @keyframes sysDotStream {
+      0%, 62% { background: #a9b7cc; box-shadow: 0 0 0 3px rgba(169, 183, 204, 0.25); }
+      64%, 100% { background: #f45d1f; box-shadow: 0 0 0 4px rgba(244, 93, 31, 0.22); }
+    }
+    .sys-mid {
+      border: 1px solid #cad8ef;
+      border-radius: 10px;
+      background: #f8fbff;
+      padding: 8px;
+    }
+    .sys-row {
+      display: grid;
+      grid-template-columns: 170px 1fr 170px;
+      align-items: center;
+      gap: 8px;
+      margin: 7px 0;
+    }
+    .sys-net {
+      border: 1px solid #d0deef;
+      border-radius: 8px;
+      background: #ffffff;
+      font-size: 0.77rem;
+      color: #2f4663;
+      text-align: center;
+      padding: 5px 6px;
+    }
+    .sys-wire {
+      position: relative;
+      height: 4px;
+      border-radius: 99px;
+      background: #b8c8e7;
+      overflow: hidden;
+    }
+    .sys-wire.sig-clock { background: linear-gradient(90deg, #8abfba, #72b4e9); }
+    .sys-wire.sig-data { background: linear-gradient(90deg, #f6b694, #f9d2b8); }
+    .sys-wire.sig-gpio { background: linear-gradient(90deg, #bca0df, #d7c8ef); }
+    .sys-wire.sig-i2c { background: linear-gradient(90deg, #9dd0be, #cae6dd); }
+    .sys-wire.sig-audio { background: linear-gradient(90deg, #f48e5d, #fbc09f); }
+    .sys-flow {
+      position: absolute;
+      top: -4px;
+      left: -14px;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #005ec2;
+      box-shadow: 0 0 0 4px rgba(0, 94, 194, 0.2);
+      animation: sysFlowFwd 14s linear infinite;
+    }
+    .sys-flow.rev {
+      left: calc(100% + 14px);
+      background: #f45d1f;
+      box-shadow: 0 0 0 4px rgba(244, 93, 31, 0.2);
+      animation-name: sysFlowRev;
+    }
+    .sys-flow.f2 { animation-delay: 2.8s; }
+    .sys-flow.f3 { animation-delay: 5.6s; }
+    .sys-flow.f4 { animation-delay: 8.4s; }
+    @keyframes sysFlowFwd {
+      0%, 14% { left: -14px; opacity: 0; }
+      16%, 23% { opacity: 1; }
+      28% { left: calc(100% + 14px); opacity: 0; }
+      100% { left: calc(100% + 14px); opacity: 0; }
+    }
+    @keyframes sysFlowRev {
+      0%, 14% { left: calc(100% + 14px); opacity: 0; }
+      16%, 23% { opacity: 1; }
+      28% { left: -14px; opacity: 0; }
+      100% { left: -14px; opacity: 0; }
+    }
+    .sys-endpoint {
+      border: 1px solid #c8d6ee;
+      border-radius: 10px;
+      background: #ffffff;
+      padding: 8px;
+      margin-bottom: 8px;
+      font-size: 0.82rem;
+    }
+    .sys-endpoint strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+    .sys-steps {
+      margin-top: 10px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 8px;
+    }
+    .sys-step {
+      border: 1px solid #c8d6ee;
+      border-radius: 8px;
+      background: #ffffff;
+      padding: 7px 8px;
+      font-size: 0.82rem;
+      color: #2e4361;
+      opacity: 0.2;
+      animation: sysStepFlash 14s linear infinite;
+    }
+    .sys-step.t1 { animation-delay: 0.3s; }
+    .sys-step.t2 { animation-delay: 2.0s; }
+    .sys-step.t3 { animation-delay: 3.7s; }
+    .sys-step.t4 { animation-delay: 5.4s; }
+    .sys-step.t5 { animation-delay: 7.1s; }
+    .sys-step.t6 { animation-delay: 8.8s; }
+    .sys-step.t7 { animation-delay: 10.5s; }
+    .sys-step.t8 { animation-delay: 12.2s; }
+    @keyframes sysStepFlash {
+      0%, 4% { opacity: 0.2; transform: translateY(0); }
+      8%, 14% { opacity: 1; transform: translateY(-2px); }
+      22%, 100% { opacity: 0.2; transform: translateY(0); }
+    }
+
+    code {
+      font-family: "DejaVu Sans Mono", "Consolas", monospace;
+      background: #eff4fb;
+      border: 1px solid #dae4f3;
+      border-radius: 5px;
+      padding: 1px 5px;
+      font-size: 0.92em;
+    }
+    pre {
+      margin: 8px 0;
+      background: var(--dark);
+      color: var(--dark-ink);
+      border: 1px solid #2a3a55;
+      border-radius: 10px;
+      padding: 12px;
+      overflow-x: auto;
+    }
+    pre code {
+      border: 0;
+      background: transparent;
+      color: inherit;
+      padding: 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+      font-size: 0.94rem;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 8px 9px;
+      vertical-align: top;
+    }
+    th { background: #eef4ff; }
+
+    .ok { color: var(--brand2); font-weight: 700; }
+    .warn { color: var(--warn); font-weight: 700; }
+    .bad { color: var(--bad); font-weight: 700; }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 8px;
+      font-size: 0.88rem;
+    }
+    .legend span {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      padding: 3px 8px;
+    }
+
+    .footer {
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin: 18px 0 8px;
+    }
+
+    body.paused .packet,
+    body.paused .lane .token,
+    body.paused .evt,
+    body.paused .enum-led,
+    body.paused .enum-pulse,
+    body.paused .enum-step,
+    body.paused .sys-dot,
+    body.paused .sys-flow,
+    body.paused .sys-step {
+      animation-play-state: paused !important;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>SoundWire + Codec Deep Dive (Visual)</h1>
+      <p class="muted">
+        This version is intentionally visual-first: block diagrams + lightweight animation to show
+        how audio and control move between ALSA, SoundWire master, and codec slaves.
+      </p>
+      <div class="chips">
+        <span class="chip">Linux ASoC</span>
+        <span class="chip">SoundWire Master/Slave</span>
+        <span class="chip">Codec Transport Mapping</span>
+        <span class="chip">Qualcomm Bring-up</span>
+        <span class="chip">Upstream Compatibility</span>
+      </div>
+      <div class="toolbar">
+        <button id="toggleAnim">Pause Animations</button>
+        <span class="muted">Tip: keep animations running while reading sections 1, 2, and 4.</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>0) What Is SoundWire? (I2C Analogy)</h2>
+      <p>
+        <strong>SoundWire</strong> is an audio-focused bus (typically one master and one or more audio slaves)
+        used to carry both control messages and time-scheduled audio data between SoC and codecs.
+      </p>
+      <p>
+        Think of <strong>I2C</strong> as sending one letter at a time (read/write register transactions),
+        while <strong>SoundWire</strong> is like a timed metro schedule: every frame has reserved slots, and
+        audio samples keep flowing in those slots continuously.
+      </p>
+      <table>
+        <thead>
+          <tr><th>Topic</th><th>I2C</th><th>SoundWire</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Main purpose</td>
+            <td>Generic control/config bus</td>
+            <td>Audio transport + control on same link</td>
+          </tr>
+          <tr>
+            <td>Traffic style</td>
+            <td>Transaction-by-transaction</td>
+            <td>Frame/slot based, deterministic timing</td>
+          </tr>
+          <tr>
+            <td>Best fit</td>
+            <td>Sensor/PMIC register access</td>
+            <td>Codec/amp streaming with tight timing</td>
+          </tr>
+          <tr>
+            <td>In this Shikra doc</td>
+            <td>Useful for sideband controls</td>
+            <td>Bus behind <code>SWR_*_CLK</code> and <code>SWR_*_DATA*</code> nets</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>0.5) Shikra Audio System Simulation (Board + Sub-Blocks)</h2>
+      <p>
+        This is a Shikra-specific simulated board view: SoC audio blocks, SoundWire links, I2C/GPIO control,
+        and end devices (headset + speaker). It uses names from your DTS + schematic sheets.
+      </p>
+      <div class="toolbar">
+        <button id="replaySystem">Replay System Simulation</button>
+        <span class="muted">Cycle: power -> clock -> reset release -> GPIO/IRQ -> enum -> stream active.</span>
+      </div>
+      <div class="diagram">
+        <div class="sys-sim">
+          <div>
+            <div class="sys-box">
+              <h3>Shikra SoC / LPASS Side</h3>
+              <div class="sys-sub"><strong>audiocorecc</strong> (audio roots, SWR resets)</div>
+              <div class="sys-sub"><strong>rxmacro</strong> <code>codec@A040000</code> (<code>mclk</code>, <code>npl</code>, <code>fsgen</code>)</div>
+              <div class="sys-sub"><strong>vamacro</strong> <code>codec@a078000</code> (<code>mclk</code>, <code>npl</code>)</div>
+              <div class="sys-sub"><strong>swr1</strong> <code>soundwire@a060000</code> (RX)</div>
+              <div class="sys-sub"><strong>swr0</strong> <code>soundwire@a080000</code> (VA_TX)</div>
+            </div>
+            <div class="sys-status">
+              <span><i class="sys-dot"></i>Power</span>
+              <span><i class="sys-dot clk"></i>Clock</span>
+              <span><i class="sys-dot rst"></i>Reset release</span>
+              <span><i class="sys-dot gpio"></i>GPIO/IRQ</span>
+              <span><i class="sys-dot stream"></i>Audio stream</span>
+            </div>
+          </div>
+
+          <div class="sys-mid">
+            <div class="sys-row">
+              <span class="sys-net">SWR_RX_CLK_R</span>
+              <div class="sys-wire sig-clock"><span class="sys-flow f1"></span><span class="sys-flow f3 rev"></span></div>
+              <span class="sys-net">SWR_RX_CLK</span>
+            </div>
+            <div class="sys-row">
+              <span class="sys-net">SWR_RX_DATA0_R</span>
+              <div class="sys-wire sig-data"><span class="sys-flow f2"></span><span class="sys-flow f4 rev"></span></div>
+              <span class="sys-net">SWR_RX_DATA0</span>
+            </div>
+            <div class="sys-row">
+              <span class="sys-net">SWR_RX_DATA1_R</span>
+              <div class="sys-wire sig-data"><span class="sys-flow f3"></span><span class="sys-flow f2 rev"></span></div>
+              <span class="sys-net">SWR_RX_DATA1</span>
+            </div>
+            <div class="sys-row">
+              <span class="sys-net">SWR_TX_CLK_R</span>
+              <div class="sys-wire sig-clock"><span class="sys-flow f1"></span><span class="sys-flow f3 rev"></span></div>
+              <span class="sys-net">SWR_TX_CLK</span>
+            </div>
+            <div class="sys-row">
+              <span class="sys-net">SWR_TX_DATA0_R</span>
+              <div class="sys-wire sig-data"><span class="sys-flow f2"></span><span class="sys-flow f4 rev"></span></div>
+              <span class="sys-net">SWR_TX_DATA0</span>
+            </div>
+            <div class="sys-row">
+              <span class="sys-net">CODEC_INT (GPIO)</span>
+              <div class="sys-wire sig-gpio"><span class="sys-flow f3 rev"></span></div>
+              <span class="sys-net">PM4125 IRQ</span>
+            </div>
+            <div class="sys-row">
+              <span class="sys-net">I2C3</span>
+              <div class="sys-wire sig-i2c"><span class="sys-flow f1"></span><span class="sys-flow f2 rev"></span></div>
+              <span class="sys-net">wsa885x_i2c@c</span>
+            </div>
+            <div class="sys-row">
+              <span class="sys-net">powerdown-gpio</span>
+              <div class="sys-wire sig-gpio"><span class="sys-flow f4"></span></div>
+              <span class="sys-net">WSA885x PWDN</span>
+            </div>
+            <div class="sys-row">
+              <span class="sys-net">Playback route</span>
+              <div class="sys-wire sig-audio"><span class="sys-flow f2"></span></div>
+              <span class="sys-net">Headset / Speaker</span>
+            </div>
+            <div class="sys-row">
+              <span class="sys-net">Capture route</span>
+              <div class="sys-wire sig-audio"><span class="sys-flow f4 rev"></span></div>
+              <span class="sys-net">Mic -> SoC</span>
+            </div>
+          </div>
+
+          <div>
+            <div class="sys-box">
+              <h3>PM4125 Codec Side</h3>
+              <div class="sys-sub"><strong>SDW slave attach</strong> + init completion gate</div>
+              <div class="sys-sub"><strong>Playback path:</strong> HPH_L / HPH_R / LO</div>
+              <div class="sys-sub"><strong>Capture path:</strong> ADC1 / DMIC</div>
+              <div class="sys-sub"><strong>Control:</strong> MBHC + IRQ to SoC</div>
+              <div class="sys-sub">Board links via <code>R40770..R40774</code> (0R)</div>
+            </div>
+            <div class="sys-box">
+              <h3>WSA885x Amplifier Path</h3>
+              <div class="sys-sub"><code>wsa885x_i2c@c</code> on I2C3</div>
+              <div class="sys-sub"><code>interrupt-gpios</code> + <code>powerdown-gpios</code></div>
+              <div class="sys-sub">Speaker amp programmed over I2C sideband</div>
+            </div>
+          </div>
+
+          <div>
+            <div class="sys-endpoint">
+              <strong>Headset Endpoint</strong>
+              HPH L/R playback, headset mic capture, jack detect events.
+            </div>
+            <div class="sys-endpoint">
+              <strong>Speaker Endpoint</strong>
+              WSA885x driven speaker output path.
+            </div>
+            <div class="sys-endpoint">
+              <strong>Board Mic Path</strong>
+              Codec ADC/DMIC capture back to LPASS.
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="sys-steps">
+        <div class="sys-step t1"><strong>T0</strong> Rails up (<code>VREG_L15A_1P8</code> path visible in schematic)</div>
+        <div class="sys-step t2"><strong>T1</strong> SWR iface clocks enabled by LPASS macro/controller path</div>
+        <div class="sys-step t3"><strong>T2</strong> SWR resets released (<code>swr_audio_cgcr</code>)</div>
+        <div class="sys-step t4"><strong>T3</strong> Clock/data valid on board nets (<code>SWR_*_CLK/DATA*</code>)</div>
+        <div class="sys-step t5"><strong>T4</strong> PM4125 slave enum/attach completes</div>
+        <div class="sys-step t6"><strong>T5</strong> GPIO/IRQ signaling active (<code>CODEC_INT</code>)</div>
+        <div class="sys-step t7"><strong>T6</strong> WSA885x control via I2C + powerdown GPIO sequencing</div>
+        <div class="sys-step t8"><strong>T7</strong> Playback/capture streaming stable (headset + speaker)</div>
+      </div>
+      <table>
+        <thead>
+          <tr><th>Connection Type</th><th>Shikra Signals/Nodes used here</th><th>Why it matters in debug</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>SoundWire physical links</td>
+            <td><code>SWR_RX_CLK</code>, <code>SWR_RX_DATA0/1</code>, <code>SWR_TX_CLK</code>, <code>SWR_TX_DATA0</code></td>
+            <td>Missing/incorrect lane activity leads to enum timeout or port mismatch logs</td>
+          </tr>
+          <tr>
+            <td>Reset/clock control</td>
+            <td><code>audiocorecc</code>, <code>swr_audio_cgcr</code>, macro <code>mclk/npl/fsgen</code></td>
+            <td>Wrong sequencing breaks frame-gen transition and slave init completion</td>
+          </tr>
+          <tr>
+            <td>GPIO/IRQ control</td>
+            <td><code>CODEC_INT</code>, WSA <code>interrupt-gpios</code>, <code>powerdown-gpios</code></td>
+            <td>Late/missing IRQ or bad gpio state blocks probe or runtime transitions</td>
+          </tr>
+          <tr>
+            <td>I2C sideband</td>
+            <td><code>i2c3</code> -> <code>wsa885x_i2c@c</code></td>
+            <td>Speaker amp configuration may fail even when SWR path is correct</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>1) End-to-End Data Movement (Animated Block Diagram)</h2>
+      <p>
+        Orange and green packets represent PCM stream chunks moving from userspace to codec endpoints.
+        This is the core path to keep in your head while debugging.
+      </p>
+      <div class="diagram">
+        <div class="pipeline">
+          <div class="line"></div>
+          <div class="packet" aria-hidden="true"></div>
+          <div class="packet p2" aria-hidden="true"></div>
+          <div class="stage-row">
+            <div class="stage"><strong>Userspace</strong><small>ALSA / Audio HAL</small><small>PCM open/start</small></div>
+            <div class="stage"><strong>ASoC Machine</strong><small>DAI links</small><small>route selection</small></div>
+            <div class="stage"><strong>SWR Master</strong><small>controller ports</small><small>frame params</small></div>
+            <div class="stage"><strong>SWR Slave</strong><small>codec transport</small><small>port map</small></div>
+            <div class="stage"><strong>Codec Block</strong><small>HPH / ADC / DMIC</small><small>audio signal path</small></div>
+          </div>
+        </div>
+      </div>
+      <div class="legend">
+        <span>Packet = audio data burst</span>
+        <span>Each stage can fail independently</span>
+        <span>Failure often appears late (-110 timeout)</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>2) Control Plane vs Audio Data Plane</h2>
+      <p>
+        SoundWire bring-up problems happen when these two planes go out of sync: control says link is ready,
+        but data path mapping is wrong (or vice versa).
+      </p>
+      <div class="diagram">
+        <div class="lanes">
+          <div class="lane audio">
+            <strong>Audio Data Plane</strong> (<code>SDW data ports/channels</code>)
+            <div class="track"></div>
+            <div class="token" aria-hidden="true"></div>
+            <p class="muted" style="margin: 10px 0 0 0;">Direction example: CPU -> Codec Playback (RX at codec side)</p>
+          </div>
+          <div class="lane ctrl">
+            <strong>Control Plane</strong> (<code>enumeration, register ops, status, IRQ</code>)
+            <div class="track"></div>
+            <div class="token" aria-hidden="true"></div>
+            <p class="muted" style="margin: 10px 0 0 0;">Direction example: status/commands around suspend-resume and stream prepare</p>
+          </div>
+        </div>
+      </div>
+      <table>
+        <thead><tr><th>If you see...</th><th>Likely plane</th><th>First check</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>din-ports (...) mismatch with controller (...)</code></td>
+            <td>Data topology vs controller capability</td>
+            <td>Controller DT overrides and codec mapping assumptions</td>
+          </tr>
+          <tr>
+            <td><code>swrm_wait_for_frame_gen_enabled...</code></td>
+            <td>Control transition (frame-gen/link state)</td>
+            <td>Reset/PM/clock-stop sequence during runtime resume</td>
+          </tr>
+          <tr>
+            <td><code>soundwire device init timeout (-110)</code></td>
+            <td>Control completion not reached or attach path stalled</td>
+            <td>Slave attach + mapping + dependency links</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>3) Linux Stack (Who owns what)</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>ASoC Machine Driver</h3>
+          <ul>
+            <li>Builds card topology and DAI links.</li>
+            <li>Connects CPU DAI and codec DAI endpoints.</li>
+            <li>Bad link mapping can look like codec failures.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>SoundWire Controller Driver</h3>
+          <ul>
+            <li>Reads controller capabilities.</li>
+            <li>Configures transport/frame params per port.</li>
+            <li>Handles runtime PM, reset, frame-gen checks.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Codec + Codec-SDW Driver</h3>
+          <ul>
+            <li>Codec core: audio controls, power widgets, MBHC, etc.</li>
+            <li>Codec SDW: slave attach, static port mapping, channel masks.</li>
+            <li>Often waits on <code>initialization_complete</code> during probe.</li>
+          </ul>
+        </div>
+      </div>
+      <pre><code>Userspace PCM
+  -> ASoC machine route
+    -> SWR master alloc ports
+      -> codec slave m_port_map
+        -> codec functional path (speaker/headphone/mic)</code></pre>
+    </section>
+
+    <section class="panel">
+      <h2>4) Bring-up Sequence Animation (Swimlane)</h2>
+      <p>
+        Events fade in sequence to show order. If a later stage fails, go back one stage and verify state.
+      </p>
+      <div class="diagram">
+        <div class="sequence">
+          <div class="swim">
+            <div class="head">ALSA / ASoC</div>
+            <div class="head">SWR Controller</div>
+            <div class="head">SWR Slave (Codec)</div>
+            <div class="head">Codec Core</div>
+
+            <div class="col">
+              <div class="evt s1">Open PCM stream</div>
+              <div class="evt s5">Trigger hw_params</div>
+            </div>
+            <div class="col">
+              <div class="evt s2">Read COMP params</div>
+              <div class="evt s3">Apply frame/port config</div>
+              <div class="evt s6">Enable frame-gen</div>
+            </div>
+            <div class="col">
+              <div class="evt s4">Slave attach + map ports</div>
+              <div class="evt s7">Signal init complete</div>
+            </div>
+            <div class="col">
+              <div class="evt s8">Codec probe continues</div>
+              <div class="evt s8">Route ready for audio</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="muted">
+        Typical timeout case: stages s2-s6 happen, but s7 does not complete before codec waits out.
+      </p>
+    </section>
+
+    <section class="panel">
+      <h2>5) Master <-> Slave Enumeration (Pin-Level Animated)</h2>
+      <p>
+        This sequence mirrors your board view: LPASS SoundWire master drives clocks/data over board nets,
+        PM225-side slave responds, then enumeration completes and codec init can proceed.
+      </p>
+      <div class="toolbar">
+        <button id="replayEnum">Replay Enumeration</button>
+        <span class="muted">Cycle shows: power -> clock -> enum -> attach -> ready.</span>
+      </div>
+      <div class="diagram">
+        <div class="enum-board">
+          <div class="enum-chip">
+            <h3>Master Side (LPASS SWR)</h3>
+            <div class="enum-leds">
+              <div class="enum-led-row"><span class="enum-led"></span><span>Power rail ready</span></div>
+              <div class="enum-led-row"><span class="enum-led clk"></span><span>Iface clock enabled</span></div>
+              <div class="enum-led-row"><span class="enum-led enum"></span><span>Enum transaction active</span></div>
+            </div>
+            <ul>
+              <li><code>soundwire@a060000</code> (RX) / <code>soundwire@a080000</code> (TX)</li>
+              <li>Drives frame-gen and transport config</li>
+              <li>Waits for slave attach + init complete</li>
+            </ul>
+          </div>
+          <div class="enum-bus">
+            <div class="enum-row">
+              <span class="enum-net">SWR_TX_CLK_R</span>
+              <div class="enum-wire">
+                <span class="enum-pulse clk"></span>
+                <span class="enum-pulse ack rev"></span>
+              </div>
+              <span class="enum-net">SWR_TX_CLK</span>
+            </div>
+            <div class="enum-row">
+              <span class="enum-net">SWR_TX_DATA0_R</span>
+              <div class="enum-wire">
+                <span class="enum-pulse data"></span>
+                <span class="enum-pulse ack rev"></span>
+              </div>
+              <span class="enum-net">SWR_TX_DATA0</span>
+            </div>
+            <div class="enum-row">
+              <span class="enum-net">SWR_RX_CLK_R</span>
+              <div class="enum-wire">
+                <span class="enum-pulse clk"></span>
+                <span class="enum-pulse ack rev"></span>
+              </div>
+              <span class="enum-net">SWR_RX_CLK</span>
+            </div>
+            <div class="enum-row">
+              <span class="enum-net">SWR_RX_DATA0_R</span>
+              <div class="enum-wire">
+                <span class="enum-pulse data"></span>
+                <span class="enum-pulse ack rev"></span>
+              </div>
+              <span class="enum-net">SWR_RX_DATA0</span>
+            </div>
+            <div class="enum-row">
+              <span class="enum-net">SWR_RX_DATA1_R</span>
+              <div class="enum-wire">
+                <span class="enum-pulse data"></span>
+                <span class="enum-pulse ack rev"></span>
+              </div>
+              <span class="enum-net">SWR_RX_DATA1</span>
+            </div>
+          </div>
+          <div class="enum-chip">
+            <h3>Slave Side (PM225/codec SDW)</h3>
+            <div class="enum-leds">
+              <div class="enum-led-row"><span class="enum-led"></span><span>Codec rail up</span></div>
+              <div class="enum-led-row"><span class="enum-led clk"></span><span>Clock seen on pins</span></div>
+              <div class="enum-led-row"><span class="enum-led enum"></span><span>Slave attach complete</span></div>
+            </div>
+            <ul>
+              <li>Board nets pass via <code>R40770..R40774</code> (0R links)</li>
+              <li>Codec SDW node responds to master enum</li>
+              <li>Probe continues after init completion</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="enum-steps">
+        <div class="enum-step s1"><strong>T0</strong> Rails enabled (for example <code>VREG_L15A_1P8</code>)</div>
+        <div class="enum-step s2"><strong>T1</strong> Master enables SWR iface clock/reset path</div>
+        <div class="enum-step s3"><strong>T2</strong> Clock appears on <code>SWR_*_CLK</code> nets</div>
+        <div class="enum-step s4"><strong>T3</strong> Enum/control frames move on data lines</div>
+        <div class="enum-step s5"><strong>T4</strong> Slave acknowledges and attaches</div>
+        <div class="enum-step s6"><strong>T5</strong> Codec init complete, route becomes usable</div>
+      </div>
+      <p class="muted">
+        If timeout <code>-110</code> appears, one of T1-T4 is usually broken: clock missing, mux state wrong,
+        or attach path never completes.
+      </p>
+    </section>
+
+    <section class="panel">
+      <h2>6) Port-Level Clocks and Frame Timing (Datasheet-Style)</h2>
+      <p>
+        This view is built from public interface docs plus register/header definitions:
+        Linux SoundWire docs (<code>Documentation/driver-api/soundwire/*</code>),
+        upstream binding semantics (<code>qcom,soundwire.yaml</code>), and downstream SWR register headers.
+      </p>
+      <div class="diagram">
+        <div class="clk-sheet">
+          <div class="clk-row">
+            <div class="clk-node src">AUDIOCORECC<br><span class="mono-small">mclk / npl / bus clocks</span></div>
+            <div class="clk-track"><div class="clk-burst"></div></div>
+            <div class="clk-node">RX Macro iface clock</div>
+            <div class="clk-track"><div class="clk-burst d2"></div></div>
+            <div class="clk-node">SWR1 Controller<br><span class="mono-small">soundwire@a060000</span></div>
+            <div class="clk-track"><div class="clk-burst d3"></div></div>
+            <div class="clk-node sink">RX Ports 1..5<br><span class="mono-small">codec sink map</span></div>
+          </div>
+          <div class="clk-row">
+            <div class="clk-node src">AUDIOCORECC<br><span class="mono-small">mclk / npl / bus clocks</span></div>
+            <div class="clk-track"><div class="clk-burst"></div></div>
+            <div class="clk-node">VA Macro iface clock</div>
+            <div class="clk-track"><div class="clk-burst d2"></div></div>
+            <div class="clk-node">SWR0 Controller<br><span class="mono-small">soundwire@a080000</span></div>
+            <div class="clk-track"><div class="clk-burst d3"></div></div>
+            <div class="clk-node sink">TX Ports 1..3<br><span class="mono-small">codec source map</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="diagram" style="margin-top:10px;">
+        <div class="frame-sheet">
+          <div class="frame-grid">
+            <div class="scanline"></div>
+            <div class="frame-title">SWR1 (RX) Port2 Window Example</div>
+            <div class="slot-index">
+              <span>0</span><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span>
+              <span>8</span><span>9</span><span>10</span><span>11</span><span>12</span><span>13</span><span>14</span><span>15</span>
+            </div>
+            <div class="slot-grid">
+              <span class="slot"></span><span class="slot"></span><span class="slot"></span><span class="slot"></span>
+              <span class="slot"></span><span class="slot"></span><span class="slot"></span><span class="slot"></span>
+              <span class="slot"></span><span class="slot"></span><span class="slot"></span><span class="slot"></span>
+              <span class="slot"></span><span class="slot"></span><span class="slot"></span><span class="slot"></span>
+            </div>
+            <div class="window-bar" style="left: calc(10px + (100% - 20px) * 0.1875); width: calc((100% - 20px) * 0.25);"></div>
+            <div class="meta-line">
+              <code>hstart=0x03</code>, <code>hstop=0x06</code>, <code>offset1=0x00</code>, <code>offset2=0x00</code>, <code>word_len=0x07</code>
+            </div>
+          </div>
+          <div class="frame-grid">
+            <div class="scanline"></div>
+            <div class="frame-title">SWR0 (TX) Port1 Window Example</div>
+            <div class="slot-index">
+              <span>0</span><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span>
+              <span>8</span><span>9</span><span>10</span><span>11</span><span>12</span><span>13</span><span>14</span><span>15</span>
+            </div>
+            <div class="slot-grid">
+              <span class="slot"></span><span class="slot"></span><span class="slot"></span><span class="slot"></span>
+              <span class="slot"></span><span class="slot"></span><span class="slot"></span><span class="slot"></span>
+              <span class="slot"></span><span class="slot"></span><span class="slot"></span><span class="slot"></span>
+              <span class="slot"></span><span class="slot"></span><span class="slot"></span><span class="slot"></span>
+            </div>
+            <div class="window-bar" style="left: calc(10px + (100% - 20px) * 0.0625); width: calc((100% - 20px) * 0.1875); background: rgba(10, 152, 122, 0.30); border-color: #1f9f84;"></div>
+            <div class="meta-line">
+              <code>sinterval=0x03</code>, <code>offset1=0x01</code>, <code>offset2=0x00</code>, <code>lane_ctrl=0x00</code>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="diagram">
+        <div class="port-matrix">
+          <div class="matrix-title">Shikra Port Window Occupancy Snapshot (Conceptual slot view)</div>
+          <div class="matrix-grid">
+            <div class="head">Port/Slot</div>
+            <div class="head">0</div><div class="head">1</div><div class="head">2</div><div class="head">3</div>
+            <div class="head">4</div><div class="head">5</div><div class="head">6</div><div class="head">7</div>
+            <div class="head">8</div><div class="head">9</div><div class="head">10</div><div class="head">11</div>
+            <div class="head">12</div><div class="head">13</div><div class="head">14</div><div class="head">15</div>
+
+            <div class="port">SWR1-P2 (RX)</div>
+            <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell on-rx"></div>
+            <div class="cell on-rx"></div><div class="cell on-rx"></div><div class="cell on-rx"></div><div class="cell"></div>
+            <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+            <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+
+            <div class="port">SWR0-P1 (TX)</div>
+            <div class="cell on-tx"></div><div class="cell on-tx"></div><div class="cell on-tx"></div><div class="cell"></div>
+            <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+            <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+            <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+          </div>
+          <p class="muted" style="margin-top:8px;">
+            RX highlight corresponds to <code>hstart=0x03, hstop=0x06</code> example. TX row uses a compact early-slot window illustration.
+          </p>
+        </div>
+      </div>
+
+      <table>
+        <thead>
+          <tr><th>Signal / Formula</th><th>Meaning (datasheet-style)</th><th>Where taken from</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>SWRM_MCP_FRAME_CTRL_BANK</code><br><code>ROW</code> / <code>COL</code></td>
+            <td>Defines frame geometry used by transport windows</td>
+            <td><code>swr-mstr-registers.h</code>, <code>swr-mstr-ctrl.h</code></td>
+          </tr>
+          <tr>
+            <td><code>SSP period = (bus_clk * 2) / ((row * col) * frame_sync)</code></td>
+            <td>How transport cadence is derived in downstream SWR master logic</td>
+            <td><code>swr-mstr-ctrl.c</code> (<code>swrm_get_ssp_period()</code>)</td>
+          </tr>
+          <tr>
+            <td><code>qcom,ports-sinterval/offset/hstart/hstop</code></td>
+            <td>Per-port transport window and sampling controls</td>
+            <td>Upstream binding <code>qcom,soundwire.yaml</code></td>
+          </tr>
+        </tbody>
+      </table>
+      <h3>Exact Upstream Shikra Port Arrays (Decoded Per Port)</h3>
+      <p class="muted">
+        Source: <code>arch/arm64/boot/dts/qcom/shikra.dtsi</code>. Values below are decoded by array index
+        so you can inspect port-by-port behavior exactly like a datasheet table.
+      </p>
+      <div class="chips">
+        <span class="pill">0xff = not implemented / not applicable</span>
+        <span class="pill">Array index = logical port index used by controller</span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>SWR1 (RX) Port</th>
+            <th>sinterval-low</th>
+            <th>offset1</th>
+            <th>offset2</th>
+            <th>hstart</th>
+            <th>hstop</th>
+            <th>word-length</th>
+            <th>lane-control</th>
+            <th>pack-mode</th>
+            <th>group-count</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Port1</td><td>0x03</td><td>0x00</td><td>0x00</td><td class="na">0xff</td><td class="na">0xff</td><td>0x01</td><td>0x01</td><td class="na">0xff</td><td class="na">0xff</td></tr>
+          <tr><td>Port2</td><td>0x1f</td><td>0x00</td><td>0x00</td><td>0x03</td><td>0x06</td><td>0x07</td><td>0x00</td><td>0x00</td><td class="na">0xff</td></tr>
+          <tr><td>Port3</td><td>0x1f</td><td>0x0b</td><td>0x0b</td><td class="na">0xff</td><td class="na">0xff</td><td>0x04</td><td>0x00</td><td>0x01</td><td class="na">0xff</td></tr>
+          <tr><td>Port4</td><td>0x07</td><td>0x01</td><td>0x00</td><td class="na">0xff</td><td class="na">0xff</td><td class="na">0xff</td><td>0x00</td><td class="na">0xff</td><td class="na">0xff</td></tr>
+          <tr><td>Port5</td><td>0x00</td><td>0x00</td><td>0x00</td><td class="na">0xff</td><td class="na">0xff</td><td class="na">0xff</td><td>0x00</td><td class="na">0xff</td><td>0x00</td></tr>
+        </tbody>
+      </table>
+      <table>
+        <thead>
+          <tr>
+            <th>SWR0 (VA_TX) Port</th>
+            <th>sinterval-low</th>
+            <th>offset1</th>
+            <th>offset2</th>
+            <th>hstart</th>
+            <th>hstop</th>
+            <th>word-length</th>
+            <th>lane-control</th>
+            <th>pack-mode</th>
+            <th>group-count</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Port1</td><td>0x03</td><td>0x01</td><td>0x00</td><td class="na">0xff</td><td class="na">0xff</td><td class="na">0xff</td><td>0x00</td><td class="na">0xff</td><td class="na">0xff</td></tr>
+          <tr><td>Port2</td><td>0x03</td><td>0x02</td><td>0x00</td><td class="na">0xff</td><td class="na">0xff</td><td class="na">0xff</td><td>0x00</td><td class="na">0xff</td><td class="na">0xff</td></tr>
+          <tr><td>Port3</td><td>0x03</td><td>0x01</td><td>0x00</td><td class="na">0xff</td><td class="na">0xff</td><td class="na">0xff</td><td>0x00</td><td class="na">0xff</td><td class="na">0xff</td></tr>
+        </tbody>
+      </table>
+      <h3>Clock Dependency Map (from DTS clock-names)</h3>
+      <table>
+        <thead>
+          <tr><th>Block</th><th>Clock Inputs</th><th>Used by</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>rxmacro</code> (<code>codec@A040000</code>)</td>
+            <td><code>mclk</code>, <code>npl</code>, <code>fsgen</code></td>
+            <td><code>swr1</code> via <code>clocks = &lt;&amp;rxmacro&gt;; clock-names = "iface"</code></td>
+          </tr>
+          <tr>
+            <td><code>vamacro</code> (<code>codec@a078000</code>)</td>
+            <td><code>mclk</code>, <code>npl</code></td>
+            <td><code>swr0</code> via <code>clocks = &lt;&amp;vamacro&gt;; clock-names = "iface"</code></td>
+          </tr>
+          <tr>
+            <td><code>audiocorecc</code></td>
+            <td>root audio clocks and resets</td>
+            <td><code>AUDIO_CORE_CSR_RX_SWR_CGCR</code>, <code>AUDIO_CORE_CSR_TX_SWR_CGCR</code> reset controls</td>
+          </tr>
+        </tbody>
+      </table>
+      <h3>Extracted Board-Level SWR Wiring (from your Shikra schematics)</h3>
+      <p class="muted">
+        Pulled from <code>LD20-93536-100</code> (same SWR lines also observed in <code>-200</code>/<code>-990</code>):
+        Sheet <code>12</code> (PM225 codec) and Sheet <code>36</code> (I2S0 mux). This is the board-level path view.
+      </p>
+      <div class="schem-grid">
+        <div class="schem-card">
+          <img src="assets/shikra_ld20_93536_100_sheet12.png" alt="Shikra LD20-93536-100 sheet 12 PM225 codec SWR wiring" />
+          <div class="schem-cap">
+            Sheet 12: PM225 codec area with <code>SWR_RX_CLK</code>, <code>SWR_RX_DATA0/1</code>, <code>SWR_TX_CLK</code>, <code>SWR_TX_DATA0</code>.
+          </div>
+        </div>
+        <div class="schem-card">
+          <img src="assets/shikra_ld20_93536_100_sheet36.png" alt="Shikra LD20-93536-100 sheet 36 I2S0 mux and SWR lines" />
+          <div class="schem-cap">
+            Sheet 36: I2S0 mux (TS3A27518) showing cross-connect labels with <code>*_R</code> SWR nets.
+          </div>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr><th>Board Net (Sheet 12)</th><th>Series Element</th><th>Codec-side net/pin text</th><th>Notes</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>SWR_RX_DATA1_R</code></td><td><code>R40770 = 0R</code></td><td><code>SWR_RX_DATA1</code> (E19)</td><td>RX data lane 1 into codec sheet region</td></tr>
+          <tr><td><code>SWR_RX_CLK_R</code></td><td><code>R40771 = 0R</code></td><td><code>SWR_RX_CLK</code> (A21)</td><td>RX SoundWire clock path</td></tr>
+          <tr><td><code>SWR_RX_DATA0_R</code></td><td><code>R40772 = 0R</code></td><td><code>SWR_RX_DATA0</code> (C21)</td><td>RX data lane 0 into codec sheet region</td></tr>
+          <tr><td><code>SWR_TX_DATA0_R</code></td><td><code>R40773 = 0R</code></td><td><code>SWR_TX_DATA0</code> (E21)</td><td>TX data lane 0 from codec sheet region</td></tr>
+          <tr><td><code>SWR_TX_CLK_R</code></td><td><code>R40774 = 0R</code></td><td><code>SWR_TX_CLK</code> (D22)</td><td>TX SoundWire clock path</td></tr>
+        </tbody>
+      </table>
+      <table>
+        <thead>
+          <tr><th>Sheet 36 mux labels</th><th>Paired line label</th><th>Debug implication</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>SWR_TX_CLK_R</code></td><td><code>LPI_I2S0_CLK</code></td><td>Mux state can redirect expected clock path; verify mux control state in bring-up</td></tr>
+          <tr><td><code>SWR_TX_DATA0_R</code></td><td><code>LPI_I2S0_WS</code></td><td>If mux selection is unexpected, WS/data semantics can break stream init</td></tr>
+          <tr><td><code>SWR_RX_CLK_R</code></td><td><code>LPI_I2S0_D0</code></td><td>Helps explain boot-time mismatch if routing does not match DT expectations</td></tr>
+          <tr><td><code>SWR_RX_DATA0_R</code></td><td><code>LPI_I2S0_D1</code></td><td>Cross-check with dmesg port mismatch logs and active machine route</td></tr>
+          <tr><td><code>SWR_RX_DATA1_R</code></td><td><code>LPI_I2S0_D2</code></td><td>Validates second RX data lane presence on board routing</td></tr>
+        </tbody>
+      </table>
+      <h3>Schematic Data Still Needed (to make this fully datasheet-accurate)</h3>
+      <table>
+        <thead>
+          <tr><th>Need from schematic/datasheet</th><th>How it maps into this page</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Exact SWR clock source tree + divisors</td><td>Replace conceptual burst rows with real frequency labels at each node</td></tr>
+          <tr><td>Per-lane electrical route (CLK/DATA0/DATA1 pins to codec)</td><td>Add board-level lane diagram under section 5</td></tr>
+          <tr><td>PM4125/WSA endpoint port-to-function mapping table</td><td>Annotate Port1..N rows with real endpoint names (HPH/DMIC/COMP/etc.)</td></tr>
+          <tr><td>Frame geometry constraints (row/col limits for target silicon)</td><td>Pin exact row/col and SSP period values in timing panels</td></tr>
+        </tbody>
+      </table>
+      <p class="muted">
+        For your Shikra tree specifically: SWR1 uses 5 port entries and SWR0 uses 3 entries in the current DT arrays.
+      </p>
+    </section>
+
+    <section class="panel">
+      <h2>7) DT Model: Upstream-Safe Thinking</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>Controller Node</h3>
+          <ul>
+            <li>Defines bus-level transport properties.</li>
+            <li>Upstream uses <code>qcom,soundwire-vX.Y.Z</code> style compatible.</li>
+            <li><code>qcom,din-ports</code>/<code>qcom,dout-ports</code>: recognized but deprecated in upstream binding.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Codec Node Under Controller</h3>
+          <ul>
+            <li>Defines codec slave identity (<code>compatible</code>, <code>reg</code>).</li>
+            <li>Defines static mapping (<code>qcom,tx-port-mapping</code> / <code>qcom,rx-port-mapping</code>).</li>
+            <li>Mapping size must match what codec SDW driver consumes.</li>
+          </ul>
+        </div>
+      </div>
+      <pre><code>// Conceptual upstream form
+swrX: soundwire@... {
+  compatible = "qcom,soundwire-v1.6.0";
+
+  codec@0,Y {
+    compatible = "sdw20217010c00";
+    reg = &lt;0 Y&gt;;
+    qcom,tx-port-mapping = &lt;1 2&gt;; // example
+  };
+};</code></pre>
+    </section>
+
+    <section class="panel">
+      <h2>8) Fast Mapping from Logs -> Root Cause Area</h2>
+      <table>
+        <thead>
+          <tr><th>Log pattern</th><th>Layer to inspect first</th><th>Practical action</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>din/dout mismatch with controller</code></td>
+            <td>Controller capability vs DT override</td>
+            <td>Avoid stale forced counts; align bus + codec mapping</td>
+          </tr>
+          <tr>
+            <td><code>link status not disconnected</code></td>
+            <td>Runtime PM / frame-gen transition</td>
+            <td>Trace suspend/resume ordering and pending stream state</td>
+          </tr>
+          <tr>
+            <td><code>soundwire device init timeout -110</code></td>
+            <td>Slave attach or init completion path</td>
+            <td>Check static map semantics and dependency links</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>9) Command Block (Build + Debug)</h2>
+      <pre><code># Build
+aexport() { export ARCH=arm64; export CROSS_COMPILE=aarch64-linux-gnu-; }
+aexport
+make -j$(nproc) defconfig
+make -j$(nproc) Image.gz dtbs modules
+
+# Binding/style checks
+make -j$(nproc) dt_binding_check
+./scripts/checkpatch.pl --strict --no-tree /path/to/0001-*.patch
+
+# SoundWire-focused logs
+dmesg | egrep -i "soundwire|swr|frame_gen|pm4125|codec|timeout|mismatch"</code></pre>
+      <p class="muted">
+        Keep one clean baseline boot log, then compare only the delta after each DTS/mapping change.
+      </p>
+    </section>
+
+    <section class="panel">
+      <h2>10) Minimal Practical Checklist</h2>
+      <ol>
+        <li>Confirm controller node is upstream binding compatible.</li>
+        <li>Confirm codec mapping values match codec SDW driver expectations.</li>
+        <li>Remove deprecated forced counts unless strictly required for hardware quirk.</li>
+        <li>Rebuild DTBs and boot once; capture full dmesg from boot start.</li>
+        <li>Correlate first mismatch log with first timeout log timestamp.</li>
+        <li>Only then tune PM/runtime or reset sequence behavior.</li>
+      </ol>
+      <p>
+        <span class="ok">Good signal:</span> no mismatch logs + stable frame-gen transitions + codec init completes.
+      </p>
+    </section>
+
+    <p class="footer">
+      If you want, next I can add a <strong>port-by-port register table</strong> for your exact board revision
+      (RX port1..5, TX port1..3) with editable fields so you can test alternatives before changing DTS.
+    </p>
+  </div>
+
+  <script>
+    (function () {
+      var btn = document.getElementById('toggleAnim');
+      var paused = false;
+      btn.addEventListener('click', function () {
+        paused = !paused;
+        if (paused) {
+          document.body.classList.add('paused');
+          btn.textContent = 'Resume Animations';
+        } else {
+          document.body.classList.remove('paused');
+          btn.textContent = 'Pause Animations';
+        }
+      });
+
+      var replay = document.getElementById('replayEnum');
+      if (replay) {
+        replay.addEventListener('click', function () {
+          var nodes = document.querySelectorAll('.enum-led, .enum-pulse, .enum-step');
+          nodes.forEach(function (n) {
+            n.style.animation = 'none';
+          });
+          void document.body.offsetWidth;
+          nodes.forEach(function (n) {
+            n.style.animation = '';
+          });
+        });
+      }
+
+      var replaySystem = document.getElementById('replaySystem');
+      if (replaySystem) {
+        replaySystem.addEventListener('click', function () {
+          var nodes = document.querySelectorAll('.sys-dot, .sys-flow, .sys-step');
+          nodes.forEach(function (n) {
+            n.style.animation = 'none';
+          });
+          void document.body.offsetWidth;
+          nodes.forEach(function (n) {
+            n.style.animation = '';
+          });
+        });
+      }
+    })();
+  </script>
+</body>
+</html>

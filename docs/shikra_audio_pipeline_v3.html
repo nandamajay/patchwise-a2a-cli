@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Shikra Audio Pipeline v3 (Clean)</title>
+  <style>
+    :root {
+      --bg: #f1f7ff;
+      --panel: #ffffff;
+      --ink: #0f2442;
+      --muted: #4a5f7f;
+      --line: #d5e1f3;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: linear-gradient(180deg, #e5efff 0%, var(--bg) 260px);
+      color: var(--ink);
+      font-family: "Segoe UI", "Noto Sans", Arial, sans-serif;
+    }
+    .wrap {
+      max-width: 2400px;
+      margin: 0 auto;
+      padding: 14px;
+    }
+    .hero, .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      box-shadow: 0 8px 24px rgba(12, 28, 56, 0.08);
+    }
+    .hero { padding: 14px; margin-bottom: 12px; }
+    .panel { padding: 10px; }
+    h1 { margin: 0 0 6px; font-size: 1.45rem; }
+    p { margin: 4px 0; }
+    .muted { color: var(--muted); }
+    .chips { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+    .chips span {
+      border: 1px solid var(--line);
+      background: #f7fbff;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: .9rem;
+    }
+    .viewer {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: auto;
+      background: #fbfdff;
+      max-height: calc(100vh - 190px);
+    }
+    .viewer img {
+      display: block;
+      width: max-content;
+      min-width: 100%;
+      height: auto;
+      margin: 0 auto;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>Shikra Audio Pipeline v3 (Clean + Organized)</h1>
+      <p class="muted">Structured row-wise architecture with explicit SWR, clocks, resets, GPIO/IRQ, and I2C sideband paths.</p>
+      <div class="chips">
+        <span>SWR: RX_CLK/DATA0/DATA1, TX_CLK/DATA0</span>
+        <span>Reset: swr_audio_cgcr</span>
+        <span>Clocks: mclk/npl/fsgen + core clocks</span>
+        <span>GPIO/IRQ: CODEC_INT, WSA IRQ/PWDN</span>
+        <span>I2C: i2c3 -> wsa885x_i2c@c</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="viewer">
+        <img src="assets/shikra_audio_pipeline_v3.png" alt="Shikra audio pipeline clean diagram" />
+      </div>
+    </section>
+  </div>
+</body>
+</html>

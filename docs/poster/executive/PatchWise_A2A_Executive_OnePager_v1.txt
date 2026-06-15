@@ -1,0 +1,65 @@
+PATCHWISE A2A - EXECUTIVE ONE-PAGER
+
+Purpose
+PatchWise A2A automates patch review cycles using two agents (Builder + Reviewer) with policy gates.
+Goal is faster turnaround, consistent review quality, and reduced manual supervision.
+
+What Was Built (High-Level Blocks)
+1) Intake Block
+- Accepts local patch path, lore URL/msgid, or existing session id.
+
+2) Orchestration Block
+- Runs round-based flow: Builder -> Validation -> Reviewer -> Gate -> Next Round/LGTM.
+- Supports resume and round extension.
+
+3) Quality Gate Block
+- Structured findings validation.
+- LGTM blocked when open findings remain.
+- Reviewer self-consistency guard.
+
+4) Context Continuity Block
+- Prior comments/findings are carried across rounds.
+- Lore review context is mapped and reused.
+
+5) Reporting Block
+- Round summaries and final session report generation.
+- Artifacts for auditability and handoff.
+
+6) Respin/Versioning Block
+- Next patch version generation (vN -> vN+1) after approved flow.
+
+7) Operational Block
+- Worktree lock for concurrent safety.
+- Optional email bridge for remote session actions.
+
+Existing Paths Used (Operational Paths)
+- Session metadata: .a2a/sessions/<session-id>.json
+- Round/session logs: .a2a/logs/<session-id>/
+- Reports: .a2a/reports/<session-id>/
+- HTML session report: .a2a/reports/<session-id>/session-report.html
+- Respin output: .a2a/patches/<session-id>/vN/
+- Worktree lock path: .a2a/locks/worktrees/
+
+Executive Call Flow
+Input -> Session Init -> Builder Round -> Validation Gate -> Reviewer Round -> LGTM Gate
+  - Pass: finalize + report + optional respin
+  - Fail: carry findings forward -> next round
+
+Business Value
+- Lower review cycle time through autonomous iteration.
+- Better governance through evidence-backed findings.
+- Fewer restarts due to persistent session context.
+- Improved cross-team handoff with complete artifacts.
+
+Primary Use Cases
+- Pre-submit kernel patch quality gate.
+- Lore thread review and response preparation.
+- Multi-round technical review without manual babysitting.
+- Session resume after interruption.
+
+Estimated Time Impact (Indicative)
+- Multi-round patch review effort reduction: ~45-65%
+- Context rebuild reduction after interruption: ~70-90%
+- Report packaging reduction: ~65-85%
+
+Generated: 2026-05-08

@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Shikra Audio Pipeline v2</title>
+  <style>
+    :root {
+      --bg: #f2f7ff;
+      --panel: #ffffff;
+      --ink: #0f2442;
+      --muted: #4a5f7f;
+      --line: #d5e1f3;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: linear-gradient(180deg, #e6efff 0%, var(--bg) 260px);
+      color: var(--ink);
+      font-family: "Segoe UI", "Noto Sans", Arial, sans-serif;
+    }
+    .wrap {
+      max-width: 2150px;
+      margin: 0 auto;
+      padding: 14px;
+    }
+    .hero, .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      box-shadow: 0 8px 24px rgba(12, 28, 56, 0.08);
+    }
+    .hero { padding: 14px; margin-bottom: 12px; }
+    .panel { padding: 10px; }
+    h1 { margin: 0 0 6px; font-size: 1.45rem; }
+    p { margin: 4px 0; }
+    .muted { color: var(--muted); }
+    .viewer {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: auto;
+      background: #fbfdff;
+      max-height: calc(100vh - 180px);
+    }
+    .viewer object,
+    .viewer img {
+      display: block;
+      width: max-content;
+      min-width: 100%;
+      height: auto;
+      margin: 0 auto;
+    }
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-top: 8px;
+      font-size: 0.9rem;
+    }
+    .meta span {
+      border: 1px solid var(--line);
+      background: #f7fbff;
+      border-radius: 999px;
+      padding: 4px 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>Shikra Audio Pipeline v2</h1>
+      <p class="muted">
+        Includes LPASS/SWR paths, reset/clock dependencies, GPIO/IRQ control, I2C sideband, codec/amp, and endpoint flow.
+      </p>
+      <div class="meta">
+        <span>SWR interfaces: RX_CLK/DATA0/1, TX_CLK/DATA0</span>
+        <span>Reset: swr_audio_cgcr</span>
+        <span>Clocks: mclk/npl/fsgen + core</span>
+        <span>GPIO/IRQ + I2C sideband</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="viewer">
+        <object data="shikra_audio_pipeline_v2.svg" type="image/svg+xml" aria-label="Shikra audio pipeline diagram">
+          <img src="shikra_audio_pipeline_v2.png" alt="Shikra audio pipeline diagram" />
+        </object>
+      </div>
+    </section>
+  </div>
+</body>
+</html>

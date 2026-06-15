@@ -1,0 +1,119 @@
+digraph SHIKRA_AUDIO_PIPELINE {
+  rankdir=LR;
+  splines=spline;
+  pad="0.25";
+  nodesep="0.45";
+  ranksep="0.9";
+  bgcolor="#f7faff";
+  labelloc="t";
+  label="Shikra Audio Pipeline (LPASS + SoundWire + Codec/Amp + Endpoints)";
+  fontname="Arial";
+  fontsize=26;
+
+  node [shape=box, style="rounded,filled", fillcolor="#ffffff", color="#3a4c66", penwidth=1.8, fontname="Arial", fontsize=12];
+  edge [fontname="Arial", fontsize=10, color="#7084a0", penwidth=1.6, arrowsize=0.8];
+
+  subgraph cluster_host {
+    label="Host + Control";
+    color="#d7e2f3";
+    style="rounded,filled";
+    fillcolor="#ffffff";
+
+    apps [label="Apps Processor\nALSA + ASoC Machine"];
+    clk_rst [label="Clock/Reset Manager\naudiocorecc + LPASSCC", fillcolor="#fff7f7", color="#c86a6a"];
+    macro_clks [label="Macro Clocks\n(mclk, npl, fsgen)", style="rounded,dashed,filled", fillcolor="#ffe7e7", color="#c86a6a"];
+    core_clks [label="Core Clocks\nLPASS fabric + AHB/AXI", style="rounded,dashed,filled", fillcolor="#ffe7e7", color="#c86a6a"];
+  }
+
+  subgraph cluster_lpass {
+    label="LPASS Audio Subsystem (Shikra DTS)";
+    color="#d7e2f3";
+    style="rounded,filled";
+    fillcolor="#ffffff";
+
+    swr1 [label="swr1 @a060000 (RX Master)\n+ rxmacro @A040000\nSpeaker + Headphone playback"];
+    swr0 [label="swr0 @a080000 (VA_TX Master)\n+ vamacro @A078000\nMic capture / VA path"];
+    i2c3 [label="i2c3 sideband control\n-> wsa885x_i2c@c"];
+    gpio_ctl [label="GPIO / IRQ control\nCODEC_INT, WSA_IRQ, WSA_PWDN"];
+  }
+
+  subgraph cluster_phy {
+    label="Board PHY / Net Layer (schematic)";
+    color="#d7e2f3";
+    style="rounded,filled";
+    fillcolor="#ffffff";
+
+    swr_rx_phy [label="SWR_RX_CLK + SWR_RX_DATA0/1\nR40770..R40772 (0R)", fillcolor="#efe8f8", color="#9f86c8"];
+    swr_tx_phy [label="SWR_TX_CLK + SWR_TX_DATA0\nR40773..R40774 (0R)", fillcolor="#efe8f8", color="#9f86c8"];
+    gpio_phy [label="GPIO nets\nCODEC_INT + IRQ/PWDN", fillcolor="#efe8f8", color="#9f86c8"];
+    i2c_phy [label="I2C3 PHY", fillcolor="#efe8f8", color="#9f86c8"];
+  }
+
+  subgraph cluster_ext {
+    label="External Audio Components";
+    color="#d7e2f3";
+    style="rounded,filled";
+    fillcolor="#ffffff";
+
+    pm4125_rx [label="PM4125 Codec RX\n(Headphone playback)", fillcolor="#e8f4e7", color="#8ebb86"];
+    pm4125_tx [label="PM4125 Codec TX\n(Mic ADC / capture)", fillcolor="#e8f4e7", color="#8ebb86"];
+    wsa885x [label="WSA885x Amplifier\n(Smart speaker path)", fillcolor="#e8f4e7", color="#8ebb86"];
+  }
+
+  subgraph cluster_end {
+    label="Endpoints";
+    color="#d7e2f3";
+    style="rounded,filled";
+    fillcolor="#ffffff";
+
+    headphones [label="Headphones\nHPHL / HPHR"];
+    speaker [label="Speaker"];
+    mics [label="Mics\nAnalog + DMIC"];
+  }
+
+  // Keep rows visually aligned by function
+  {rank=same; swr1; swr_rx_phy; pm4125_rx; headphones; speaker}
+  {rank=same; swr0; swr_tx_phy; pm4125_tx; mics}
+  {rank=same; i2c3; i2c_phy; wsa885x}
+  {rank=same; gpio_ctl; gpio_phy}
+
+  // Host/control into LPASS
+  apps -> swr1 [label="audio routes", color="#3b6ea8", fontcolor="#3b6ea8", penwidth=2.2];
+  apps -> swr0 [label="capture routes", color="#3b6ea8", fontcolor="#3b6ea8", penwidth=2.2];
+
+  clk_rst -> swr1 [label="swr_audio_cgcr reset", color="#cf8d1c", fontcolor="#cf8d1c", style=dashed];
+  clk_rst -> swr0 [label="swr_audio_cgcr reset", color="#cf8d1c", fontcolor="#cf8d1c", style=dashed];
+  macro_clks -> swr1 [label="mclk/npl/fsgen", color="#c05d5d", fontcolor="#c05d5d", style=dashed];
+  macro_clks -> swr0 [label="mclk/npl", color="#c05d5d", fontcolor="#c05d5d", style=dashed];
+  core_clks -> swr1 [label="core clocks", color="#c05d5d", fontcolor="#c05d5d", style=dashed];
+  core_clks -> swr0 [label="core clocks", color="#c05d5d", fontcolor="#c05d5d", style=dashed];
+
+  // LPASS to board interfaces
+  swr1 -> swr_rx_phy [label="SoundWire playback + control", color="#3b6ea8", fontcolor="#3b6ea8", penwidth=2.2];
+  swr0 -> swr_tx_phy [label="SoundWire capture + control", color="#3b6ea8", fontcolor="#3b6ea8", penwidth=2.2];
+  i2c3 -> i2c_phy [label="I2C sideband", color="#1b9b7d", fontcolor="#1b9b7d", style=dashed];
+  gpio_ctl -> gpio_phy [label="GPIO/IRQ", color="#8a68b2", fontcolor="#8a68b2", style=dashed];
+
+  // Board to external components
+  swr_rx_phy -> pm4125_rx [label="RX interface", color="#3b6ea8", fontcolor="#3b6ea8", penwidth=2.2];
+  swr_tx_phy -> pm4125_tx [label="TX interface", color="#3b6ea8", fontcolor="#3b6ea8", penwidth=2.2];
+  i2c_phy -> wsa885x [label="amp programming", color="#1b9b7d", fontcolor="#1b9b7d", style=dashed];
+  gpio_phy -> pm4125_rx [label="CODEC_INT", color="#8a68b2", fontcolor="#8a68b2", style=dashed];
+  gpio_phy -> wsa885x [label="IRQ/PWDN", color="#8a68b2", fontcolor="#8a68b2", style=dashed];
+
+  // Components to endpoints
+  pm4125_rx -> headphones [label="HPH L/R", color="#3b6ea8", fontcolor="#3b6ea8", penwidth=2.0];
+  pm4125_tx -> mics [label="ADC/DMIC capture", color="#3b6ea8", fontcolor="#3b6ea8", penwidth=2.0];
+  wsa885x -> speaker [label="speaker output", color="#3b6ea8", fontcolor="#3b6ea8", penwidth=2.0];
+
+  // Legend node
+  legend [
+    shape=note,
+    label="Legend:\nBlue=Audio/SoundWire data path\nRed dashed=Clock path\nOrange dashed=Reset sequencing\nPurple dashed=GPIO/IRQ\nGreen dashed=I2C sideband",
+    fillcolor="#ffffff",
+    color="#9eb0cb",
+    fontsize=10
+  ];
+
+  apps -> legend [style=invis];
+}

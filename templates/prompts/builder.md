@@ -47,6 +47,8 @@ Do not wait for reviewer guidance when risks are visible in the patch.
 - Attribution hygiene for `Suggested-by`:
   - Add only when suggestion is substantive and attributable from prior context (`from`, message-id, quoted suggestion).
   - Do not invent names/emails, and do not add for generic nits, pure acknowledgements, or apply-notice emails.
+  - Do not add `Suggested-by` to broad conversion/refactor patches; either (a) split the suggested sub-change into a focused patch and tag that patch, or (b) keep attribution in cover-letter changelog text without trailer.
+  - Include a scoped rationale sentence in commit message body (example: "`This <specific change> was suggested by <Name <email>>.`"); avoid implying the entire patch was suggested when only one delta was.
   - Keep trailer style/order upstream-consistent.
 - Functional tunable changes (autosuspend delays, vote windows, timeouts) need explicit rationale in commit/cover text.
 - Side effects on related symbols/subsystems.

@@ -1,11 +1,14 @@
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from a2a_cli.main import (
     _collect_post_respin_repair_findings,
     _extract_findings_from_agent_output,
+    _is_infra_applyability_failure,
     _reviewer_verdict_from_text,
+    _run_post_respin_auto_repair,
     _validate_cover_changelog_quality,
     _validate_patchset_artifact_coherence,
     _validate_respin_delta,
@@ -215,6 +218,77 @@ class PostRespinValidationTests(unittest.TestCase):
             "- pending\n"
         )
         self.assertEqual(_reviewer_verdict_from_text(text), "REJECT")
+
+    def test_is_infra_applyability_failure_detects_worktree_write_failure(self) -> None:
+        payload = {
+            "checks": {
+                "applyability": {
+                    "ok": False,
+                    "issues": [
+                        "unable to create temporary apply-check worktree: "
+                        "error: unable to write file drivers/gpu/drm/amd/demo.h"
+                    ],
+                    "results": [{"stage": "worktree_add", "ok": False, "returncode": 128}],
+                }
+            }
+        }
+        self.assertTrue(_is_infra_applyability_failure(payload))
+
+    def test_is_infra_applyability_failure_rejects_patch_content_failure(self) -> None:
+        payload = {
+            "checks": {
+                "applyability": {
+                    "ok": False,
+                    "issues": [
+                        "generated patch series does not apply cleanly with git am on baseline HEAD: "
+                        "error: patch does not apply"
+                    ],
+                    "results": [{"stage": "git_am", "ok": False, "returncode": 1}],
+                }
+            }
+        }
+        self.assertFalse(_is_infra_applyability_failure(payload))
+
+    def test_post_respin_auto_repair_short_circuits_on_infra_applyability_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            sid = "sess-infra-applyability"
+            output = root / "generated" / "v2"
+            output.mkdir(parents=True, exist_ok=True)
+
+            session = {"id": sid, "reviewer_name": "aryabhatta"}
+            next_version_payload = {"output_path": str(output)}
+            initial_validation = {
+                "status": "failed",
+                "checks": {
+                    "applyability": {
+                        "ok": False,
+                        "issues": [
+                            "unable to create temporary apply-check worktree: "
+                            "error: unable to write file drivers/gpu/drm/amd/demo.h"
+                        ],
+                        "results": [{"stage": "worktree_add", "ok": False, "returncode": 128}],
+                    }
+                },
+                "issues": ["applyability: failed"],
+            }
+
+            with mock.patch("a2a_cli.main._run_agent_step", side_effect=AssertionError("must not run")):
+                payload = _run_post_respin_auto_repair(
+                    root,
+                    session,
+                    next_version_payload,
+                    builder_cmd="builder",
+                    reviewer_cmd="reviewer",
+                    initial_validation_payload=initial_validation,
+                )
+
+            self.assertEqual(payload.get("status"), "failed")
+            auto = payload.get("auto_repair", {})
+            self.assertEqual(auto.get("result"), "infra_blocked")
+            self.assertEqual(auto.get("attempts"), 0)
+            self.assertEqual(auto.get("blocked_check"), "applyability")
+            self.assertTrue(any("infrastructure-level" in str(issue) for issue in payload.get("issues", [])))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,63 @@
+PATCHWISE AGENT2AGENT (A2A) REVIEW - ONE PAGE
+
+1) AIM
+PatchWise A2A converts patch review from manual babysitting into autonomous, evidence-driven rounds.
+It improves consistency, preserves context, and blocks unsafe LGTM decisions.
+
+2) CORE IDEA
+- Chanakya (Builder): proposes/fixes patch changes with explicit evidence and residual risk notes.
+- Aryabhatta (Reviewer): performs adversarial review and emits structured findings.
+- Orchestrator (A2A CLI): runs rounds, enforces gates, tracks findings lifecycle, writes reports.
+
+3) BUILDING BLOCKS
+- Session manager: .a2a/sessions/<session-id>.json
+- Findings engine: open/new/resolved/closed tracking
+- Validation gates: schema + optional checkpatch/static checks
+- Lore intake: lore URL/msgid fetch + prior comment mapping
+- Worktree lock: concurrent session safety
+- Report engine: markdown/json/html outputs per round/session
+
+4) CALL FLOW
+Input (local patch / lore URL / msgid / resume session)
+  -> Session init
+  -> Builder round
+  -> Validation gate
+  -> Reviewer round
+  -> LGTM gate
+      -> Pass: LGTM + reports + optional respin (vN -> vN+1)
+      -> Fail: findings injected into next round and continue
+  -> Stop rules: max rounds/time budget/operator decision
+
+5) TASKS COVERED
+- Local patch review loop
+- Lore-based patch series review
+- Prior-thread comment mapping and suggested replies
+- Multi-round fix-and-recheck
+- Resume interrupted sessions
+- Auto-generate next version patchset after LGTM
+
+6) ACHIEVABLE OUTCOMES
+- Reduced manual supervision effort
+- Better reviewer consistency and traceability
+- Faster iteration with preserved history
+- Deterministic evidence bundle for maintainers
+
+7) ESTIMATED TIME SAVING (INDICATIVE)
+- 3-round patch cycle: Manual 120-180 min -> A2A 40-70 min (45-65% saving)
+- Context rebuild after interruption: Manual 20-40 min -> A2A 3-8 min (70-90% saving)
+- Report/evidence packaging: Manual 25-45 min -> A2A 5-12 min (65-85% saving)
+
+8) POSSIBLE USE CASES
+- Kernel patch pre-submit quality gate
+- Lore review triage and response preparation
+- Team handoff using session-id resume
+- Remote review control with email bridge
+- Version-to-version patchset coherence checks
+
+9) COMMAND EXAMPLES
+- a2a loop --task <name> --watch-path /abs/path --max-rounds 3
+- a2a loop --task <name> --lore-url "https://lore.kernel.org/all/<msgid>/" --max-rounds 3
+- a2a loop --session <session-id>
+- ./run.sh <lore-url|msgid|session|path>
+
+Generated: 2026-05-08

@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PatchWise Agent2Agent - One Page Poster</title>
+  <style>
+    @page { size: A4 landscape; margin: 8mm; }
+    :root {
+      --bg-a: #f4f8ff;
+      --bg-b: #eefcf5;
+      --ink: #1d2633;
+      --muted: #4f6078;
+      --line: #d7e4f2;
+      --card: #ffffff;
+      --accent: #0f5f9b;
+      --accent2: #0c8a5a;
+      --warn: #a85609;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "Liberation Sans", "DejaVu Sans", sans-serif;
+      background: linear-gradient(130deg, var(--bg-a), var(--bg-b));
+    }
+    .poster {
+      width: 100%;
+      min-height: 100vh;
+      padding: 10mm;
+    }
+    .head {
+      display: grid;
+      grid-template-columns: 2.3fr 1.2fr;
+      gap: 8mm;
+      margin-bottom: 6mm;
+    }
+    .titlebox {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-left: 8px solid var(--accent);
+      border-radius: 10px;
+      padding: 10px 14px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 30px;
+      line-height: 1.05;
+      letter-spacing: 0.1px;
+    }
+    .subtitle {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.3;
+    }
+    .quick {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 6px;
+    }
+    .pill {
+      border-radius: 999px;
+      background: var(--card);
+      border: 1px solid var(--line);
+      padding: 9px 12px;
+      font-size: 12px;
+      font-weight: 700;
+      text-align: center;
+      color: var(--accent);
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 1.1fr 1.8fr 1.1fr;
+      gap: 7mm;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      margin-bottom: 7px;
+    }
+    .card h2 {
+      margin: 0 0 6px;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.45px;
+      color: var(--accent);
+    }
+    .card p, .card li {
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    ul { margin: 0; padding-left: 17px; }
+    .pipeline {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      margin-bottom: 7px;
+    }
+    .pipeline h2 {
+      margin: 0 0 8px;
+      font-size: 14px;
+      color: var(--accent2);
+      text-transform: uppercase;
+      letter-spacing: 0.45px;
+    }
+    .flow {
+      display: flex;
+      align-items: stretch;
+      gap: 5px;
+      margin-bottom: 6px;
+    }
+    .node {
+      flex: 1;
+      min-height: 44px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 6px;
+      background: #f8fbff;
+      font-size: 11px;
+      line-height: 1.2;
+    }
+    .node strong {
+      display: block;
+      margin-bottom: 2px;
+      color: #17466e;
+      font-size: 11px;
+    }
+    .gate {
+      background: #fff8eb;
+      border-left: 5px solid var(--warn);
+    }
+    .arrow {
+      display: flex;
+      align-items: center;
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--accent2);
+      flex: 0 0 auto;
+      padding: 0 2px;
+    }
+    .timesave {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+      margin-top: 3px;
+    }
+    .timesave th, .timesave td {
+      border: 1px solid #cfdceb;
+      padding: 5px;
+      text-align: left;
+      vertical-align: top;
+    }
+    .timesave th { background: #f2f7ff; }
+    .mono { font-family: "Liberation Mono", "DejaVu Sans Mono", monospace; font-size: 11px; }
+    .foot {
+      margin-top: 4px;
+      font-size: 10px;
+      color: #5a687a;
+      border-top: 1px dashed #c8d5e5;
+      padding-top: 4px;
+      display: flex;
+      justify-content: space-between;
+    }
+  </style>
+</head>
+<body>
+  <div class="poster">
+    <div class="head">
+      <div class="titlebox">
+        <h1>PatchWise Agent2Agent (A2A) Review</h1>
+        <div class="subtitle">Aim: convert patch review from manual babysitting to autonomous, evidence-backed rounds with strict LGTM safety gates and resumable execution.</div>
+      </div>
+      <div class="quick">
+        <div class="pill">Builder: Chanakya</div>
+        <div class="pill">Reviewer: Aryabhatta</div>
+        <div class="pill">Driver: a2a CLI Orchestrator</div>
+      </div>
+    </div>
+
+    <div class="layout">
+      <div>
+        <div class="card">
+          <h2>What A2A Solves</h2>
+          <ul>
+            <li>Stops repeated restart-from-round-1 cycles.</li>
+            <li>Maintains prior findings and round context.</li>
+            <li>Prevents silent/unsafe LGTM decisions.</li>
+            <li>Creates audit trail for every decision.</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <h2>Tasks Covered</h2>
+          <ul>
+            <li>Patch/lore intake and round orchestration.</li>
+            <li>Builder fix generation and patch updates.</li>
+            <li>Reviewer findings with severity and evidence.</li>
+            <li>Validation gates (schema/checkpatch/static).</li>
+            <li>Auto-respin (vN -> vN+1) and reports.</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <h2>Building Blocks</h2>
+          <ul>
+            <li>Session manager (`.a2a/sessions`).</li>
+            <li>Artifact engine (`.a2a/reports`, `.a2a/logs`).</li>
+            <li>Findings lifecycle (open/new/resolved/closed).</li>
+            <li>Worktree lock and concurrency guard.</li>
+            <li>Lore ingestion + prior comment mapping.</li>
+            <li>Email bridge (optional remote operation).</li>
+          </ul>
+        </div>
+      </div>
+
+      <div>
+        <div class="pipeline">
+          <h2>Call Flow</h2>
+          <div class="flow">
+            <div class="node"><strong>1. Input</strong>Local patch path, lore URL/msgid, or existing session.</div>
+            <div class="arrow">→</div>
+            <div class="node"><strong>2. Session Init</strong>Load config, task, round budget, prior context.</div>
+            <div class="arrow">→</div>
+            <div class="node"><strong>3. Builder Round</strong>Apply fixes, explain rationale, publish residual risks.</div>
+          </div>
+          <div class="flow">
+            <div class="node"><strong>4. Validation Gate</strong>Schema + optional checkpatch/static checks.</div>
+            <div class="arrow">→</div>
+            <div class="node"><strong>5. Reviewer Round</strong>Emit structured findings and verdict.</div>
+            <div class="arrow">→</div>
+            <div class="node gate"><strong>6. LGTM Gate</strong>Block if open findings or inconsistent reviewer reasoning.</div>
+          </div>
+          <div class="flow">
+            <div class="node"><strong>7A. Pass</strong>LGTM -> summary + HTML report + optional next-version patch.</div>
+            <div class="arrow">↔</div>
+            <div class="node"><strong>7B. Fail</strong>Inject findings into next round and continue.</div>
+            <div class="arrow">→</div>
+            <div class="node"><strong>8. Stop Rules</strong>Max rounds/time budget/operator stop, then resumable.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Execution Commands</h2>
+          <p class="mono">a2a loop --task &lt;name&gt; --watch-path /abs/path --max-rounds 3</p>
+          <p class="mono">a2a loop --task &lt;name&gt; --lore-url "https://lore.kernel.org/all/&lt;msgid&gt;/"</p>
+          <p class="mono">a2a loop --session &lt;session-id&gt;</p>
+          <p class="mono">./run.sh &lt;lore-url|msgid|session|path&gt;</p>
+        </div>
+      </div>
+
+      <div>
+        <div class="card">
+          <h2>Time Save (Estimated)</h2>
+          <table class="timesave">
+            <tr><th>Workflow</th><th>Manual</th><th>A2A</th><th>Saving</th></tr>
+            <tr><td>3-round patch cycle</td><td>120-180 min</td><td>40-70 min</td><td>45-65%</td></tr>
+            <tr><td>Context rebuild after interruption</td><td>20-40 min</td><td>3-8 min</td><td>70-90%</td></tr>
+            <tr><td>Report + evidence packaging</td><td>25-45 min</td><td>5-12 min</td><td>65-85%</td></tr>
+          </table>
+          <p style="margin-top:6px;font-size:10px;color:#5a6778;">Indicative range based on internal operator workflow observations; actual values depend on patch complexity and tool latency.</p>
+        </div>
+
+        <div class="card">
+          <h2>Achievements</h2>
+          <ul>
+            <li>Autonomous multi-round loop with resume.</li>
+            <li>Findings-gated LGTM enforcement.</li>
+            <li>Session HTML report auto-generation.</li>
+            <li>Lore-driven patch review and respin path.</li>
+            <li>Prior-comments + subsystem scan support.</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <h2>Possible Use Cases</h2>
+          <ul>
+            <li>Kernel patch pre-submit quality gate.</li>
+            <li>Lore review triage and suggested replies.</li>
+            <li>Team handoff: resume from session id.</li>
+            <li>Remote review control via email bridge.</li>
+            <li>Patchset consistency checks across versions.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="foot">
+      <div>PatchWise A2A_CLI | One-page concept poster</div>
+      <div>Generated: 2026-05-08</div>
+    </div>
+  </div>
+</body>
+</html>

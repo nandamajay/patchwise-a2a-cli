@@ -4,8 +4,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from a2a_cli.main import _worktree_lock, _worktree_lock_path
+from a2a_cli.main import _ensure_session_worktrees, _worktree_lock, _worktree_lock_path
 
 
 def _acquire_lock(root_str: str, session: dict, session_id: str, hold_sec: float, queue: mp.Queue) -> None:
@@ -100,6 +101,88 @@ class WorktreeLockingTests(unittest.TestCase):
             self.assertTrue(lock_path.exists())
             lock_payload = json.loads(lock_path.read_text(encoding="utf-8"))
             self.assertEqual(lock_payload.get("session_id"), "sess-lock-2")
+
+    def test_ensure_session_worktrees_recovers_missing_builder(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "repo"
+            repo.mkdir(parents=True, exist_ok=True)
+            builder_path = root / ".a2a" / "worktrees" / "builder"
+            reviewer_path = root / ".a2a" / "worktrees" / "aryabhatta"
+            reviewer_path.mkdir(parents=True, exist_ok=True)
+            (reviewer_path / ".git").write_text("gitdir: /tmp/reviewer\n", encoding="utf-8")
+
+            session = {
+                "id": "sess-test",
+                "repo_path": str(repo),
+                "reviewer_name": "aryabhatta",
+                "branch": "a2a/test-branch",
+                "worktrees": {
+                    "builder": str(builder_path),
+                    "aryabhatta": str(reviewer_path),
+                },
+            }
+
+            with mock.patch("a2a_cli.main._git_ok", return_value=True):
+                with mock.patch("a2a_cli.main._git", return_value="") as git_mock:
+                    updated = _ensure_session_worktrees(root, session)
+
+            self.assertEqual(updated["worktrees"]["builder"], str(builder_path.resolve()))
+            self.assertEqual(git_mock.call_count, 1)
+            git_mock.assert_called_once_with(
+                repo.resolve(),
+                "worktree",
+                "add",
+                "--force",
+                str(builder_path.resolve()),
+                "a2a/test-branch",
+            )
+
+    def test_ensure_session_worktrees_initializes_defaults_and_persists(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "repo"
+            repo.mkdir(parents=True, exist_ok=True)
+            session = {
+                "id": "sess-test",
+                "repo_path": str(repo),
+                "reviewer_name": "aryabhatta",
+                "branch": "a2a/test-branch",
+            }
+
+            with mock.patch("a2a_cli.main._git_ok", return_value=True):
+                with mock.patch("a2a_cli.main._git", return_value="") as git_mock:
+                    with mock.patch("a2a_cli.main._write_session") as write_mock:
+                        updated = _ensure_session_worktrees(root, session)
+
+            builder_path = root / ".a2a" / "worktrees" / "builder"
+            reviewer_path = root / ".a2a" / "worktrees" / "aryabhatta"
+            self.assertEqual(updated["worktrees"]["builder"], str(builder_path.resolve()))
+            self.assertEqual(updated["worktrees"]["aryabhatta"], str(reviewer_path.resolve()))
+            self.assertIn("updated_at", updated)
+            self.assertEqual(git_mock.call_count, 2)
+            git_mock.assert_has_calls(
+                [
+                    mock.call(
+                        repo.resolve(),
+                        "worktree",
+                        "add",
+                        "--force",
+                        str(builder_path.resolve()),
+                        "a2a/test-branch",
+                    ),
+                    mock.call(
+                        repo.resolve(),
+                        "worktree",
+                        "add",
+                        "--force",
+                        "--detach",
+                        str(reviewer_path.resolve()),
+                        "a2a/test-branch",
+                    ),
+                ]
+            )
+            write_mock.assert_called_once_with(root, updated)
 
 
 if __name__ == "__main__":

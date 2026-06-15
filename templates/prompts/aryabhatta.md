@@ -65,6 +65,8 @@ Return LGTM only when all findings are truly closed.
 - Reviewer/maintainer credit hygiene:
   - If a prior actionable maintainer comment clearly suggested a technical change that is now implemented, verify the relevant commit message includes appropriate `Suggested-by: Name <email>` attribution.
   - Do not require `Suggested-by` for generic nits, acknowledgements, or maintainer apply-notice emails.
+  - Flag `Suggested-by` on broad conversion/refactor patches as likely over-scoped unless the suggested change is isolated to a focused patch.
+  - Require scoped rationale in commit body when `Suggested-by` is present; if missing, request either scoped wording or trailer removal.
 - Functional tunable changes (timeouts/delays/votes) must have rationale in commit message or cover letter.
 - Patch-series logical separation and bisect-safe ordering.
 - Cover-letter revision notes quality (`Changes since vN` reflects technical delta).

@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PatchWise A2A Executive One-Pager</title>
+  <style>
+    @page { size: A4; margin: 18mm; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Liberation Sans", Arial, sans-serif;
+      color: #1e2a36;
+      background: #f6f9fc;
+    }
+    .page {
+      max-width: 900px;
+      margin: 24px auto;
+      background: #fff;
+      border: 1px solid #dbe5ef;
+      border-radius: 10px;
+      padding: 22px 26px;
+      box-shadow: 0 2px 10px rgba(15, 41, 71, 0.06);
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 30px;
+      line-height: 1.1;
+      color: #0f4f86;
+    }
+    h2 {
+      margin: 14px 0 6px;
+      font-size: 15px;
+      color: #0f4f86;
+      text-transform: uppercase;
+      letter-spacing: .3px;
+    }
+    p, li {
+      font-size: 14px;
+      line-height: 1.4;
+      margin: 0;
+    }
+    ul {
+      margin: 0;
+      padding-left: 20px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    .card {
+      border: 1px solid #dbe5ef;
+      border-radius: 8px;
+      padding: 10px;
+      background: #fbfdff;
+    }
+    .mono {
+      font-family: "Liberation Mono", "Consolas", monospace;
+      font-size: 12px;
+      background: #f1f6fb;
+      border: 1px solid #d8e4f0;
+      border-radius: 6px;
+      padding: 7px;
+      margin: 5px 0;
+      white-space: pre-wrap;
+    }
+    .flow {
+      border: 1px dashed #9cb8d5;
+      border-radius: 8px;
+      padding: 10px;
+      background: #f8fbff;
+      font-weight: 600;
+      color: #19466e;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 6px;
+      font-size: 13px;
+    }
+    th, td {
+      border: 1px solid #cfdeec;
+      padding: 7px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #eef5fc; }
+    .footer {
+      margin-top: 12px;
+      font-size: 12px;
+      color: #5a6f84;
+      border-top: 1px solid #dbe5ef;
+      padding-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1>PatchWise A2A - Executive One-Pager</h1>
+
+    <h2>Purpose</h2>
+    <p>PatchWise A2A automates patch review cycles using two agents (Builder + Reviewer). The goal is faster turnaround, consistent review quality, and predictable execution.</p>
+
+    <div class="grid" style="margin-top:12px;">
+      <div class="card">
+        <h2 style="margin-top:0;">What Was Built</h2>
+        <ul>
+          <li>Intake block for local patch, lore link/msgid, or session resume.</li>
+          <li>Round orchestration: Builder -> Validation -> Reviewer -> Gate.</li>
+          <li>Quality gates: findings validation + LGTM safety checks.</li>
+          <li>Context continuity: prior findings/comments reused each round.</li>
+          <li>Reporting: per-round and session-level artifacts.</li>
+          <li>Respin support: next version generation (vN -> vN+1).</li>
+          <li>Operational safety: worktree lock and optional email bridge.</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0;">Existing Paths Used</h2>
+        <ul>
+          <li><span class="mono">.a2a/sessions/&lt;session-id&gt;.json</span></li>
+          <li><span class="mono">.a2a/logs/&lt;session-id&gt;/</span></li>
+          <li><span class="mono">.a2a/reports/&lt;session-id&gt;/</span></li>
+          <li><span class="mono">.a2a/reports/&lt;session-id&gt;/session-report.html</span></li>
+          <li><span class="mono">.a2a/patches/&lt;session-id&gt;/vN/</span></li>
+          <li><span class="mono">.a2a/locks/worktrees/</span></li>
+        </ul>
+      </div>
+    </div>
+
+    <h2>Executive Call Flow</h2>
+    <div class="flow">Input -> Session Init -> Builder Round -> Validation Gate -> Reviewer Round -> LGTM Gate -> (Pass: Finalize + Report + Respin) / (Fail: Next Round)</div>
+
+    <div class="grid" style="margin-top:12px;">
+      <div class="card">
+        <h2 style="margin-top:0;">Business Value</h2>
+        <ul>
+          <li>Lower review cycle time through autonomous iteration.</li>
+          <li>Better review consistency and decision clarity.</li>
+          <li>Less rework from persistent session context.</li>
+          <li>Improved handoff with complete artifacts.</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0;">Primary Use Cases</h2>
+        <ul>
+          <li>Pre-submit kernel patch quality gate.</li>
+          <li>Lore review triage and response prep.</li>
+          <li>Session handoff and interruption recovery.</li>
+          <li>Remote control via email bridge.</li>
+          <li>Patchset coherence checks across versions.</li>
+        </ul>
+      </div>
+    </div>
+
+    <h2>Estimated Time Impact (Indicative)</h2>
+    <table>
+      <tr><th>Activity</th><th>Manual</th><th>A2A</th><th>Savings</th></tr>
+      <tr><td>3-round patch cycle</td><td>120-180 min</td><td>40-70 min</td><td>45-65%</td></tr>
+      <tr><td>Context rebuild after interruption</td><td>20-40 min</td><td>3-8 min</td><td>70-90%</td></tr>
+      <tr><td>Report/evidence packaging</td><td>25-45 min</td><td>5-12 min</td><td>65-85%</td></tr>
+    </table>
+
+    <div class="footer">Generated: 2026-05-08</div>
+  </div>
+</body>
+</html>

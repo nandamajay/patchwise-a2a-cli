@@ -173,6 +173,33 @@ class AutoRespinResumeTests(unittest.TestCase):
 
             self.assertEqual(rc, 1)
 
+    def test_returns_failure_when_auto_generation_falls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            session = {"id": "sess-fallback"}
+            fallback_payload = {
+                "status": "ok",
+                "kind": "lore_copy",
+                "output_path": str(root / "out" / "v4"),
+                "fallback_reason": "Source tree has uncommitted changes; aborting respin.",
+            }
+
+            with mock.patch("a2a_cli.main._auto_generate_next_version", return_value=fallback_payload):
+                with mock.patch("a2a_cli.main._run_post_respin_validation") as validate:
+                    with mock.patch("a2a_cli.main._run_post_respin_auto_repair") as repair:
+                        rc = _run_auto_respin_if_requested(
+                            root,
+                            session,
+                            auto_respin=True,
+                            builder_cmd="builder",
+                            reviewer_cmd="reviewer",
+                            skip_if_existing=False,
+                        )
+
+            self.assertEqual(rc, 1)
+            self.assertFalse(validate.called)
+            self.assertFalse(repair.called)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -710,16 +710,24 @@ def _config_path(root: Path) -> Path:
     return root / A2A_DIRNAME / "config.json"
 
 
+def _deep_fill_missing(cfg: dict, defaults: dict) -> bool:
+    changed = False
+    for key, value in defaults.items():
+        if key not in cfg:
+            cfg[key] = value
+            changed = True
+            continue
+        if isinstance(value, dict) and isinstance(cfg.get(key), dict):
+            if _deep_fill_missing(cfg[key], value):
+                changed = True
+    return changed
+
+
 def _load_config(root: Path) -> dict:
     cfg_path = _config_path(root)
     cfg = load_json(cfg_path)
     defaults = default_config()
-    changed = False
-    for key, value in defaults.items():
-        if key in cfg:
-            continue
-        cfg[key] = value
-        changed = True
+    changed = _deep_fill_missing(cfg, defaults)
     if changed:
         dump_json(cfg_path, cfg)
     return cfg
@@ -1932,6 +1940,12 @@ def _generate_watch_copy_fallback(root: Path, session: dict, *, reason: Exceptio
     if not _session_has_lore_message_id(session):
         fallback["kind"] = "watch_copy"
     fallback["fallback_reason"] = str(reason)
+    session_id = str(session.get("id") or "")
+    report_path = _report_dir(root, session_id) / "lore_next_version.json"
+    persisted = dict(fallback)
+    persisted.pop("report", None)
+    dump_json(report_path, persisted)
+    fallback["report"] = str(report_path)
     return fallback
 
 
@@ -3275,6 +3289,54 @@ def _post_respin_check_findings(validation_payload: dict) -> list[dict]:
     return out
 
 
+def _is_infra_applyability_failure(validation_payload: dict) -> bool:
+    checks = validation_payload.get("checks", {}) if isinstance(validation_payload, dict) else {}
+    if not isinstance(checks, dict):
+        return False
+    row = checks.get("applyability")
+    if not isinstance(row, dict):
+        return False
+    if bool(row.get("ok", False)):
+        return False
+
+    for result in row.get("results", []):
+        if not isinstance(result, dict):
+            continue
+        stage = str(result.get("stage") or "").strip().lower()
+        stage_ok = result.get("ok")
+        if stage in {"worktree_add", "worktree_remove"} and stage_ok is False:
+            return True
+
+    issues_raw = row.get("issues", [])
+    issues: list[str] = []
+    if isinstance(issues_raw, list):
+        for item in issues_raw:
+            text = str(item or "").strip()
+            if text:
+                issues.append(text)
+    elif isinstance(issues_raw, str):
+        text = issues_raw.strip()
+        if text:
+            issues.append(text)
+
+    if not issues:
+        return False
+    issue_blob = " ".join(issues).lower()
+    infra_markers = (
+        "unable to create temporary apply-check worktree",
+        "failed to remove temporary apply-check worktree",
+        "unable to write file",
+        "permission denied",
+        "read-only file system",
+        "no space left on device",
+        "disk quota exceeded",
+        "index.lock",
+        "resource temporarily unavailable",
+        "too many open files",
+    )
+    return any(marker in issue_blob for marker in infra_markers)
+
+
 def _collect_post_respin_repair_findings(report_dir: Path, validation_payload: dict) -> list[dict]:
     findings_path = report_dir / "post-respin-findings.json"
     base_findings: list[dict] = []
@@ -3377,6 +3439,24 @@ def _run_post_respin_auto_repair(
             "issues": ["post-respin auto-repair cannot start: reviewer command is empty"],
             "auto_repair": {"enabled": True, "attempts": 0},
         })
+    if _is_infra_applyability_failure(initial_validation_payload):
+        payload = dict(initial_validation_payload) if isinstance(initial_validation_payload, dict) else {}
+        payload["status"] = "failed"
+        issues = payload.get("issues")
+        if not isinstance(issues, list):
+            issues = []
+        issues.append(
+            "post-respin auto-repair skipped: applyability failure is infrastructure-level "
+            "(worktree/filesystem issue) and is not repairable by patch edits"
+        )
+        payload["issues"] = issues
+        payload["auto_repair"] = {
+            "enabled": True,
+            "attempts": 0,
+            "result": "infra_blocked",
+            "blocked_check": "applyability",
+        }
+        return _persist_validation(payload)
 
     repair_round_budget = int(cfg.get("post_respin_repair_max_rounds", 5) or 5)
     if repair_round_budget < 1:
@@ -3470,6 +3550,27 @@ def _run_post_respin_auto_repair(
         )
         _echo(f"Post-respin validation after repair round {attempt}:")
         _echo(json.dumps(latest_validation, indent=2, sort_keys=True))
+        if _is_infra_applyability_failure(latest_validation):
+            payload = dict(latest_validation) if isinstance(latest_validation, dict) else {}
+            payload["status"] = "failed"
+            issues = payload.get("issues")
+            if not isinstance(issues, list):
+                issues = []
+            issues.append(
+                "post-respin auto-repair stopped: applyability failure is infrastructure-level "
+                "(worktree/filesystem issue) and is not repairable by patch edits"
+            )
+            payload["issues"] = issues
+            payload["auto_repair"] = {
+                "enabled": True,
+                "attempts": attempt,
+                "max_rounds_used": current_budget,
+                "max_total_rounds": max_total_rounds,
+                "base_round": base_round,
+                "result": "infra_blocked",
+                "blocked_check": "applyability",
+            }
+            return _persist_validation(payload)
 
         round_findings = _collect_post_respin_repair_findings(report_dir, latest_validation)
         _write_post_respin_repair_findings_seed(root, sid, reviewer_name, repair_round, round_findings)
@@ -3630,6 +3731,11 @@ def _run_auto_respin_if_requested(
             next_version_payload = preexisting_next_payload
             _echo("Reusing existing auto-respin artifacts:")
             _echo(json.dumps(next_version_payload, indent=2, sort_keys=True))
+        fallback_reason = str(next_version_payload.get("fallback_reason") or "").strip()
+        if fallback_reason:
+            _echo("Auto next-version generation fell back from git-respin; stopping before validation.")
+            _echo(f"Fallback reason: {fallback_reason}")
+            return 1
         post_respin_payload = _run_post_respin_validation(
             root,
             session,
