@@ -40,7 +40,7 @@ def test_builder_required_sections_still_enforced() -> None:
     assert '"## residual risks"' in text
 
 
-def test_reviewer_schema_pipeline_unchanged() -> None:
+def test_reviewer_schema_pipeline_uses_local_parser_not_qgenie_schema_flag() -> None:
     text = _read("scripts/agents/reviewer_llm_native.sh")
-    assert '--output-schema "$SCHEMA"' in text
+    assert '--output-schema "$SCHEMA"' not in text
     assert 'json.dumps({"findings": findings}, indent=2)' in text

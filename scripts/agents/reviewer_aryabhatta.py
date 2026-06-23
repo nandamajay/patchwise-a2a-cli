@@ -295,7 +295,19 @@ def comment_to_finding(comment: dict[str, Any], docs: list[PatchDoc]) -> dict[st
     elif "29c02913-25a7-4269-9fa6-6f44c94ccefa" in cid or "resume clocks for gpio access" in subject_l:
         check_ok, evidence, location = check_lpi_crash_risk_split(docs)
     else:
-        evidence = ["No automated checker registered for this prior comment id/subject."]
+        evidence = [
+            "Fallback reviewer has no automated checker for this prior comment id/subject; "
+            "leaving it as a non-blocking advisory instead of inventing an open defect."
+        ]
+        return {
+            "severity": "low",
+            "title": f"Fallback prior comment mapping unavailable: {subject}",
+            "location": location,
+            "evidence": evidence,
+            "required_action": "Use LLM or manual review for final prior-comment closure evidence if needed.",
+            "status": "closed",
+            "source_comment_id": cid,
+        }
 
     status = "closed" if check_ok else "open"
     severity = "low" if check_ok else "high"

@@ -184,7 +184,6 @@ run_qgenie_reviewer() {
       --cd "$WORKDIR" \
       --skip-git-repo-check \
       --full-auto \
-      --output-schema "$SCHEMA" \
       --output-last-message "$OUT_FILE" \
       - < "$PROMPT_FILE"
   else
@@ -192,7 +191,6 @@ run_qgenie_reviewer() {
       --cd "$WORKDIR" \
       --skip-git-repo-check \
       --full-auto \
-      --output-schema "$SCHEMA" \
       --output-last-message "$OUT_FILE" \
       - < "$PROMPT_FILE"
   fi
