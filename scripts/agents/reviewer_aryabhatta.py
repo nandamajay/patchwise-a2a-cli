@@ -279,6 +279,8 @@ def comment_to_finding(comment: dict[str, Any], docs: list[PatchDoc]) -> dict[st
     cid = str(comment.get("id") or "")
     subject = str(comment.get("subject") or "prior review comment")
     subject_l = subject.lower()
+    comment_from = str(comment.get("from") or "").lower()
+    source_kind = str(comment.get("source_kind") or "").lower()
 
     check_ok = False
     evidence: list[str] = []
@@ -295,17 +297,22 @@ def comment_to_finding(comment: dict[str, Any], docs: list[PatchDoc]) -> dict[st
     elif "29c02913-25a7-4269-9fa6-6f44c94ccefa" in cid or "resume clocks for gpio access" in subject_l:
         check_ok, evidence, location = check_lpi_crash_risk_split(docs)
     else:
+        # If the comment is from a real maintainer (not a bot), keep it open
+        # so the session does not silently close without addressing it.
+        is_bot = "sashiko" in comment_from or "bot" in comment_from or source_kind == "sashiko_finding"
+        fallback_status = "closed" if is_bot else "open"
+        fallback_severity = "low" if is_bot else "medium"
         evidence = [
             "Fallback reviewer has no automated checker for this prior comment id/subject; "
             "leaving it as a non-blocking advisory instead of inventing an open defect."
         ]
         return {
-            "severity": "low",
+            "severity": fallback_severity,
             "title": f"Fallback prior comment mapping unavailable: {subject}",
             "location": location,
             "evidence": evidence,
-            "required_action": "Use LLM or manual review for final prior-comment closure evidence if needed.",
-            "status": "closed",
+            "required_action": "Builder must address this maintainer comment or provide closure evidence." if not is_bot else "Use LLM or manual review for final prior-comment closure evidence if needed.",
+            "status": fallback_status,
             "source_comment_id": cid,
         }
 

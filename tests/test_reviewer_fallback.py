@@ -17,21 +17,42 @@ def _load_reviewer_module():
     return module
 
 
-def test_unknown_prior_comment_is_non_blocking_advisory() -> None:
+def test_unknown_maintainer_comment_stays_open() -> None:
     reviewer = _load_reviewer_module()
 
     finding = reviewer.comment_to_finding(
         {
             "id": "prior-msg:unknown@example.com",
             "subject": "Re: [PATCH] subsystem: example review",
+            "from": "maintainer@kernel.org",
+            "source_kind": "seed",
+        },
+        [],
+    )
+
+    assert finding["status"] == "open"
+    assert finding["severity"] == "medium"
+    assert finding["source_comment_id"] == "prior-msg:unknown@example.com"
+    assert "Fallback prior comment mapping unavailable" in finding["title"]
+    assert "non-blocking advisory" in " ".join(finding["evidence"])
+    assert "Builder must address" in finding["required_action"]
+
+
+def test_unknown_bot_comment_auto_closes() -> None:
+    reviewer = _load_reviewer_module()
+
+    finding = reviewer.comment_to_finding(
+        {
+            "id": "sashiko:12345:1",
+            "subject": "Sashiko finding - some check",
+            "from": "sashiko-bot",
+            "source_kind": "sashiko_finding",
         },
         [],
     )
 
     assert finding["status"] == "closed"
     assert finding["severity"] == "low"
-    assert finding["source_comment_id"] == "prior-msg:unknown@example.com"
-    assert "Fallback prior comment mapping unavailable" in finding["title"]
     assert "non-blocking advisory" in " ".join(finding["evidence"])
 
 
