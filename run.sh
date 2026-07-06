@@ -35,6 +35,7 @@ Options:
   --gerrit-change <ref>      Gerrit change source (URL, change number, or Change-Id)
   --gerrit-base-url <url>    Gerrit base URL for non-URL --gerrit-change values
   --kernel-workspace <path>  Kernel repo path; runs 'a2a prepare --repo <path> --force' before loop/watch
+  --kernel-path <path>       Kernel source path for patch apply validation (default: managed singleton)
   --prepare-branch <name>    Branch for 'a2a prepare' when --kernel-workspace is used
   --builder-cmd <cmd>        Override builder command
   --reviewer-cmd <cmd>       Override reviewer command
@@ -322,6 +323,7 @@ GITHUB_PR=""
 GERRIT_CHANGE=""
 GERRIT_BASE_URL=""
 KERNEL_WORKSPACE=""
+KERNEL_PATH=""
 PREPARE_BRANCH_OVERRIDE=""
 BUILDER_CMD=""
 REVIEWER_CMD=""
@@ -406,6 +408,11 @@ while (($#)); do
     --kernel-workspace)
       (($# >= 2)) || die "--kernel-workspace requires a value"
       KERNEL_WORKSPACE="$2"
+      shift 2
+      ;;
+    --kernel-path)
+      (($# >= 2)) || die "--kernel-path requires a value"
+      KERNEL_PATH="$2"
       shift 2
       ;;
     --prepare-branch)
@@ -765,6 +772,9 @@ if [[ -n "$MAX_ITERATIONS" ]]; then
 fi
 if [[ -n "$BUILDER_CMD" ]]; then
   CMD+=(--builder-cmd "$BUILDER_CMD")
+fi
+if [[ -n "$KERNEL_PATH" ]]; then
+  CMD+=(--kernel-path "$(resolve_path "$KERNEL_PATH")")
 fi
 if [[ -n "$REVIEWER_CMD" ]]; then
   CMD+=(--reviewer-cmd "$REVIEWER_CMD")

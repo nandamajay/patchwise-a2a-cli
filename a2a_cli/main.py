@@ -26,6 +26,7 @@ from .adapters.shell_adapter import run_shell_command
 from .config import A2A_DIRNAME, default_config, default_state, dump_json, load_json
 from .email_bridge import run_bridge_loop
 from .email_notify import send_email as send_notification_email
+from .kernel_manager import prepare_kernel_with_patches
 from .prior_review import (
     augment_findings_with_prior_comments,
     classify_prior_comment,
@@ -5863,6 +5864,26 @@ def _run_agent_step(root: Path, session: dict, role: str, command: str, round_no
     else:
         cwd = Path(worktrees.get(reviewer_name, session["repo_path"]))
 
+    # Ensure kernel has patches applied for builder (first round only)
+    if role == "builder" and round_no == 1:
+        watch_path_raw = str(session.get("watch_path") or "").strip()
+        kernel_path_override = str(session.get("kernel_path") or "").strip() or None
+        if watch_path_raw and Path(watch_path_raw).is_dir():
+            patch_files = sorted(Path(watch_path_raw).glob("*.patch"))
+            patch_files = [p for p in patch_files if not p.name.startswith("0000-")]
+            if patch_files:
+                kernel_result = prepare_kernel_with_patches(
+                    root, patch_files, kernel_path_override=kernel_path_override
+                )
+                if kernel_result["ok"]:
+                    # Update builder cwd to the kernel where patches are applied
+                    resolved_kernel = Path(kernel_result["kernel_path"])
+                    if resolved_kernel.exists() and role == "builder":
+                        cwd = resolved_kernel
+                        _echo(f"  Builder will work on: {cwd}")
+                else:
+                    _echo(f"  WARNING: Patches do not apply cleanly: {kernel_result.get('conflict_detail', '')[:200]}")
+
     logs_dir = root / A2A_DIRNAME / "logs" / str(session["id"])
     logs_dir.mkdir(parents=True, exist_ok=True)
     log_path = logs_dir / f"{_round_basename(round_no, role)}.log"
@@ -7391,6 +7412,7 @@ def _start_session(
         "reviewer_name": reviewer_name,
         "repo_path": prep["repo_path"],
         "branch": prep["branch"],
+        "kernel_path": "",
         "worktrees": prep["worktrees"],
         "rounds": [],
         "builder_command": builder_command,
@@ -8146,6 +8168,28 @@ def cmd_loop(args: argparse.Namespace) -> int:
             }
             _echo(f"Lore source message-id: {fetched_msgid}")
             _echo(f"Lore patch series fetched to: {watch_path}")
+
+            # --- Managed kernel: apply patches on fresh base ---
+            kernel_path_arg = getattr(args, "kernel_path", None)
+            patch_files = sorted(Path(watch_path).glob("*.patch"))
+            # Exclude cover letter
+            patch_files = [p for p in patch_files if not p.name.startswith("0000-")]
+            if patch_files:
+                _echo("Preparing kernel and applying patches...")
+                kernel_result = prepare_kernel_with_patches(
+                    root, patch_files, kernel_path_override=kernel_path_arg
+                )
+                if kernel_result["ok"]:
+                    tag_info = f" (base: {kernel_result['tag']})" if kernel_result.get("tag") else ""
+                    _echo(f"Patches applied successfully on {kernel_result['kernel_path']}{tag_info}")
+                    _echo(f"  Applied: {kernel_result['applied_count']}/{kernel_result['total_patches']}")
+                    if kernel_result.get("already_applied_reset"):
+                        _echo("  (stale patches detected and reset before re-apply)")
+                else:
+                    _echo(f"FATAL: Patches do not apply cleanly.")
+                    _echo(f"  Detail: {kernel_result.get('conflict_detail', 'unknown')}")
+                    _echo("  Fix the patches or provide a compatible --kernel-path.")
+                    return 1
         elif github_pr:
             if args.session:
                 _echo("GitHub PR source flags are only supported for new sessions (no --session).")
@@ -8294,6 +8338,10 @@ def cmd_loop(args: argparse.Namespace) -> int:
                 source_context=source_context,
             )
             sid = str(session["id"])
+            kernel_path_arg = getattr(args, "kernel_path", None)
+            if kernel_path_arg:
+                session["kernel_path"] = kernel_path_arg
+                _write_session(root, session)
             _echo(f"Started session: {sid}")
             _echo(
                 render_session_header(
@@ -9592,6 +9640,10 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="After LGTM, auto-generate next patch version (defaults to enabled for lore input).",
+    )
+    p_loop.add_argument(
+        "--kernel-path",
+        help="Kernel source path for patch apply validation. If omitted, uses managed singleton.",
     )
     p_loop.set_defaults(func=cmd_loop)
 
